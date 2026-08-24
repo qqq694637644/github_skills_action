@@ -215,6 +215,7 @@ class RuntimeTests(unittest.TestCase):
             {
                 "loadSkills",
                 "readSkillContent",
+                "prepareWorkspace",
                 "workspaceCommand",
                 "workspaceInspect",
                 "workspaceSearch",

@@ -30,47 +30,6 @@ T = TypeVar("T")
 _TERMINAL_STATES = {"succeeded", "failed", "timed_out", "canceled", "interrupted"}
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
-_BLOCKED_ALWAYS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bgh\s+auth\b", re.IGNORECASE), "GitHub CLI authentication is not allowed."),
-    (re.compile(r"\bgh\s+secret\b", re.IGNORECASE), "GitHub secret operations are not allowed."),
-    (
-        re.compile(r"\bGet-ChildItem\s+Env:", re.IGNORECASE),
-        "Enumerating process environment variables is not allowed.",
-    ),
-    (
-        re.compile(r"\bGet-Content\s+\$env:", re.IGNORECASE),
-        "Reading environment variables as files is not allowed.",
-    ),
-    (re.compile(r"\bssh\b", re.IGNORECASE), "ssh is not allowed from workspaceCommand."),
-    (re.compile(r"\bscp\b", re.IGNORECASE), "scp is not allowed from workspaceCommand."),
-]
-_NETWORK_BLOCKED: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bInvoke-WebRequest\b", re.IGNORECASE), "Network downloads are disabled."),
-    (re.compile(r"\bInvoke-RestMethod\b", re.IGNORECASE), "Network requests are disabled."),
-    (re.compile(r"\bcurl\b", re.IGNORECASE), "curl is disabled when network is not allowed."),
-    (re.compile(r"\bwget\b", re.IGNORECASE), "wget is disabled when network is not allowed."),
-]
-_ENV_ALLOWLIST = {
-    "PATH",
-    "Path",
-    "HOME",
-    "USERPROFILE",
-    "TMPDIR",
-    "TEMP",
-    "TMP",
-    "LANG",
-    "LC_ALL",
-    "SYSTEMROOT",
-    "COMSPEC",
-    "PATHEXT",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PSModulePath",
-    "TERM",
-}
-_SENSITIVE_ENV_FRAGMENTS = ("TOKEN", "SECRET", "PRIVATE_KEY", "PASSWORD", "CREDENTIAL")
-
-
 @dataclass(frozen=True)
 class OperationSettings:
     root: Path
@@ -79,7 +38,6 @@ class OperationSettings:
     max_timeout_seconds: int = 3600
     default_output_bytes: int = 1_000_000
     max_output_bytes: int = 10_000_000
-    allow_network: bool = False
     kill_grace_seconds: int = 5
     reader_grace_seconds: int = 2
     shutdown_seconds: int = 10
@@ -258,12 +216,12 @@ class WorkspaceOperationManager:
     async def start(
         self,
         *,
+        workspace_id: str,
         workspace_root: Path,
         idempotency_key: str,
         script: str,
         timeout_seconds: int | None,
         max_output_bytes: int | None,
-        allow_network: bool,
         plain_output: bool,
         utf8_output: bool,
     ) -> dict[str, Any]:
@@ -281,17 +239,12 @@ class WorkspaceOperationManager:
                 f"max_output_bytes exceeds {self.settings.max_output_bytes}.",
                 status_code=422,
             )
-        _validate_script(
-            script,
-            allow_network=allow_network,
-            server_allow_network=self.settings.allow_network,
-        )
         request_payload = {
+            "workspace_id": workspace_id,
             "root": str(workspace_root),
             "script": script,
             "timeout_seconds": timeout,
             "max_output_bytes": output_limit,
-            "allow_network": allow_network,
             "plain_output": plain_output,
             "utf8_output": utf8_output,
         }
@@ -310,6 +263,7 @@ class WorkspaceOperationManager:
             deadline_at = (datetime.now(UTC) + timedelta(seconds=timeout)).isoformat()
             record: dict[str, Any] = {
                 "operation_id": operation_id,
+                "workspace_id": workspace_id,
                 "idempotency_key": idempotency_key,
                 "request_hash": request_hash,
                 "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest(),
@@ -596,7 +550,7 @@ class WorkspaceOperationManager:
         ]
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         preexec_fn = getattr(os, "setsid", None) if os.name != "nt" else None
-        process_env = _sanitized_environment()
+        process_env = os.environ.copy()
         process_env["GATEWAY_JOB_READY_FILE"] = str(ready_path)
         try:
             job = await self._create_job_before_deadline(runtime)
@@ -873,44 +827,6 @@ def _build_pwsh_script(script: str, *, plain_output: bool, utf8_output: bool) ->
             ]
         )
     return "\n".join([*prelude, script]) if prelude else script
-
-
-def _validate_script(script: str, *, allow_network: bool, server_allow_network: bool) -> None:
-    for pattern, message in _BLOCKED_ALWAYS:
-        if pattern.search(script):
-            raise WorkspaceToolError("WORKSPACE_SCRIPT_REJECTED", message, status_code=403)
-    if allow_network and not server_allow_network:
-        raise WorkspaceToolError(
-            "WORKSPACE_SCRIPT_REJECTED",
-            "Network access is disabled by server configuration.",
-            status_code=403,
-        )
-    if not allow_network:
-        for pattern, message in _NETWORK_BLOCKED:
-            if pattern.search(script):
-                raise WorkspaceToolError("WORKSPACE_SCRIPT_REJECTED", message, status_code=403)
-
-
-def _sanitized_environment() -> dict[str, str]:
-    clean: dict[str, str] = {}
-    for key, value in os.environ.items():
-        upper = key.upper()
-        if key not in _ENV_ALLOWLIST and upper not in _ENV_ALLOWLIST:
-            continue
-        if any(fragment in upper for fragment in _SENSITIVE_ENV_FRAGMENTS):
-            continue
-        clean[key] = value
-    clean.update(
-        {
-            "GIT_TERMINAL_PROMPT": "0",
-            "GCM_INTERACTIVE": "Never",
-            "GITHUB_TOKEN": "",
-            "GH_TOKEN": "",
-            "GITHUB_APP_PRIVATE_KEY": "",
-            "GPT_ACTION_SECRET": "",
-        }
-    )
-    return clean
 
 
 async def _terminate_process_tree(

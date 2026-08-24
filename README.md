@@ -16,12 +16,33 @@ Skill Temple 把 Codex 的 Skill 思路适配到 Custom GPT Actions：
 | --- | --- | --- |
 | `loadSkills` | `POST /v1/skills/load` | 按精确 `skill_id` 加载完整 `SKILL.md` |
 | `readSkillContent` | `POST /v1/skills/read` | 读取选中 Skill 内的引用文件 |
+| `prepareWorkspace` | `POST /v1/workspace/prepare` | 创建或复用持久 workspace |
 | `workspaceInspect` | `POST /v1/workspace/inspect` | 查看目录、搜索结果和文件片段 |
 | `workspaceSearch` | `POST /v1/workspace/search` | 使用 ripgrep 搜索工作区 |
 | `workspaceReadFiles` | `POST /v1/workspace/read-files` | 读取工作区文件 |
 | `workspaceWriteFile` | `POST /v1/workspace/write-file` | 创建或覆盖文本文件 |
 | `workspaceApplyPatch` | `POST /v1/workspace/apply-patch` | 应用多文件文本补丁 |
 | `workspaceCommand` | `POST /v1/workspace/command` | 异步运行 PowerShell 7 命令 |
+
+## Workspace 模型
+
+`WORKSPACE_ROOT` 是持久 workspace 的容器目录，而不是单个项目目录。`prepareWorkspace` 根据 `idempotency_key` 创建稳定的 `ws_*` 目录；再次使用同一个 key 会复用原目录，也可以直接传已有 `workspace_id` 继续工作。
+
+Workspace 本身不理解 GitHub、repo、branch、PR 或 CI，也不会 clone 仓库。模型在 workspace 中直接通过 `workspaceCommand` 使用 `git`、`gh`、Python、构建工具或其他宿主 CLI：
+
+```powershell
+gh repo clone qqq694637644/project .
+git switch main
+git fetch origin
+git switch feature/example
+gh pr view 123
+```
+
+同一个 workspace 可以长期复用并自由切换 branch，也可以同时放多个仓库。不同任务需要隔离状态时创建不同的 workspace。
+
+除 `workspaceCommand(action="start")` 外，文件类 Workspace Actions 都要求显式 `workspace_id`；命令启动后，`get`、`logs`、`cancel` 使用全局唯一 `operation_id` 即可。operation 的 timeout、日志、取消、进程树终止、持久状态和 idempotency 机制保持独立于 workspace 生命周期。
+
+`workspaceCommand` 是宿主权限下的原生 PowerShell：后端不检查命令字符串、不区分网络命令，也不清洗子进程环境。实际权限边界就是运行服务的操作系统账户以及该账户已经配置的 CLI/凭据。
 
 ## Skill 目录
 
@@ -165,10 +186,9 @@ SKILL_TEMPLE_SERVER_URL=https://skills.example.com
 SKILL_TEMPLE_SKILLS_DIR=C:/path/to/project/skills
 SKILL_TEMPLE_BEARER_TOKEN=replace-with-a-long-random-secret
 SKILL_TEMPLE_OPENAPI_OUTPUT=openapi.json
-WORKSPACE_ROOT=C:/path/to/project/workspace
+WORKSPACE_ROOT=C:/path/to/persistent/workspaces
 WORKSPACE_PWSH_PATH=pwsh
 WORKSPACE_OPERATION_ROOT=C:/path/to/project/.runtime/workspace-operations
-WORKSPACE_ALLOW_NETWORK=false
 WORKSPACE_COMMAND_TIMEOUT_SECONDS=120
 WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS=3600
 WORKSPACE_COMMAND_OUTPUT_BYTES=1000000

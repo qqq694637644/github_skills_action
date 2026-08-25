@@ -73,6 +73,28 @@ class WorkspaceActionsTests(unittest.TestCase):
             "WORKSPACE_ROOT_NOT_CONFIGURED",
         )
 
+    def test_workspace_root_file_is_structured_invalid_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            bad_root = temp_root / "workspace-root"
+            bad_root.write_text("not a directory", encoding="utf-8")
+            environment = {
+                "WORKSPACE_ROOT": str(bad_root),
+                "WORKSPACE_OPERATION_ROOT": str(temp_root / ".operations"),
+            }
+            with patch.dict(os.environ, environment, clear=False):
+                client = TestClient(create_app())
+                response = client.post(
+                    "/v1/workspace/prepare",
+                    json={"idempotency_key": "invalid-root-file"},
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["detail"]["error"]["code"],
+            "WORKSPACE_ROOT_INVALID",
+        )
+
     def test_prepare_workspace_is_idempotent_and_multiple_workspaces_are_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

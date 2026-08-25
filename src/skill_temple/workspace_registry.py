@@ -22,7 +22,20 @@ class WorkspaceRegistry:
                 status_code=503,
             )
         root = Path(value).expanduser().resolve()
-        root.mkdir(parents=True, exist_ok=True)
+        if root.exists() and not root.is_dir():
+            raise WorkspaceToolError(
+                "WORKSPACE_ROOT_INVALID",
+                f"WORKSPACE_ROOT is not a directory: {root}",
+                status_code=503,
+            )
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise WorkspaceToolError(
+                "WORKSPACE_ROOT_INVALID",
+                f"WORKSPACE_ROOT could not be prepared: {root}: {exc}",
+                status_code=503,
+            ) from exc
         if not root.is_dir():
             raise WorkspaceToolError(
                 "WORKSPACE_ROOT_INVALID",

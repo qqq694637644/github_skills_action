@@ -15,6 +15,27 @@ class WorkspaceModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class WorkspaceScopedModel(WorkspaceModel):
+    workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{16}$")
+
+
+class PrepareWorkspaceRequest(WorkspaceModel):
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
+    workspace_id: str | None = Field(default=None, pattern=r"^ws_[0-9a-f]{16}$")
+
+    @model_validator(mode="after")
+    def validate_prepare_fields(self) -> PrepareWorkspaceRequest:
+        if self.workspace_id is None and self.idempotency_key is None:
+            raise ValueError("idempotency_key is required when creating a workspace")
+        return self
+
+
+class PrepareWorkspaceResponse(WorkspaceModel):
+    workspace_id: str
+    created: bool
+    empty: bool
+
+
 class ChangedFile(WorkspaceModel):
     path: str
     operation: str
@@ -37,7 +58,7 @@ class WorkspaceFileContent(WorkspaceModel):
     error: str | None = None
 
 
-class WorkspaceReadFilesRequest(WorkspaceModel):
+class WorkspaceReadFilesRequest(WorkspaceScopedModel):
     paths: list[str] = Field(min_length=1, max_length=50)
     start_line: int = Field(default=1, ge=1)
     max_lines: int = Field(default=200, ge=1, le=5000)
@@ -58,7 +79,7 @@ class WorkspaceSearchMatch(WorkspaceModel):
     snippet: str | None = None
 
 
-class WorkspaceSearchRequest(WorkspaceModel):
+class WorkspaceSearchRequest(WorkspaceScopedModel):
     query: str = Field(min_length=1, max_length=500)
     regex: bool = False
     case_sensitive: bool = False
@@ -83,7 +104,7 @@ class WorkspaceTreeEntry(WorkspaceModel):
     bytes: int | None = None
 
 
-class WorkspaceInspectRequest(WorkspaceModel):
+class WorkspaceInspectRequest(WorkspaceScopedModel):
     paths: list[str] = Field(default_factory=lambda: ["."], min_length=1, max_length=50)
     queries: list[str] = Field(default_factory=list, max_length=10)
     max_depth: int = Field(default=2, ge=1, le=10)
@@ -112,7 +133,7 @@ class WorkspaceInspectResponse(WorkspaceModel):
     truncated: bool = False
 
 
-class WorkspaceWriteFileRequest(WorkspaceModel):
+class WorkspaceWriteFileRequest(WorkspaceScopedModel):
     path: str = Field(min_length=1, max_length=500)
     content: str
     mode: Literal["create_only", "overwrite", "overwrite_if_sha256_matches"] = "create_only"
@@ -135,7 +156,7 @@ class WorkspaceWriteFileResponse(WorkspaceModel):
     diff_stat: str
 
 
-class WorkspaceApplyPatchRequest(WorkspaceModel):
+class WorkspaceApplyPatchRequest(WorkspaceScopedModel):
     patch: str = Field(min_length=1)
     dry_run: bool = False
     allow_delete: bool = False
@@ -152,6 +173,7 @@ class WorkspaceApplyPatchResponse(WorkspaceModel):
 
 class WorkspaceOperationSummary(WorkspaceModel):
     operation_id: str
+    workspace_id: str | None = None
     script_sha256: str
     script_summary: str
     state: Literal["running", "succeeded", "failed", "timed_out", "canceled", "interrupted"]
@@ -175,10 +197,10 @@ class WorkspaceCommandRequest(WorkspaceModel):
         description="Command action. Fields not used by the selected action are ignored."
     )
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
+    workspace_id: str | None = Field(default=None, pattern=r"^ws_[0-9a-f]{16}$")
     script: str | None = Field(default=None, min_length=1, max_length=20000)
     timeout_seconds: int | None = Field(default=None, ge=1)
     max_output_bytes: int | None = Field(default=None, ge=1)
-    allow_network: bool = False
     plain_output: bool = False
     utf8_output: bool = True
     operation_id: str | None = Field(default=None, pattern=r"^op_[0-9a-f]{16}$")
@@ -197,6 +219,7 @@ class WorkspaceCommandRequest(WorkspaceModel):
                 name
                 for name, value in (
                     ("idempotency_key", self.idempotency_key),
+                    ("workspace_id", self.workspace_id),
                     ("script", self.script),
                 )
                 if value is None
@@ -240,26 +263,50 @@ def register_workspace_actions(app: FastAPI) -> None:
     app.router.add_event_handler("shutdown", service.shutdown)
 
     @app.post(
+        "/v1/workspace/prepare",
+        operation_id="prepareWorkspace",
+        response_model=PrepareWorkspaceResponse,
+        summary="Create or reuse a persistent workspace.",
+        description=(
+            "Create an empty persistent workspace, or verify and reuse an existing workspace_id. "
+            "The workspace is only a persistent working directory; repo and branch state are "
+            "unmanaged."
+        ),
+        openapi_extra={"x-openai-isConsequential": False},
+    )
+    async def prepare_workspace(request: PrepareWorkspaceRequest) -> PrepareWorkspaceResponse:
+        try:
+            return PrepareWorkspaceResponse.model_validate(
+                await service.prepare_workspace(**request.model_dump())
+            )
+        except WorkspaceToolError as exc:
+            _raise_http(exc)
+
+    @app.post(
         "/v1/workspace/command",
         operation_id="workspaceCommand",
         response_model=WorkspaceCommandResponse,
         summary="Start or manage a PowerShell workspace command.",
         description=(
             "Start, inspect, read logs from, list, or cancel an asynchronous pwsh 7 "
-            "command running in WORKSPACE_ROOT."
+            "command. start requires workspace_id; get/logs/cancel use operation_id."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
     async def workspace_command(request: WorkspaceCommandRequest) -> WorkspaceCommandResponse:
         try:
             if request.action == "start":
-                assert request.idempotency_key is not None and request.script is not None
+                assert (
+                    request.idempotency_key is not None
+                    and request.workspace_id is not None
+                    and request.script is not None
+                )
                 operation = await service.command_start(
                     idempotency_key=request.idempotency_key,
+                    workspace_id=request.workspace_id,
                     script=request.script,
                     timeout_seconds=request.timeout_seconds,
                     max_output_bytes=request.max_output_bytes,
-                    allow_network=request.allow_network,
                     plain_output=request.plain_output,
                     utf8_output=request.utf8_output,
                 )
@@ -295,7 +342,7 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceInspectResponse,
         summary="Inspect workspace tree, search matches, and file snippets.",
         description=(
-            "Inspect paths under WORKSPACE_ROOT, search with ripgrep, and read bounded "
+            "Inspect paths under workspace_id, search with ripgrep, and read bounded "
             "snippets from matching UTF-8 files."
         ),
         openapi_extra={"x-openai-isConsequential": False},
@@ -333,7 +380,7 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceReadFilesResponse,
         summary="Read multiple UTF-8 workspace files with line numbers.",
         description=(
-            "Read selected files from WORKSPACE_ROOT with line numbers, hashes, metadata, "
+            "Read selected files from workspace_id with line numbers, hashes, metadata, "
             "and response truncation limits."
         ),
         openapi_extra={"x-openai-isConsequential": False},

@@ -24,6 +24,7 @@ from .workspace_patch import (
     snapshot_files,
     target_path,
 )
+from .workspace_registry import WorkspaceRegistry
 
 _DEFAULT_OUTPUT_BYTES = 200_000
 _DEFAULT_FILE_BYTES = 100_000
@@ -39,34 +40,30 @@ class LocalWorkspaceService:
     def __init__(self) -> None:
         self._operations: WorkspaceOperationManager | None = None
         self._operations_root: Path | None = None
+        self._registry = WorkspaceRegistry()
 
-    def root(self) -> Path:
-        value = env_value_from_environment_or_dotenv("WORKSPACE_ROOT")
-        if not value:
-            raise WorkspaceToolError(
-                "WORKSPACE_ROOT_NOT_CONFIGURED",
-                "WORKSPACE_ROOT is not configured in the environment or .env file.",
-                status_code=503,
-            )
-        root = Path(value).expanduser().resolve()
-        if not root.exists() or not root.is_dir():
-            raise WorkspaceToolError(
-                "WORKSPACE_ROOT_INVALID",
-                f"WORKSPACE_ROOT does not exist or is not a directory: {root}",
-                status_code=503,
-            )
-        return root
+    def root(self, workspace_id: str) -> Path:
+        return self._registry.resolve(workspace_id)
+
+    async def prepare_workspace(
+        self, *, idempotency_key: str | None, workspace_id: str | None
+    ) -> dict[str, object]:
+        return self._registry.prepare(
+            idempotency_key=idempotency_key,
+            workspace_id=workspace_id,
+        )
 
     async def read_files(
         self,
         *,
+        workspace_id: str,
         paths: list[str],
         start_line: int,
         max_lines: int,
         max_bytes_per_file: int | None,
         max_bytes: int | None,
     ) -> dict[str, Any]:
-        root = self.root()
+        root = self.root(workspace_id)
         file_budget = max_bytes_per_file or _DEFAULT_FILE_BYTES
         response_budget = max_bytes or _DEFAULT_OUTPUT_BYTES
         files = [
@@ -85,6 +82,7 @@ class LocalWorkspaceService:
     async def search(
         self,
         *,
+        workspace_id: str,
         query: str,
         regex: bool,
         case_sensitive: bool,
@@ -93,7 +91,7 @@ class LocalWorkspaceService:
         max_matches: int,
         max_bytes: int | None,
     ) -> dict[str, Any]:
-        root = self.root()
+        root = self.root(workspace_id)
         response_budget = max_bytes or _DEFAULT_OUTPUT_BYTES
         return await self._search_workspace(
             root,
@@ -109,6 +107,7 @@ class LocalWorkspaceService:
     async def inspect(
         self,
         *,
+        workspace_id: str,
         paths: list[str],
         queries: list[str],
         max_depth: int,
@@ -120,7 +119,7 @@ class LocalWorkspaceService:
         max_bytes_per_file: int | None,
         max_bytes: int | None,
     ) -> dict[str, Any]:
-        root = self.root()
+        root = self.root(workspace_id)
         file_budget = max_bytes_per_file or _DEFAULT_FILE_BYTES
         response_budget = max_bytes or _DEFAULT_OUTPUT_BYTES
         tree, tree_truncated = self._tree_entries(
@@ -177,6 +176,7 @@ class LocalWorkspaceService:
     async def write_file(
         self,
         *,
+        workspace_id: str,
         path: str,
         content: str,
         mode: str,
@@ -185,7 +185,7 @@ class LocalWorkspaceService:
         dry_run: bool,
         max_bytes: int | None,
     ) -> dict[str, Any]:
-        root = self.root()
+        root = self.root(workspace_id)
         resolved = target_path(root, path)
         previous_bytes: bytes | None = None
         if resolved.exists():
@@ -257,13 +257,14 @@ class LocalWorkspaceService:
     async def apply_patch(
         self,
         *,
+        workspace_id: str,
         patch: str,
         dry_run: bool,
         allow_delete: bool,
         max_changed_files: int | None,
         max_patch_bytes: int | None,
     ) -> dict[str, Any]:
-        root = self.root()
+        root = self.root(workspace_id)
         payload = patch.encode("utf-8")
         assert_payload_size(
             payload, max_bytes=max_patch_bytes or _DEFAULT_PATCH_BYTES, label="Patch"
@@ -291,10 +292,10 @@ class LocalWorkspaceService:
             "diff_stat": diff_stat,
         }
 
-    async def command_start(self, **kwargs: Any) -> dict[str, Any]:
-        root = self.root()
+    async def command_start(self, *, workspace_id: str, **kwargs: Any) -> dict[str, Any]:
+        root = self.root(workspace_id)
         manager = self._operation_manager()
-        return await manager.start(workspace_root=root, **kwargs)
+        return await manager.start(workspace_id=workspace_id, workspace_root=root, **kwargs)
 
     async def command_get(self, operation_id: str) -> dict[str, Any]:
         return await self._operation_manager().get(operation_id)
@@ -328,7 +329,6 @@ class LocalWorkspaceService:
                     max_timeout_seconds=_env_int("WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS", 3600),
                     default_output_bytes=_env_int("WORKSPACE_COMMAND_OUTPUT_BYTES", 1_000_000),
                     max_output_bytes=_env_int("WORKSPACE_COMMAND_MAX_OUTPUT_BYTES", 10_000_000),
-                    allow_network=_env_bool("WORKSPACE_ALLOW_NETWORK", False),
                 )
             )
             self._operations_root = runtime_root
@@ -754,10 +754,3 @@ def _env_int(name: str, default: int) -> int:
         raise WorkspaceToolError(
             "WORKSPACE_CONFIG_INVALID", f"{name} must be an integer.", status_code=503
         ) from exc
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = env_value_from_environment_or_dotenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}

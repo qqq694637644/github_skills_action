@@ -47,6 +47,16 @@ def _close_client(client: TestClient) -> None:
     client._workspace_environment_patch.stop()  # type: ignore[attr-defined]
 
 
+def _prepare_workspace(client: TestClient, root: Path, key: str) -> tuple[str, Path]:
+    response = client.post(
+        "/v1/workspace/prepare",
+        json={"idempotency_key": key},
+    )
+    assert response.status_code == 200, response.text
+    workspace_id = str(response.json()["workspace_id"])
+    return workspace_id, root / workspace_id
+
+
 async def _wait_terminal(
     manager: WorkspaceOperationManager,
     operation_id: str,
@@ -65,16 +75,18 @@ async def _wait_terminal(
 def test_write_and_patch_dry_run_never_touch_disk_or_existing_empty_directories() -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
-        existing_dir = root / "existing-empty"
+        client = _client(root)
+        workspace_id, workspace_root = _prepare_workspace(client, root, "dry-run-regression")
+        existing_dir = workspace_root / "existing-empty"
         existing_dir.mkdir()
-        existing_file = root / "alpha.txt"
+        existing_file = workspace_root / "alpha.txt"
         existing_file.write_text("one\ntwo\n", encoding="utf-8")
         before = existing_file.stat()
-        client = _client(root)
         try:
             write = client.post(
                 "/v1/workspace/write-file",
                 json={
+                    "workspace_id": workspace_id,
                     "path": "existing-empty/new.txt",
                     "content": "content\n",
                     "mode": "create_only",
@@ -89,6 +101,7 @@ def test_write_and_patch_dry_run_never_touch_disk_or_existing_empty_directories(
             patch_response = client.post(
                 "/v1/workspace/apply-patch",
                 json={
+                    "workspace_id": workspace_id,
                     "dry_run": True,
                     "patch": (
                         "*** Begin Patch\n"
@@ -118,14 +131,16 @@ def test_write_and_patch_dry_run_never_touch_disk_or_existing_empty_directories(
 def test_patch_context_failure_is_detected_before_any_file_is_written() -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
-        target = root / "alpha.txt"
+        client = _client(root)
+        workspace_id, workspace_root = _prepare_workspace(client, root, "patch-context-regression")
+        target = workspace_root / "alpha.txt"
         target.write_text("one\ntwo\n", encoding="utf-8")
         before = target.stat()
-        client = _client(root)
         try:
             response = client.post(
                 "/v1/workspace/apply-patch",
                 json={
+                    "workspace_id": workspace_id,
                     "patch": (
                         "*** Begin Patch\n"
                         "*** Update File: alpha.txt\n"
@@ -327,12 +342,20 @@ def test_newline_only_change_has_nonzero_line_counts() -> None:
 def test_read_files_returns_next_start_line_when_truncated() -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
-        (root / "alpha.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
         client = _client(root)
+        workspace_id, workspace_root = _prepare_workspace(
+            client, root, "read-truncation-regression"
+        )
+        (workspace_root / "alpha.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
         try:
             response = client.post(
                 "/v1/workspace/read-files",
-                json={"paths": ["alpha.txt"], "start_line": 1, "max_lines": 2},
+                json={
+                    "workspace_id": workspace_id,
+                    "paths": ["alpha.txt"],
+                    "start_line": 1,
+                    "max_lines": 2,
+                },
             )
             assert response.status_code == 200
             assert response.json()["files"][0]["next_start_line"] == 3
@@ -344,15 +367,17 @@ def test_read_files_returns_next_start_line_when_truncated() -> None:
 def test_search_regex_case_sensitive_no_match_and_bounded_output() -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
-        (root / "alpha.txt").write_text(
+        client = _client(root)
+        workspace_id, workspace_root = _prepare_workspace(client, root, "search-regression")
+        (workspace_root / "alpha.txt").write_text(
             "Needle 123\nneedle 456\n" + "needle many\n" * 500,
             encoding="utf-8",
         )
-        client = _client(root)
         try:
             regex = client.post(
                 "/v1/workspace/search",
                 json={
+                    "workspace_id": workspace_id,
                     "query": "Needle [0-9]+",
                     "regex": True,
                     "case_sensitive": True,
@@ -366,6 +391,7 @@ def test_search_regex_case_sensitive_no_match_and_bounded_output() -> None:
             no_match = client.post(
                 "/v1/workspace/search",
                 json={
+                    "workspace_id": workspace_id,
                     "query": "NEEDLE",
                     "case_sensitive": True,
                     "paths": ["alpha.txt"],
@@ -377,6 +403,7 @@ def test_search_regex_case_sensitive_no_match_and_bounded_output() -> None:
             bounded = client.post(
                 "/v1/workspace/search",
                 json={
+                    "workspace_id": workspace_id,
                     "query": "needle",
                     "paths": ["alpha.txt"],
                     "max_matches": 1000,
@@ -414,12 +441,12 @@ def test_initial_operation_state_write_failure_rolls_back_all_indexes() -> None:
             with patch.object(manager, "_write_record", side_effect=OSError("disk full")):
                 with pytest.raises(OSError, match="disk full"):
                     await manager.start(
+                        workspace_id="ws_0000000000000000",
                         workspace_root=root,
                         idempotency_key="state-write-failure",
                         script="Write-Output unreachable",
                         timeout_seconds=10,
                         max_output_bytes=20_000,
-                        allow_network=False,
                         plain_output=True,
                         utf8_output=True,
                     )
@@ -461,12 +488,12 @@ def test_command_startup_uses_end_to_end_deadline() -> None:
                 ),
             ):
                 operation = await manager.start(
+                    workspace_id="ws_0000000000000000",
                     workspace_root=root,
                     idempotency_key="startup-timeout",
                     script="Write-Output unreachable",
                     timeout_seconds=0.05,
                     max_output_bytes=20_000,
-                    allow_network=False,
                     plain_output=True,
                     utf8_output=True,
                 )
@@ -512,11 +539,13 @@ def test_command_failed_and_same_idempotency_key_allows_different_request() -> N
         client = _client(root, Path(operations))
         try:
             with client:
+                workspace_id, _ = _prepare_workspace(client, root, "command-regression")
                 started = client.post(
                     "/v1/workspace/command",
                     json={
                         "action": "start",
                         "idempotency_key": "failed-command-key",
+                        "workspace_id": workspace_id,
                         "script": "exit 7",
                         "timeout_seconds": 10,
                     },
@@ -543,6 +572,7 @@ def test_command_failed_and_same_idempotency_key_allows_different_request() -> N
                     json={
                         "action": "start",
                         "idempotency_key": "failed-command-key",
+                        "workspace_id": workspace_id,
                         "script": "Write-Output different",
                         "timeout_seconds": 10,
                     },

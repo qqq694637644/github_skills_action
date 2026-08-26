@@ -30,7 +30,7 @@
 
 ### 搜索
 
-- 未知工作区或未知项目结构优先用 `workspaceInspect`；其中 `queries` 只支持大小写不敏感的 literal 文本，不是正则表达式。
+- 未知工作区或未知项目结构优先用 `workspaceInspect`；其中 `queries` 只支持大小写不敏感的 literal 文本，不是正则表达式。单次最多 10 个 query；超过时先去重或合并，仍超过则拆分调用。
 - 已知要搜索的文本、名称或模式时用 `workspaceSearch`。默认 `regex=false` 为 literal 搜索；需要 ripgrep 默认正则引擎时显式设置 `regex=true`。
 - `workspaceSearch.paths` 和 `workspaceInspect.paths` 必须是已经存在的实际 workspace 路径，不是 glob pattern。
 - Workspace 搜索 Action 只暴露 schema 中的 ripgrep 能力；需要 PCRE2、glob/type、multiline 或其他未暴露的高级 `rg` 参数时，通过 `workspaceCommand` 直接运行 `rg`。

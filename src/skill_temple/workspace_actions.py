@@ -144,7 +144,7 @@ class WorkspaceInspectRequest(WorkspaceScopedModel):
         default_factory=list,
         max_length=10,
         description=(
-            "Literal case-insensitive search strings used during inspection. Regular "
+            "Up to 10 literal case-insensitive search strings used during inspection. Regular "
             "expressions are not supported here; use workspaceSearch with regex=true instead."
         ),
     )

@@ -70,7 +70,9 @@ class WorkspaceActionsTests(unittest.TestCase):
         self.assertIn("PCRE2", search["regex"]["description"])
         self.assertIn("--ignore-case", search["case_sensitive"]["description"])
         self.assertIn("not glob patterns", search["paths"]["description"])
-        self.assertIn("Literal case-insensitive", inspect["queries"]["description"])
+        self.assertIn("literal case-insensitive", inspect["queries"]["description"])
+        self.assertIn("Up to 10", inspect["queries"]["description"])
+        self.assertEqual(inspect["queries"]["maxItems"], 10)
         self.assertIn("not supported", inspect["queries"]["description"])
         self.assertIn("not glob patterns", inspect["paths"]["description"])
         self.assertIn("all results", search_response["truncated"]["description"])
@@ -229,6 +231,16 @@ class WorkspaceActionsTests(unittest.TestCase):
             self.assertTrue(any(item["path"] == "src/alpha.py" for item in body["tree"]))
             self.assertEqual(body["searches"][0]["match_count"], 1)
             self.assertEqual(body["files"][0]["path"], "src/alpha.py")
+
+            too_many_queries = client.post(
+                "/v1/workspace/inspect",
+                json={
+                    "workspace_id": workspace_id,
+                    "paths": ["src"],
+                    "queries": [f"query-{index}" for index in range(11)],
+                },
+            )
+            self.assertEqual(too_many_queries.status_code, 422)
 
             literal_inspect = client.post(
                 "/v1/workspace/inspect",

@@ -80,10 +80,31 @@ class WorkspaceSearchMatch(WorkspaceModel):
 
 
 class WorkspaceSearchRequest(WorkspaceScopedModel):
-    query: str = Field(min_length=1, max_length=500)
-    regex: bool = False
-    case_sensitive: bool = False
-    paths: list[str] = Field(default_factory=lambda: ["."], min_length=1, max_length=50)
+    query: str = Field(
+        min_length=1,
+        max_length=500,
+        description="Literal text or ripgrep default-regex pattern to search for.",
+    )
+    regex: bool = Field(
+        default=False,
+        description=(
+            "False uses ripgrep --fixed-strings. True uses ripgrep's default regular-expression "
+            "engine; PCRE2-specific syntax is not enabled by this Action."
+        ),
+    )
+    case_sensitive: bool = Field(
+        default=False,
+        description="False adds ripgrep --ignore-case; true preserves case sensitivity.",
+    )
+    paths: list[str] = Field(
+        default_factory=lambda: ["."],
+        min_length=1,
+        max_length=50,
+        description=(
+            "Existing workspace file or directory paths to search. Values are literal paths, "
+            "not glob patterns."
+        ),
+    )
     context_lines: int = Field(default=2, ge=0, le=20)
     max_matches: int = Field(default=100, ge=1, le=1000)
     max_bytes: int | None = Field(default=None, ge=1024)
@@ -94,7 +115,12 @@ class WorkspaceSearchResponse(WorkspaceModel):
     engine: Literal["ripgrep"]
     matches: list[WorkspaceSearchMatch]
     match_count: int
-    truncated: bool = False
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "True when match-count or response-byte limits prevented returning all results."
+        ),
+    )
 
 
 class WorkspaceTreeEntry(WorkspaceModel):
@@ -105,8 +131,23 @@ class WorkspaceTreeEntry(WorkspaceModel):
 
 
 class WorkspaceInspectRequest(WorkspaceScopedModel):
-    paths: list[str] = Field(default_factory=lambda: ["."], min_length=1, max_length=50)
-    queries: list[str] = Field(default_factory=list, max_length=10)
+    paths: list[str] = Field(
+        default_factory=lambda: ["."],
+        min_length=1,
+        max_length=50,
+        description=(
+            "Existing workspace file or directory paths to inspect. Values are literal paths, "
+            "not glob patterns."
+        ),
+    )
+    queries: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description=(
+            "Literal case-insensitive search strings used during inspection. Regular "
+            "expressions are not supported here; use workspaceSearch with regex=true instead."
+        ),
+    )
     max_depth: int = Field(default=2, ge=1, le=10)
     max_tree_entries: int = Field(default=200, ge=1, le=5000)
     context_lines: int = Field(default=2, ge=0, le=20)
@@ -122,7 +163,12 @@ class WorkspaceInspectSearchResult(WorkspaceModel):
     engine: Literal["ripgrep"]
     matches: list[WorkspaceSearchMatch]
     match_count: int
-    truncated: bool = False
+    truncated: bool = Field(
+        default=False,
+        description=(
+            "True when match-count or response-byte limits prevented returning all results."
+        ),
+    )
 
 
 class WorkspaceInspectResponse(WorkspaceModel):
@@ -130,7 +176,10 @@ class WorkspaceInspectResponse(WorkspaceModel):
     tree_truncated: bool = False
     searches: list[WorkspaceInspectSearchResult] = Field(default_factory=list)
     files: list[WorkspaceFileContent] = Field(default_factory=list)
-    truncated: bool = False
+    truncated: bool = Field(
+        default=False,
+        description="True when any bounded inspect section was truncated.",
+    )
 
 
 class WorkspaceWriteFileRequest(WorkspaceScopedModel):

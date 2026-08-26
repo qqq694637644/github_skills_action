@@ -60,6 +60,23 @@ class WorkspaceActionsTests(unittest.TestCase):
                 self.assertIs(operation["x-openai-isConsequential"], False)
                 self.assertLessEqual(len(operation.get("description", "")), 300)
 
+    def test_openapi_documents_workspace_search_contract(self) -> None:
+        schema = create_app().openapi()["components"]["schemas"]
+        search = schema["WorkspaceSearchRequest"]["properties"]
+        inspect = schema["WorkspaceInspectRequest"]["properties"]
+        search_response = schema["WorkspaceSearchResponse"]["properties"]
+
+        self.assertIn("--fixed-strings", search["regex"]["description"])
+        self.assertIn("PCRE2", search["regex"]["description"])
+        self.assertIn("--ignore-case", search["case_sensitive"]["description"])
+        self.assertIn("not glob patterns", search["paths"]["description"])
+        self.assertIn("literal case-insensitive", inspect["queries"]["description"])
+        self.assertIn("Up to 10", inspect["queries"]["description"])
+        self.assertEqual(inspect["queries"]["maxItems"], 10)
+        self.assertIn("not supported", inspect["queries"]["description"])
+        self.assertIn("not glob patterns", inspect["paths"]["description"])
+        self.assertIn("all results", search_response["truncated"]["description"])
+
     def test_missing_workspace_root_is_structured(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             client = TestClient(create_app())
@@ -214,6 +231,51 @@ class WorkspaceActionsTests(unittest.TestCase):
             self.assertTrue(any(item["path"] == "src/alpha.py" for item in body["tree"]))
             self.assertEqual(body["searches"][0]["match_count"], 1)
             self.assertEqual(body["files"][0]["path"], "src/alpha.py")
+
+            too_many_queries = client.post(
+                "/v1/workspace/inspect",
+                json={
+                    "workspace_id": workspace_id,
+                    "paths": ["src"],
+                    "queries": [f"query-{index}" for index in range(11)],
+                },
+            )
+            self.assertEqual(too_many_queries.status_code, 422)
+
+            literal_inspect = client.post(
+                "/v1/workspace/inspect",
+                json={
+                    "workspace_id": workspace_id,
+                    "paths": ["src"],
+                    "queries": ["Needle.*value"],
+                    "max_read_files": 0,
+                },
+            )
+            self.assertEqual(literal_inspect.status_code, 200, literal_inspect.text)
+            self.assertEqual(literal_inspect.json()["searches"][0]["match_count"], 0)
+
+            regex_search = client.post(
+                "/v1/workspace/search",
+                json={
+                    "workspace_id": workspace_id,
+                    "query": "Needle.*value",
+                    "regex": True,
+                    "case_sensitive": True,
+                    "paths": ["src"],
+                },
+            )
+            self.assertEqual(regex_search.status_code, 200, regex_search.text)
+            self.assertEqual(regex_search.json()["match_count"], 1)
+
+            glob_path = client.post(
+                "/v1/workspace/search",
+                json={
+                    "workspace_id": workspace_id,
+                    "query": "Needle",
+                    "paths": ["src/*.py"],
+                },
+            )
+            self.assertEqual(glob_path.status_code, 404)
 
     def test_write_file_modes_hash_line_endings_and_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

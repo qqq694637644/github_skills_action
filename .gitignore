@@ -21,3 +21,5 @@ venv/
 .env
 .env.*
 !.env.example
+openapi.json
+data/

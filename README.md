@@ -318,7 +318,7 @@ gh auth login --hostname github.com --git-protocol https --web
 仅供本机验证时：
 
 ```powershell
-skill-temple --host 127.0.0.1 --port 8765
+skill-temple --host 127.0.0.1 --port 8012
 ```
 
 如果需要让反向代理、容器网络或其他主机访问，可以监听所有网卡：
@@ -379,3 +379,12 @@ skill-temple-build-openapi --output .runtime/openapi.json
 ```
 
 测试覆盖：Skill 扫描、目录生成、精确加载、Codex 风格上下文、引用路径发现、安全读取、Bearer Token、调试控制台、评测工具、OpenAPI 生成和 Workspace Actions。
+
+
+永久保存PAT
+$pat = Read-Host "输入 GitHub PAT" -MaskInput
+$pat | gh auth login --hostname github.com --with-token
+Remove-Variable pat
+
+gh auth setup-git
+gh auth status

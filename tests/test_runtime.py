@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from skill_temple.app import create_app
+from skill_temple.action_logging import command_for_log
+from skill_temple.app import create_app, main
 from skill_temple.evals import evaluate_file
 from skill_temple.openapi_builder import build_openapi
 from skill_temple.prompt_builder import build_instructions, render_catalog
@@ -56,7 +58,7 @@ class RuntimeTests(unittest.TestCase):
     def test_packaged_example_is_discovered(self) -> None:
         runtime = load_runtime()
         skills = runtime.list_skills()["skills"]
-        example = next(item for item in skills if item["skill_id"] == "idapython")
+        example = next(item for item in skills if item["skill_id"] == "github-maintenance")
         self.assertEqual(example["entrypoint"], "SKILL.md")
         self.assertTrue(example["content_hash"].startswith("sha256:"))
 
@@ -203,6 +205,33 @@ class RuntimeTests(unittest.TestCase):
                     output_path=temp / "out.md",
                 )
 
+    def test_prompt_keeps_lean_workspace_routing_contract(self) -> None:
+        prompt = Path("GPT_ACTION_PROMPT.md").read_text(encoding="utf-8")
+
+        self.assertIn("## 授权边界", prompt)
+        self.assertIn("## Skills", prompt)
+        self.assertIn("**Discover**", prompt)
+        self.assertIn("**Locate**", prompt)
+        self.assertIn("**Read**", prompt)
+        self.assertIn("`workspaceSearch`", prompt)
+        self.assertIn("主要工具", prompt)
+        self.assertLess(len(prompt.encode("utf-8")), 6_000)
+        for tool_detail in ["regex=false", "case_sensitive", "PCRE2", "max_matches"]:
+            with self.subTest(tool_detail=tool_detail):
+                self.assertNotIn(tool_detail, prompt)
+
+    def test_github_maintenance_owns_task_specific_routes(self) -> None:
+        skill = Path(
+            "src/skill_temple/example_skills/github-maintenance/SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("`gpt/<short-topic>`", skill)
+        self.assertIn("### 只读调查", skill)
+        self.assertIn("### 继续已有 PR", skill)
+        self.assertIn("push 后重新读取 PR head 和 checks", skill)
+        self.assertIn("只有真实 run/check 成功时才能报告 CI 通过", skill)
+        self.assertIn("只在用户明确要求时执行", skill)
+
     def test_openapi_exposes_only_skill_loading_and_workspace_actions(self) -> None:
         schema = create_app().openapi()
         operation_ids = {
@@ -239,25 +268,74 @@ class RuntimeTests(unittest.TestCase):
                 "x-forwarded-host": "skills.example.com",
             },
         )
-        loaded = client.post("/v1/skills/load", json={"skill_ids": ["idapython"]})
+        loaded = client.post("/v1/skills/load", json={"skill_ids": ["github-maintenance"]})
         read = client.post(
             "/v1/skills/read",
-            json={"skill_id": "idapython", "path": "SKILL.md", "max_lines": 5},
+            json={"skill_id": "github-maintenance", "path": "SKILL.md", "max_lines": 5},
         )
         missing = client.post("/v1/skills/load", json={"skill_ids": ["missing"]})
         unsafe = client.post(
             "/v1/skills/read",
-            json={"skill_id": "idapython", "path": "../README.md"},
+            json={"skill_id": "github-maintenance", "path": "../README.md"},
         )
 
         self.assertEqual(schema.json()["servers"], [{"url": "https://skills.example.com"}])
         self.assertEqual(loaded.status_code, 200)
-        self.assertEqual(loaded.json()["loaded_skill_ids"], ["idapython"])
+        self.assertEqual(loaded.json()["loaded_skill_ids"], ["github-maintenance"])
         self.assertEqual(read.status_code, 200)
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(missing.json()["detail"]["error"]["code"], "skill_not_found")
         self.assertEqual(unsafe.status_code, 404)
         self.assertEqual(unsafe.json()["detail"]["error"]["code"], "unsafe_or_missing_path")
+
+    def test_skill_actions_emit_key_input_logs(self) -> None:
+        client = TestClient(create_app())
+
+        with self.assertLogs("uvicorn.error", level="INFO") as captured:
+            loaded = client.post(
+                "/v1/skills/load",
+                json={"skill_ids": ["github-maintenance"]},
+            )
+            read = client.post(
+                "/v1/skills/read",
+                json={
+                    "skill_id": "github-maintenance",
+                    "path": "references/actions.md",
+                    "start_line": 3,
+                    "max_lines": 7,
+                },
+            )
+
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(read.status_code, 200)
+        logs = "\n".join(captured.output)
+        self.assertIn('ACTION loadSkills skill_ids=["github-maintenance"]', logs)
+        self.assertIn("ACTION readSkillContent", logs)
+        self.assertIn('path="references/actions.md"', logs)
+        self.assertIn("requested_start_line=3", logs)
+        self.assertIn("requested_max_lines=7", logs)
+
+    def test_command_log_text_is_bounded_and_redacts_common_secrets(self) -> None:
+        script = (
+            "$env:GH_TOKEN='super-secret'; gh api user --token another-secret; "
+            "Write-Output ok"
+        )
+
+        rendered = command_for_log(script)
+
+        self.assertIn("$env:GH_TOKEN=<redacted>", rendered)
+        self.assertIn("--token <redacted>", rendered)
+        self.assertNotIn("super-secret", rendered)
+        self.assertNotIn("another-secret", rendered)
+
+    def test_cli_disables_uvicorn_access_log_by_default(self) -> None:
+        with (
+            patch.object(sys, "argv", ["skill-temple"]),
+            patch("uvicorn.run") as run,
+        ):
+            main()
+
+        self.assertIs(run.call_args.kwargs["access_log"], False)
 
     def test_optional_bearer_auth_and_debug_console(self) -> None:
         with patch.dict(
@@ -268,19 +346,19 @@ class RuntimeTests(unittest.TestCase):
             client = TestClient(create_app())
             console = client.get("/console")
             unauthorized = client.post(
-                "/v1/skills/load", json={"skill_ids": ["idapython"]}
+                "/v1/skills/load", json={"skill_ids": ["github-maintenance"]}
             )
             console_unauthorized = client.post(
-                "/console/load", json={"skill_ids": ["idapython"]}
+                "/console/load", json={"skill_ids": ["github-maintenance"]}
             )
             authorized = client.post(
                 "/v1/skills/load",
-                json={"skill_ids": ["idapython"]},
+                json={"skill_ids": ["github-maintenance"]},
                 headers={"Authorization": "Bearer secret-token"},
             )
             console_authorized = client.post(
                 "/console/read",
-                json={"skill_id": "idapython", "path": "SKILL.md"},
+                json={"skill_id": "github-maintenance", "path": "SKILL.md"},
                 headers={"Authorization": "Bearer secret-token"},
             )
             schema = client.get("/openapi.json").json()
@@ -319,7 +397,7 @@ class RuntimeTests(unittest.TestCase):
     def test_skill_eval_file_passes(self) -> None:
         report = evaluate_file(Path("evals/skill_queries.jsonl"))
         self.assertEqual(report["failed"], 0)
-        self.assertEqual(report["passed"], 2)
+        self.assertEqual(report["passed"], 4)
 
 
 if __name__ == "__main__":

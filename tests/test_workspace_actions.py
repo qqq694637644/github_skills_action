@@ -65,6 +65,7 @@ class WorkspaceActionsTests(unittest.TestCase):
         schema = openapi["components"]["schemas"]
         search = schema["WorkspaceSearchRequest"]["properties"]
         inspect = schema["WorkspaceInspectRequest"]["properties"]
+        read = schema["WorkspaceReadFilesRequest"]["properties"]
         search_response = schema["WorkspaceSearchResponse"]["properties"]
 
         self.assertIn("--fixed-strings", search["regex"]["description"])
@@ -76,18 +77,23 @@ class WorkspaceActionsTests(unittest.TestCase):
         self.assertEqual(inspect["queries"]["maxItems"], 10)
         self.assertIn("not supported", inspect["queries"]["description"])
         self.assertIn("not glob patterns", inspect["paths"]["description"])
+        self.assertIn("Exact existing file paths", read["paths"]["description"])
         self.assertIn("all results", search_response["truncated"]["description"])
         self.assertIn(
-            "Primary locator",
+            "exact file or impact location",
             openapi["paths"]["/v1/workspace/search"]["post"]["description"],
         )
         self.assertIn(
-            "first-pass discovery",
+            "First pass",
             openapi["paths"]["/v1/workspace/inspect"]["post"]["description"],
         )
         self.assertIn(
-            "not for repo-wide discovery",
+            "use inspect/search for discovery",
             openapi["paths"]["/v1/workspace/read-files"]["post"]["description"],
+        )
+        self.assertIn(
+            "terminal state",
+            openapi["paths"]["/v1/workspace/command"]["post"]["description"],
         )
 
     def test_missing_workspace_root_is_structured(self) -> None:

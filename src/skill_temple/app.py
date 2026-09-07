@@ -31,13 +31,13 @@ class StrictRequest(BaseModel):
 class LoadSkillsRequest(StrictRequest):
     skill_ids: list[str] = Field(
         min_length=1,
-        description="Exact Skill ids selected from the catalog in GPT Instructions.",
+        description="Exact Skill ids already selected from the catalog in GPT Instructions.",
     )
 
 
 class ReadSkillContentRequest(StrictRequest):
     skill_id: str
-    path: str = Field(description="Relative path inside the selected Skill.")
+    path: str = Field(description="Exact relative path referenced by the selected Skill.")
     start_line: int = Field(default=1, ge=1)
     max_lines: int = Field(default=2000, ge=1, le=10000)
 
@@ -258,7 +258,10 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
         response_model=LoadSkillsResponse,
         responses={404: {"model": StructuredErrorResponse}},
         summary="Load selected Skills.",
-        description="Load complete SKILL.md files for exact ids selected from GPT Instructions.",
+        description=(
+            "Load complete SKILL.md files after the prompt catalog selects matching ids. "
+            "Returns each Skill body, content hash, and referenced_paths for optional follow-up."
+        ),
         openapi_extra={"x-openai-isConsequential": False},
     )
     def load_skills(request: LoadSkillsRequest) -> LoadSkillsResponse:
@@ -275,8 +278,11 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
         operation_id="readSkillContent",
         response_model=ReadSkillContentResponse,
         responses={404: {"model": StructuredErrorResponse}},
-        summary="Read a file from a selected Skill.",
-        description="Read an exact relative path from a selected Skill with line continuation.",
+        summary="Read a referenced file from a selected Skill.",
+        description=(
+            "Read an exact referenced path from a loaded Skill. Returns bounded content, hash, "
+            "truncated, and next_start_line for continuation."
+        ),
         openapi_extra={"x-openai-isConsequential": False},
     )
     def read_skill_content(request: ReadSkillContentRequest) -> ReadSkillContentResponse:
@@ -318,11 +324,11 @@ CONSOLE_HTML = """<!doctype html>
   <label for="token">Bearer token</label>
   <input id="token" type="password" placeholder="Optional token from .env" />
   <label for="skill_ids">Skill ids, comma-separated</label>
-  <input id="skill_ids" value="idapython" />
+  <input id="skill_ids" value="github-maintenance" />
   <div class="row">
     <div>
       <label for="read_skill_id">Read skill id</label>
-      <input id="read_skill_id" value="idapython" />
+      <input id="read_skill_id" value="github-maintenance" />
     </div>
     <div>
       <label for="read_path">Relative path</label>

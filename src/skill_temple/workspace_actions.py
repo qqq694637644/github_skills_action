@@ -59,7 +59,11 @@ class WorkspaceFileContent(WorkspaceModel):
 
 
 class WorkspaceReadFilesRequest(WorkspaceScopedModel):
-    paths: list[str] = Field(min_length=1, max_length=50)
+    paths: list[str] = Field(
+        min_length=1,
+        max_length=50,
+        description="Exact existing file paths already identified by the user, inspect, or search.",
+    )
     start_line: int = Field(default=1, ge=1)
     max_lines: int = Field(default=200, ge=1, le=5000)
     max_bytes_per_file: int | None = Field(default=None, ge=1)
@@ -83,10 +87,7 @@ class WorkspaceSearchRequest(WorkspaceScopedModel):
     query: str = Field(
         min_length=1,
         max_length=500,
-        description=(
-            "High-signal identifier, error text, config key, test name, or ripgrep "
-            "default-regex pattern to locate in known workspace paths."
-        ),
+        description="Literal text by default, or a ripgrep pattern when regex=true.",
     )
     regex: bool = Field(
         default=False,
@@ -246,7 +247,10 @@ class WorkspaceOperationSummary(WorkspaceModel):
 
 class WorkspaceCommandRequest(WorkspaceModel):
     action: Literal["start", "get", "logs", "cancel", "list"] = Field(
-        description="Command action. Fields not used by the selected action are ignored."
+        description=(
+            "start launches a command; get reads status; logs reads output; cancel stops it; "
+            "list enumerates operations."
+        )
     )
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
     workspace_id: str | None = Field(default=None, pattern=r"^ws_[0-9a-f]{16}$")
@@ -320,9 +324,8 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=PrepareWorkspaceResponse,
         summary="Create or reuse a persistent workspace.",
         description=(
-            "Create an empty persistent workspace, or verify and reuse an existing workspace_id. "
-            "The workspace is only a persistent working directory; repo and branch state are "
-            "unmanaged."
+            "Create an empty persistent workspace or reuse an existing workspace_id. Returns "
+            "workspace_id plus created/empty; repo and branch state remain unmanaged."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -340,8 +343,8 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceCommandResponse,
         summary="Start or manage a PowerShell workspace command.",
         description=(
-            "Start, inspect, read logs from, list, or cancel an asynchronous pwsh 7 "
-            "command. start requires workspace_id; get/logs/cancel use operation_id."
+            "Run or manage asynchronous PowerShell 7 work. start returns an operation; follow "
+            "with get/logs until a terminal state before treating the command as complete."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -394,8 +397,8 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceInspectResponse,
         summary="Discover an unfamiliar workspace before choosing exact paths.",
         description=(
-            "Use for first-pass discovery: inspect the tree, run a few literal searches, "
-            "and read bounded matching snippets without guessing paths."
+            "First pass for unfamiliar paths. Returns a bounded tree plus optional literal "
+            "search matches and matching file snippets; truncated means discovery is incomplete."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -413,8 +416,8 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceSearchResponse,
         summary="Locate code and text in known workspace paths with ripgrep.",
         description=(
-            "Primary locator after discovery: search identifiers, errors, config keys, tests, "
-            "or patterns to narrow files before reading them."
+            "Primary locator when the exact file or impact location is unknown, or when tracing "
+            "references. Returns path/line/snippet matches; truncated means results are incomplete."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -432,8 +435,8 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceReadFilesResponse,
         summary="Read selected UTF-8 files after their exact paths are known.",
         description=(
-            "Read bounded content from already-located files with line numbers, hashes, "
-            "metadata, and continuation details; not for repo-wide discovery."
+            "Read bounded content from exact known files. Returns numbered content, hashes, and "
+            "next_start_line when a file is truncated; use inspect/search for discovery."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -453,8 +456,8 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceWriteFileResponse,
         summary="Write one UTF-8 text file.",
         description=(
-            "Create or overwrite a text file with mode, SHA-256, line-ending, dry-run, "
-            "and output-size controls."
+            "Create or replace one known text file in the workspace. Returns hashes, "
+            "changed_files, and diff_stat; this does not commit or publish changes."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -475,8 +478,8 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceApplyPatchResponse,
         summary="Apply a controlled Codex text patch.",
         description=(
-            "Apply Begin Patch/Add File/Update File/Delete File text patches with dry-run "
-            "and rollback on failure."
+            "Apply a multi-file text patch with dry-run and rollback on failure. Returns "
+            "changed_files and diff_stat; this does not commit or publish changes."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )

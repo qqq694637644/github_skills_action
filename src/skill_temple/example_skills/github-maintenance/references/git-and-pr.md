@@ -1,6 +1,6 @@
 # Git and pull requests
 
-只在任务涉及 Git branch、commit、push 或 PR 生命周期时读取本文件。命令按 PowerShell 7 写法。
+只在任务涉及 Git branch、commit、push 或 PR 生命周期时读取本文件。任务路由和授权边界由 `SKILL.md` 决定；本文件提供 PowerShell 7 命令模板和状态检查方式。
 
 ## 确认当前仓库
 
@@ -24,7 +24,7 @@ git fetch origin
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-新维护修改不要直接落在仓库默认分支。用户没有指定 branch 且当前位于默认分支时，用简短任务名创建 `gpt/<short-topic>` 分支；如果当前已经是合适的任务分支则继续复用。创建前先确认工作树，保留与当前任务无关的修改：
+当 `SKILL.md` 已决定需要任务分支时，先确认当前 branch 和工作树，再创建 `gpt/<short-topic>`（或用户指定 branch）；已经位于合适任务分支时继续复用：
 
 ```powershell
 $repo = gh repo view --json defaultBranchRef | ConvertFrom-Json
@@ -68,8 +68,6 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 git diff --stat
 git diff
 ```
-
-运行与改动直接相关的测试、lint、类型检查或构建。只把实际运行过的验证写进最终结果。
 
 存在无关修改时显式 staging 当前任务文件：
 
@@ -124,7 +122,7 @@ gh pr view 123 --json number,title,url,state,isDraft,headRefName,headRefOid,base
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-创建 PR 前完成 push，并让正文反映真实修改和验证。创建后重新读取 PR：
+当任务路由要求创建 PR 时，先完成 push，并让正文反映真实修改和验证。创建后重新读取 PR：
 
 ```powershell
 gh pr create --base main --head 'feature/example' --title 'Describe the change' --body 'Summary and validation'

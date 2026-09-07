@@ -183,17 +183,13 @@ skill-temple-build-openapi `
 
 ```dotenv
 SKILL_TEMPLE_SERVER_URL=https://skills.example.com
-SKILL_TEMPLE_SKILLS_DIR=C:/path/to/project/skills
-SKILL_TEMPLE_BEARER_TOKEN=replace-with-a-long-random-secret
-SKILL_TEMPLE_OPENAPI_OUTPUT=openapi.json
 WORKSPACE_ROOT=C:/path/to/persistent/workspaces
-WORKSPACE_PWSH_PATH=pwsh
-WORKSPACE_OPERATION_ROOT=C:/path/to/project/.runtime/workspace-operations
-WORKSPACE_COMMAND_TIMEOUT_SECONDS=120
-WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS=3600
-WORKSPACE_COMMAND_OUTPUT_BYTES=1000000
-WORKSPACE_COMMAND_MAX_OUTPUT_BYTES=10000000
+
+# Optional: enable Bearer authentication for /v1/* endpoints.
+# SKILL_TEMPLE_BEARER_TOKEN=replace-with-a-long-random-secret
 ```
+
+其他环境变量只在需要覆盖默认行为时设置。例如自定义 Skill 目录、OpenAPI 输出路径、PowerShell 路径、operation 存储目录，以及 command timeout/output limits；未设置时使用程序内默认值。
 
 Skill 目录查找顺序：
 

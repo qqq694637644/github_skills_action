@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from .action_logging import log_action, log_action_error
 from .runtime import (
     SkillNotFoundError,
     SkillPathError,
@@ -266,8 +267,18 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
     )
     def load_skills(request: LoadSkillsRequest) -> LoadSkillsResponse:
         try:
-            return LoadSkillsResponse.model_validate(load_selected(request))
+            response = LoadSkillsResponse.model_validate(load_selected(request))
+            log_action(
+                "loadSkills",
+                skill_ids=request.skill_ids,
+            )
+            return response
         except SkillNotFoundError as exc:
+            log_action_error(
+                "loadSkills",
+                skill_ids=request.skill_ids,
+                error_code="skill_not_found",
+            )
             raise HTTPException(
                 status_code=404,
                 detail=_error("skill_not_found", str(exc), "check_skill_id"),
@@ -287,13 +298,36 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
     )
     def read_skill_content(request: ReadSkillContentRequest) -> ReadSkillContentResponse:
         try:
-            return ReadSkillContentResponse.model_validate(read_selected(request))
+            response = ReadSkillContentResponse.model_validate(read_selected(request))
+            log_action(
+                "readSkillContent",
+                skill_id=request.skill_id,
+                path=request.path,
+                requested_start_line=request.start_line if request.start_line != 1 else None,
+                requested_max_lines=request.max_lines if request.max_lines != 2000 else None,
+                returned_lines=f"{response.start_line}-{response.end_line}",
+                truncated=response.truncated,
+                next_start_line=response.next_start_line,
+            )
+            return response
         except SkillNotFoundError as exc:
+            log_action_error(
+                "readSkillContent",
+                skill_id=request.skill_id,
+                path=request.path,
+                error_code="skill_not_found",
+            )
             raise HTTPException(
                 status_code=404,
                 detail=_error("skill_not_found", str(exc), "check_skill_id"),
             ) from exc
         except SkillPathError as exc:
+            log_action_error(
+                "readSkillContent",
+                skill_id=request.skill_id,
+                path=request.path,
+                error_code="unsafe_or_missing_path",
+            )
             raise HTTPException(
                 status_code=404,
                 detail=_error("unsafe_or_missing_path", str(exc), "check_path"),
@@ -395,6 +429,11 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--server-url", default=None)
+    parser.add_argument(
+        "--access-log",
+        action="store_true",
+        help="Also emit Uvicorn HTTP access logs; concise Action logs are enabled by default.",
+    )
     args = parser.parse_args()
 
     import uvicorn
@@ -403,6 +442,7 @@ def main() -> None:
         create_app(args.skills_dir, server_url=args.server_url),
         host=args.host,
         port=args.port,
+        access_log=args.access_log,
     )
 
 

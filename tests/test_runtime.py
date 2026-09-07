@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from skill_temple.app import create_app
+from skill_temple.action_logging import command_for_log
+from skill_temple.app import create_app, main
 from skill_temple.evals import evaluate_file
 from skill_temple.openapi_builder import build_openapi
 from skill_temple.prompt_builder import build_instructions, render_catalog
@@ -285,6 +287,55 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(missing.json()["detail"]["error"]["code"], "skill_not_found")
         self.assertEqual(unsafe.status_code, 404)
         self.assertEqual(unsafe.json()["detail"]["error"]["code"], "unsafe_or_missing_path")
+
+    def test_skill_actions_emit_key_input_logs(self) -> None:
+        client = TestClient(create_app())
+
+        with self.assertLogs("uvicorn.error", level="INFO") as captured:
+            loaded = client.post(
+                "/v1/skills/load",
+                json={"skill_ids": ["github-maintenance"]},
+            )
+            read = client.post(
+                "/v1/skills/read",
+                json={
+                    "skill_id": "github-maintenance",
+                    "path": "references/actions.md",
+                    "start_line": 3,
+                    "max_lines": 7,
+                },
+            )
+
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(read.status_code, 200)
+        logs = "\n".join(captured.output)
+        self.assertIn('ACTION loadSkills skill_ids=["github-maintenance"]', logs)
+        self.assertIn("ACTION readSkillContent", logs)
+        self.assertIn('path="references/actions.md"', logs)
+        self.assertIn("requested_start_line=3", logs)
+        self.assertIn("requested_max_lines=7", logs)
+
+    def test_command_log_text_is_bounded_and_redacts_common_secrets(self) -> None:
+        script = (
+            "$env:GH_TOKEN='super-secret'; gh api user --token another-secret; "
+            "Write-Output ok"
+        )
+
+        rendered = command_for_log(script)
+
+        self.assertIn("$env:GH_TOKEN=<redacted>", rendered)
+        self.assertIn("--token <redacted>", rendered)
+        self.assertNotIn("super-secret", rendered)
+        self.assertNotIn("another-secret", rendered)
+
+    def test_cli_disables_uvicorn_access_log_by_default(self) -> None:
+        with (
+            patch.object(sys, "argv", ["skill-temple"]),
+            patch("uvicorn.run") as run,
+        ):
+            main()
+
+        self.assertIs(run.call_args.kwargs["access_log"], False)
 
     def test_optional_bearer_auth_and_debug_console(self) -> None:
         with patch.dict(

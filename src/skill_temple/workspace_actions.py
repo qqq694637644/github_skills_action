@@ -7,6 +7,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .action_logging import command_for_log, log_action, log_action_error
 from .workspace_files import LocalWorkspaceService
 from .workspace_patch import WorkspaceToolError
 
@@ -331,10 +332,23 @@ def register_workspace_actions(app: FastAPI) -> None:
     )
     async def prepare_workspace(request: PrepareWorkspaceRequest) -> PrepareWorkspaceResponse:
         try:
-            return PrepareWorkspaceResponse.model_validate(
+            response = PrepareWorkspaceResponse.model_validate(
                 await service.prepare_workspace(**request.model_dump())
             )
+            log_action(
+                "prepareWorkspace",
+                requested_workspace_id=request.workspace_id,
+                workspace_id=response.workspace_id,
+                created=response.created,
+                empty=response.empty,
+            )
+            return response
         except WorkspaceToolError as exc:
+            log_action_error(
+                "prepareWorkspace",
+                workspace_id=request.workspace_id,
+                error_code=exc.code,
+            )
             _raise_http(exc)
 
     @app.post(
@@ -356,30 +370,72 @@ def register_workspace_actions(app: FastAPI) -> None:
                     and request.workspace_id is not None
                     and request.script is not None
                 )
-                operation = await service.command_start(
-                    idempotency_key=request.idempotency_key,
+                operation = WorkspaceOperationSummary.model_validate(
+                    await service.command_start(
+                        idempotency_key=request.idempotency_key,
+                        workspace_id=request.workspace_id,
+                        script=request.script,
+                        timeout_seconds=request.timeout_seconds,
+                        max_output_bytes=request.max_output_bytes,
+                        plain_output=request.plain_output,
+                        utf8_output=request.utf8_output,
+                    )
+                )
+                log_action(
+                    "workspaceCommand",
+                    action="start",
                     workspace_id=request.workspace_id,
-                    script=request.script,
+                    command=command_for_log(request.script),
                     timeout_seconds=request.timeout_seconds,
                     max_output_bytes=request.max_output_bytes,
-                    plain_output=request.plain_output,
-                    utf8_output=request.utf8_output,
+                    plain_output=True if request.plain_output else None,
+                    utf8_output=False if not request.utf8_output else None,
+                    operation_id=operation.operation_id,
+                    state=operation.state,
                 )
                 return WorkspaceCommandResponse(action="start", operation=operation)
             if request.action == "get":
                 assert request.operation_id is not None
-                return WorkspaceCommandResponse(
-                    action="get", operation=await service.command_get(request.operation_id)
+                operation = WorkspaceOperationSummary.model_validate(
+                    await service.command_get(request.operation_id)
                 )
+                if operation.state != "running":
+                    log_action(
+                        "workspaceCommand",
+                        action="get",
+                        operation_id=request.operation_id,
+                        state=operation.state,
+                        exit_code=operation.exit_code,
+                        duration_ms=operation.duration_ms,
+                        stdout_bytes=operation.stdout_bytes,
+                        stderr_bytes=operation.stderr_bytes,
+                        error_code=operation.error_code,
+                    )
+                return WorkspaceCommandResponse(action="get", operation=operation)
             if request.action == "cancel":
                 assert request.operation_id is not None
-                return WorkspaceCommandResponse(
-                    action="cancel", operation=await service.command_cancel(request.operation_id)
+                operation = WorkspaceOperationSummary.model_validate(
+                    await service.command_cancel(request.operation_id)
                 )
+                log_action(
+                    "workspaceCommand",
+                    action="cancel",
+                    operation_id=request.operation_id,
+                    state=operation.state,
+                )
+                return WorkspaceCommandResponse(action="cancel", operation=operation)
             if request.action == "list":
-                return WorkspaceCommandResponse(
-                    action="list", operations=await service.command_list(request.state)
+                operations = [
+                    WorkspaceOperationSummary.model_validate(operation)
+                    for operation in await service.command_list(request.state)
+                ]
+                log_action(
+                    "workspaceCommand",
+                    action="list",
+                    state_filter=request.state,
+                    count=len(operations),
                 )
+                return WorkspaceCommandResponse(action="list", operations=operations)
             assert request.operation_id is not None
             logs = await service.command_logs(
                 request.operation_id,
@@ -387,8 +443,27 @@ def register_workspace_actions(app: FastAPI) -> None:
                 stderr_offset=request.stderr_offset,
                 max_bytes=request.max_bytes,
             )
+            log_action(
+                "workspaceCommand",
+                action="logs",
+                operation_id=request.operation_id,
+                stdout_offset=request.stdout_offset if request.stdout_offset else None,
+                stderr_offset=request.stderr_offset if request.stderr_offset else None,
+                max_bytes=request.max_bytes if request.max_bytes != 50_000 else None,
+                stdout_chars=len(logs["stdout"]),
+                stderr_chars=len(logs["stderr"]),
+                stdout_eof=logs["stdout_eof"],
+                stderr_eof=logs["stderr_eof"],
+            )
             return WorkspaceCommandResponse(action="logs", **logs)
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceCommand",
+                action=request.action,
+                workspace_id=request.workspace_id,
+                operation_id=request.operation_id,
+                error_code=exc.code,
+            )
             _raise_http(exc)
 
     @app.post(
@@ -404,10 +479,29 @@ def register_workspace_actions(app: FastAPI) -> None:
     )
     async def workspace_inspect(request: WorkspaceInspectRequest) -> WorkspaceInspectResponse:
         try:
-            return WorkspaceInspectResponse.model_validate(
+            response = WorkspaceInspectResponse.model_validate(
                 await service.inspect(**request.model_dump())
             )
+            log_action(
+                "workspaceInspect",
+                workspace_id=request.workspace_id,
+                paths=request.paths,
+                queries=request.queries,
+                max_depth=request.max_depth if request.max_depth != 2 else None,
+                tree_entries=len(response.tree),
+                search_count=len(response.searches),
+                files_read=len(response.files),
+                truncated=response.truncated,
+            )
+            return response
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceInspect",
+                workspace_id=request.workspace_id,
+                paths=request.paths,
+                queries=request.queries,
+                error_code=exc.code,
+            )
             _raise_http(exc)
 
     @app.post(
@@ -423,10 +517,30 @@ def register_workspace_actions(app: FastAPI) -> None:
     )
     async def workspace_search(request: WorkspaceSearchRequest) -> WorkspaceSearchResponse:
         try:
-            return WorkspaceSearchResponse.model_validate(
+            response = WorkspaceSearchResponse.model_validate(
                 await service.search(**request.model_dump())
             )
+            log_action(
+                "workspaceSearch",
+                workspace_id=request.workspace_id,
+                query=request.query,
+                regex=True if request.regex else None,
+                case_sensitive=True if request.case_sensitive else None,
+                paths=request.paths,
+                context_lines=request.context_lines if request.context_lines != 2 else None,
+                max_matches=request.max_matches if request.max_matches != 100 else None,
+                match_count=response.match_count,
+                truncated=response.truncated,
+            )
+            return response
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceSearch",
+                workspace_id=request.workspace_id,
+                query=request.query,
+                paths=request.paths,
+                error_code=exc.code,
+            )
             _raise_http(exc)
 
     @app.post(
@@ -444,10 +558,26 @@ def register_workspace_actions(app: FastAPI) -> None:
         request: WorkspaceReadFilesRequest,
     ) -> WorkspaceReadFilesResponse:
         try:
-            return WorkspaceReadFilesResponse.model_validate(
+            response = WorkspaceReadFilesResponse.model_validate(
                 await service.read_files(**request.model_dump())
             )
+            log_action(
+                "workspaceReadFiles",
+                workspace_id=request.workspace_id,
+                paths=request.paths,
+                start_line=request.start_line if request.start_line != 1 else None,
+                max_lines=request.max_lines if request.max_lines != 200 else None,
+                files=len(response.files),
+                truncated=response.truncated,
+            )
+            return response
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceReadFiles",
+                workspace_id=request.workspace_id,
+                paths=request.paths,
+                error_code=exc.code,
+            )
             _raise_http(exc)
 
     @app.post(
@@ -466,10 +596,33 @@ def register_workspace_actions(app: FastAPI) -> None:
     ) -> WorkspaceWriteFileResponse:
         try:
             payload = request.model_dump(exclude={"encoding"})
-            return WorkspaceWriteFileResponse.model_validate(
+            response = WorkspaceWriteFileResponse.model_validate(
                 await service.write_file(**payload)
             )
+            log_action(
+                "workspaceWriteFile",
+                workspace_id=request.workspace_id,
+                path=request.path,
+                mode=request.mode,
+                line_ending=request.line_ending if request.line_ending != "preserve" else None,
+                dry_run=True if request.dry_run else None,
+                content_bytes=len(request.content.encode("utf-8")),
+                expected_sha256=request.expected_sha256,
+                written=response.written,
+                operation=response.operation,
+                bytes=response.bytes,
+                diff_stat=response.diff_stat,
+            )
+            return response
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceWriteFile",
+                workspace_id=request.workspace_id,
+                path=request.path,
+                mode=request.mode,
+                dry_run=request.dry_run,
+                error_code=exc.code,
+            )
             _raise_http(exc)
 
     @app.post(
@@ -487,8 +640,27 @@ def register_workspace_actions(app: FastAPI) -> None:
         request: WorkspaceApplyPatchRequest,
     ) -> WorkspaceApplyPatchResponse:
         try:
-            return WorkspaceApplyPatchResponse.model_validate(
+            response = WorkspaceApplyPatchResponse.model_validate(
                 await service.apply_patch(**request.model_dump())
             )
+            log_action(
+                "workspaceApplyPatch",
+                workspace_id=request.workspace_id,
+                patch_bytes=len(request.patch.encode("utf-8")),
+                dry_run=True if request.dry_run else None,
+                allow_delete=True if request.allow_delete else None,
+                max_changed_files=request.max_changed_files,
+                changed_files=[item.path for item in response.changed_files],
+                diff_stat=response.diff_stat,
+            )
+            return response
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceApplyPatch",
+                workspace_id=request.workspace_id,
+                patch_bytes=len(request.patch.encode("utf-8")),
+                dry_run=request.dry_run,
+                allow_delete=request.allow_delete,
+                error_code=exc.code,
+            )
             _raise_http(exc)

@@ -24,6 +24,22 @@ git fetch origin
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
+新维护修改不要直接落在仓库默认分支。用户没有指定 branch 且当前位于默认分支时，用简短任务名创建 `gpt/<short-topic>` 分支；如果当前已经是合适的任务分支则继续复用。创建前先确认工作树，保留与当前任务无关的修改：
+
+```powershell
+$repo = gh repo view --json defaultBranchRef | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$current = git branch --show-current
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+git status --short
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+if ($current -eq $repo.defaultBranchRef.name) {
+    git switch -c 'gpt/<short-topic>'
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+```
+
 继续已有 PR 时先读真实 head/base/state：
 
 ```powershell

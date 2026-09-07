@@ -14,6 +14,15 @@ description: 使用当前持久 Workspace 中的 git 与 GitHub CLI 维护 GitHu
 - workflow/job 日志、artifact、或任何可能产生大输出的 GitHub 操作：读取 `references/outputs.md`。
 - 同一任务涉及多个领域时只加载需要的组合，不为普通本地编辑加载 GitHub 资料。
 
+## 任务闭环
+
+- 只读调查：读取仓库和必要远端状态并报告；不创建分支、不修改、不提交、不 push。
+- 新维护修改：先确认仓库、默认分支和工作树。需要编辑且当前位于默认分支时，先创建任务分支；用户未指定名称时使用 `gpt/<short-topic>`。定位、修改、验证并检查真实 diff 后，再按用户目标决定是否 commit/push/创建 PR。
+- 继续已有 PR：先读取 PR 的真实 head/base/state，再 checkout 对应 head branch；修改后验证和检查 diff。发生 push 时，以新的 head SHA 重新读取 PR/checks，而不是复用旧状态。
+- 修复 CI：先定位与当前 head SHA 对应的失败 run/job，再读必要日志；修复后运行本地验证。发生 push 时重新查询新 head 的 CI，只有真实 run/check 成功时才报告通过。
+- 创建或更新 PR 作为任务交付物时，同时读取 `references/actions.md` 并查询新 head 的 checks；没有匹配 run/check 时明确报告未找到，不推断通过。
+- merge 或 close PR 只在用户明确要求该结果时执行；执行前重新读取当前 PR/head 状态。
+
 ## GitHub 约定
 
 - `gh` 由宿主预先安装并登录；需要确认身份时用 `gh api user --jq .login`。不要输出 token、credential 或 secret 值。

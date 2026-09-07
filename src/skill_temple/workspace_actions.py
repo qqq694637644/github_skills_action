@@ -83,7 +83,10 @@ class WorkspaceSearchRequest(WorkspaceScopedModel):
     query: str = Field(
         min_length=1,
         max_length=500,
-        description="Literal text or ripgrep default-regex pattern to search for.",
+        description=(
+            "High-signal identifier, error text, config key, test name, or ripgrep "
+            "default-regex pattern to locate in known workspace paths."
+        ),
     )
     regex: bool = Field(
         default=False,
@@ -389,10 +392,10 @@ def register_workspace_actions(app: FastAPI) -> None:
         "/v1/workspace/inspect",
         operation_id="workspaceInspect",
         response_model=WorkspaceInspectResponse,
-        summary="Inspect workspace tree, search matches, and file snippets.",
+        summary="Discover an unfamiliar workspace before choosing exact paths.",
         description=(
-            "Inspect paths under workspace_id, search with ripgrep, and read bounded "
-            "snippets from matching UTF-8 files."
+            "Use for first-pass discovery: inspect the tree, run a few literal searches, "
+            "and read bounded matching snippets without guessing paths."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -408,10 +411,10 @@ def register_workspace_actions(app: FastAPI) -> None:
         "/v1/workspace/search",
         operation_id="workspaceSearch",
         response_model=WorkspaceSearchResponse,
-        summary="Search workspace text with ripgrep.",
+        summary="Locate code and text in known workspace paths with ripgrep.",
         description=(
-            "Search selected paths with literal or regular-expression matching and return "
-            "bounded line/context results."
+            "Primary locator after discovery: search identifiers, errors, config keys, tests, "
+            "or patterns to narrow files before reading them."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -427,10 +430,10 @@ def register_workspace_actions(app: FastAPI) -> None:
         "/v1/workspace/read-files",
         operation_id="workspaceReadFiles",
         response_model=WorkspaceReadFilesResponse,
-        summary="Read multiple UTF-8 workspace files with line numbers.",
+        summary="Read selected UTF-8 files after their exact paths are known.",
         description=(
-            "Read selected files from workspace_id with line numbers, hashes, metadata, "
-            "and response truncation limits."
+            "Read bounded content from already-located files with line numbers, hashes, "
+            "metadata, and continuation details; not for repo-wide discovery."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )

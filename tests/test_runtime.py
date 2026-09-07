@@ -203,6 +203,26 @@ class RuntimeTests(unittest.TestCase):
                     output_path=temp / "out.md",
                 )
 
+    def test_prompt_keeps_explicit_workspace_navigation_route(self) -> None:
+        prompt = Path("GPT_ACTION_PROMPT.md").read_text(encoding="utf-8")
+
+        self.assertIn("**Discover**", prompt)
+        self.assertIn("**Search**", prompt)
+        self.assertIn("**Read**", prompt)
+        self.assertIn("它是代码/文本定位的主要工具", prompt)
+        self.assertIn("不要猜测 `src`、`tests`", prompt)
+        self.assertIn("如果修改影响范围未知，仍要用 `workspaceSearch`", prompt)
+
+    def test_github_maintenance_keeps_task_branch_and_ci_closure(self) -> None:
+        skill = Path(
+            "src/skill_temple/example_skills/github-maintenance/SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("`gpt/<short-topic>`", skill)
+        self.assertIn("当前位于默认分支时，先创建任务分支", skill)
+        self.assertIn("以新的 head SHA 重新读取 PR/checks", skill)
+        self.assertIn("merge 或 close PR 只在用户明确要求", skill)
+
     def test_openapi_exposes_only_skill_loading_and_workspace_actions(self) -> None:
         schema = create_app().openapi()
         operation_ids = {

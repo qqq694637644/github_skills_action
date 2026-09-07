@@ -61,7 +61,8 @@ class WorkspaceActionsTests(unittest.TestCase):
                 self.assertLessEqual(len(operation.get("description", "")), 300)
 
     def test_openapi_documents_workspace_search_contract(self) -> None:
-        schema = create_app().openapi()["components"]["schemas"]
+        openapi = create_app().openapi()
+        schema = openapi["components"]["schemas"]
         search = schema["WorkspaceSearchRequest"]["properties"]
         inspect = schema["WorkspaceInspectRequest"]["properties"]
         search_response = schema["WorkspaceSearchResponse"]["properties"]
@@ -76,6 +77,18 @@ class WorkspaceActionsTests(unittest.TestCase):
         self.assertIn("not supported", inspect["queries"]["description"])
         self.assertIn("not glob patterns", inspect["paths"]["description"])
         self.assertIn("all results", search_response["truncated"]["description"])
+        self.assertIn(
+            "Primary locator",
+            openapi["paths"]["/v1/workspace/search"]["post"]["description"],
+        )
+        self.assertIn(
+            "first-pass discovery",
+            openapi["paths"]["/v1/workspace/inspect"]["post"]["description"],
+        )
+        self.assertIn(
+            "not for repo-wide discovery",
+            openapi["paths"]["/v1/workspace/read-files"]["post"]["description"],
+        )
 
     def test_missing_workspace_root_is_structured(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

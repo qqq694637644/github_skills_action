@@ -10,6 +10,8 @@ Skill Temple 把 Codex 的 Skill 思路适配到 Custom GPT Actions：
 
 不会把所有 Skill 正文静态塞进 prompt，也不需要先调用 Action 查询目录。
 
+第一次部署请先完成下文的 [安装和运行](#安装和运行)，再生成 GPT Instructions 和 `openapi.json`。
+
 ## 公开 Actions
 
 | operationId | 路径 | 用途 |
@@ -209,21 +211,138 @@ Authorization: Bearer <token>
 
 ## 安装和运行
 
+### 1. 前置条件
+
+- Python 3.11 或更高版本。
+- PowerShell 7，命令名必须是 `pwsh`；`workspaceCommand` 使用它执行命令。
+- ripgrep，命令名必须是 `rg`；`workspaceSearch` 和 `workspaceInspect` 使用它搜索文件。
+- 如果要使用内置 `github-maintenance` Skill，再安装 Git 和 GitHub CLI (`gh`) 并完成 GitHub 登录。
+
+先确认宿主工具已经在 `PATH`：
+
 ```powershell
-py -3 -m pip install -e ".[dev]"
+python --version
+pwsh --version
+rg --version
+git --version
+gh --version
+```
+
+只使用非 GitHub Workspace 功能时，`git` 和 `gh` 不是必需项。
+
+### 2. 克隆项目并创建虚拟环境
+
+```powershell
+git clone https://github.com/qqq694637644/github_skills_action.git
+Set-Location github_skills_action
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+```
+
+如果 `python` 不是目标 Python 3.11+，Windows 也可以用 `py` launcher 显式选择版本，例如：
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+### 3. 安装项目
+
+仅运行服务：
+
+```powershell
+python -m pip install -e .
+```
+
+需要运行测试和 Ruff 的开发环境：
+
+```powershell
+python -m pip install -e ".[dev]"
+```
+
+安装成功后应能直接找到这些入口：
+
+```powershell
+skill-temple --help
+skill-temple-build-prompt --help
+skill-temple-build-openapi --help
+```
+
+### 4. 配置 `.env`
+
+从示例创建本地配置：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+至少确认：
+
+```dotenv
+SKILL_TEMPLE_SERVER_URL=https://skills.example.com
+WORKSPACE_ROOT=C:/path/to/persistent/workspaces
+```
+
+`WORKSPACE_ROOT` 是所有持久 workspace 的父目录；目录不存在时服务会自动创建。`SKILL_TEMPLE_SERVER_URL` 应填写最终提供给 Custom GPT Actions 访问的 HTTPS 地址，而不是本机监听地址。
+
+如果需要 Bearer 认证，再在 `.env` 中启用：
+
+```dotenv
+SKILL_TEMPLE_BEARER_TOKEN=replace-with-a-long-random-secret
+```
+
+不要提交包含真实 token 的 `.env`。
+
+### 5. 可选：配置 GitHub CLI
+
+使用 `github-maintenance` Skill 前确认 `gh` 已登录，并让 Git HTTPS 操作使用相同认证：
+
+```powershell
+gh auth status
+gh auth setup-git
+gh api user --jq .login
+```
+
+如果尚未登录，可先运行：
+
+```powershell
+gh auth login --hostname github.com --git-protocol https --web
+```
+
+服务启动后，`workspaceCommand` 会继承运行服务账户的环境和 CLI 登录状态，因此应当用**实际运行 `skill-temple` 的同一个操作系统账户**完成 `gh` 登录。
+
+### 6. 启动服务
+
+仅供本机验证时：
+
+```powershell
 skill-temple --host 127.0.0.1 --port 8765
 ```
 
-OpenAPI：
+如果需要让反向代理、容器网络或其他主机访问，可以监听所有网卡：
 
-```text
-http://127.0.0.1:8765/openapi.json
+```powershell
+skill-temple --host 0.0.0.0 --port 8765
 ```
+
+`--host` 只控制本地监听地址；Custom GPT Actions 使用的公网地址仍由 `SKILL_TEMPLE_SERVER_URL` / `--server-url` 决定，并应通过 HTTPS 暴露。
+
+### 7. 验证安装
+
+启动服务后检查：
 
 健康检查：
 
 ```text
 http://127.0.0.1:8765/health
+```
+
+OpenAPI schema：
+
+```text
+http://127.0.0.1:8765/openapi.json
 ```
 
 调试检索控制台：

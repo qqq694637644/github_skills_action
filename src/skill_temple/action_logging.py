@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -64,7 +65,7 @@ def _format_value(value: Any) -> str:
 def log_action(action: str, /, **fields: Any) -> None:
     """Emit one compact action event; omit unset fields."""
 
-    parts = [f"ACTION {action}"]
+    parts = [datetime.now().astimezone().strftime("[%Y-%m-%d %H:%M]"), f"ACTION {action}"]
     parts.extend(
         f"{key}={_format_value(value)}" for key, value in fields.items() if value is not None
     )

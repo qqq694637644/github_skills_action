@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -291,7 +292,11 @@ class RuntimeTests(unittest.TestCase):
     def test_skill_actions_emit_key_input_logs(self) -> None:
         client = TestClient(create_app())
 
-        with self.assertLogs("uvicorn.error", level="INFO") as captured:
+        with (
+            patch("skill_temple.action_logging.datetime") as mocked_datetime,
+            self.assertLogs("uvicorn.error", level="INFO") as captured,
+        ):
+            mocked_datetime.now.return_value = datetime(2026, 9, 17, 10, 5)
             loaded = client.post(
                 "/v1/skills/load",
                 json={"skill_ids": ["github-maintenance"]},
@@ -309,6 +314,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(loaded.status_code, 200)
         self.assertEqual(read.status_code, 200)
         logs = "\n".join(captured.output)
+        self.assertIn("[2026-09-17 10:05]", logs)
         self.assertIn('ACTION loadSkills skill_ids=["github-maintenance"]', logs)
         self.assertIn("ACTION readSkillContent", logs)
         self.assertIn('path="references/actions.md"', logs)

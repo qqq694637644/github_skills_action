@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from .action_logging import log_action, log_action_error
 from .runtime import (
     SkillNotFoundError,
     SkillPathError,
@@ -31,13 +32,13 @@ class StrictRequest(BaseModel):
 class LoadSkillsRequest(StrictRequest):
     skill_ids: list[str] = Field(
         min_length=1,
-        description="Exact Skill ids selected from the catalog in GPT Instructions.",
+        description="Exact Skill ids already selected from the catalog in GPT Instructions.",
     )
 
 
 class ReadSkillContentRequest(StrictRequest):
     skill_id: str
-    path: str = Field(description="Relative path inside the selected Skill.")
+    path: str = Field(description="Exact relative path referenced by the selected Skill.")
     start_line: int = Field(default=1, ge=1)
     max_lines: int = Field(default=2000, ge=1, le=10000)
 
@@ -258,13 +259,26 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
         response_model=LoadSkillsResponse,
         responses={404: {"model": StructuredErrorResponse}},
         summary="Load selected Skills.",
-        description="Load complete SKILL.md files for exact ids selected from GPT Instructions.",
+        description=(
+            "Load complete SKILL.md files after the prompt catalog selects matching ids. "
+            "Returns each Skill body, content hash, and referenced_paths for optional follow-up."
+        ),
         openapi_extra={"x-openai-isConsequential": False},
     )
     def load_skills(request: LoadSkillsRequest) -> LoadSkillsResponse:
         try:
-            return LoadSkillsResponse.model_validate(load_selected(request))
+            response = LoadSkillsResponse.model_validate(load_selected(request))
+            log_action(
+                "loadSkills",
+                skill_ids=request.skill_ids,
+            )
+            return response
         except SkillNotFoundError as exc:
+            log_action_error(
+                "loadSkills",
+                skill_ids=request.skill_ids,
+                error_code="skill_not_found",
+            )
             raise HTTPException(
                 status_code=404,
                 detail=_error("skill_not_found", str(exc), "check_skill_id"),
@@ -275,19 +289,45 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
         operation_id="readSkillContent",
         response_model=ReadSkillContentResponse,
         responses={404: {"model": StructuredErrorResponse}},
-        summary="Read a file from a selected Skill.",
-        description="Read an exact relative path from a selected Skill with line continuation.",
+        summary="Read a referenced file from a selected Skill.",
+        description=(
+            "Read an exact referenced path from a loaded Skill. Returns bounded content, hash, "
+            "truncated, and next_start_line for continuation."
+        ),
         openapi_extra={"x-openai-isConsequential": False},
     )
     def read_skill_content(request: ReadSkillContentRequest) -> ReadSkillContentResponse:
         try:
-            return ReadSkillContentResponse.model_validate(read_selected(request))
+            response = ReadSkillContentResponse.model_validate(read_selected(request))
+            log_action(
+                "readSkillContent",
+                skill_id=request.skill_id,
+                path=request.path,
+                requested_start_line=request.start_line if request.start_line != 1 else None,
+                requested_max_lines=request.max_lines if request.max_lines != 2000 else None,
+                returned_lines=f"{response.start_line}-{response.end_line}",
+                truncated=response.truncated,
+                next_start_line=response.next_start_line,
+            )
+            return response
         except SkillNotFoundError as exc:
+            log_action_error(
+                "readSkillContent",
+                skill_id=request.skill_id,
+                path=request.path,
+                error_code="skill_not_found",
+            )
             raise HTTPException(
                 status_code=404,
                 detail=_error("skill_not_found", str(exc), "check_skill_id"),
             ) from exc
         except SkillPathError as exc:
+            log_action_error(
+                "readSkillContent",
+                skill_id=request.skill_id,
+                path=request.path,
+                error_code="unsafe_or_missing_path",
+            )
             raise HTTPException(
                 status_code=404,
                 detail=_error("unsafe_or_missing_path", str(exc), "check_path"),
@@ -318,11 +358,11 @@ CONSOLE_HTML = """<!doctype html>
   <label for="token">Bearer token</label>
   <input id="token" type="password" placeholder="Optional token from .env" />
   <label for="skill_ids">Skill ids, comma-separated</label>
-  <input id="skill_ids" value="idapython" />
+  <input id="skill_ids" value="github-maintenance" />
   <div class="row">
     <div>
       <label for="read_skill_id">Read skill id</label>
-      <input id="read_skill_id" value="idapython" />
+      <input id="read_skill_id" value="github-maintenance" />
     </div>
     <div>
       <label for="read_path">Relative path</label>
@@ -389,6 +429,11 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--server-url", default=None)
+    parser.add_argument(
+        "--access-log",
+        action="store_true",
+        help="Also emit Uvicorn HTTP access logs; concise Action logs are enabled by default.",
+    )
     args = parser.parse_args()
 
     import uvicorn
@@ -397,6 +442,7 @@ def main() -> None:
         create_app(args.skills_dir, server_url=args.server_url),
         host=args.host,
         port=args.port,
+        access_log=args.access_log,
     )
 
 

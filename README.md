@@ -329,6 +329,16 @@ skill-temple --host 0.0.0.0 --port 8765
 
 `--host` 只控制本地监听地址；Custom GPT Actions 使用的公网地址仍由 `SKILL_TEMPLE_SERVER_URL` / `--server-url` 决定，并应通过 HTTPS 暴露。
 
+默认日志只输出 Action 的关键输入和结果，不再输出每个 HTTP 请求的 Uvicorn access log。例如：
+
+```text
+ACTION workspaceSearch workspace_id="ws_..." query="workspaceSearch" paths=["repo"] match_count=12 truncated=false
+ACTION workspaceCommand action="start" workspace_id="ws_..." command="git status --short --branch" timeout_seconds=60 operation_id="op_..." state="running"
+ACTION workspaceCommand action="get" operation_id="op_..." state="succeeded" exit_code=0 duration_ms=183
+```
+
+命令会保留关键文本但限制单条日志长度，并对常见 token/password/secret/API key 赋值做脱敏；文件正文、完整 patch、stdout/stderr 正文不会进入 Action 日志。需要临时恢复原始 HTTP access log 时加 `--access-log`。
+
 ### 7. 验证安装
 
 启动服务后检查：

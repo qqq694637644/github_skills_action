@@ -1,6 +1,6 @@
 # GitHub Actions control plane
 
-只在任务涉及 checks、workflow runs/jobs、dispatch/rerun/watch、workflow 文件或 Actions cache 时读取本文件。日志和 artifact 下载另读 `outputs.md`。
+只在任务涉及 checks、workflow runs/jobs、dispatch/rerun/watch、workflow 文件或 Actions cache 时读取本文件。任务路由和授权边界由 `SKILL.md` 决定；日志和 artifact 下载另读 `outputs.md`。
 
 ## 身份与仓库
 
@@ -110,12 +110,3 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
 大范围 cache 操作后重新 list 验证实际结果。
-
-## CI 修复闭环
-
-1. 用 PR checks 或 run list 定位与当前 head SHA 对应的失败 run/job。
-2. 日志可能很大时加载 `outputs.md`，把日志保存到 workspace 后针对性搜索。
-3. 回到源码、测试或 workflow 定位根因并修改。
-4. 运行相关本地验证，检查实际 diff。
-5. 如果任务包含发布，commit/push 后以新 head SHA 重新查 CI。
-6. 只有实际查询到新 run 的成功结论时才报告 CI 已通过。

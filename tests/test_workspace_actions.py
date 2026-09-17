@@ -61,9 +61,11 @@ class WorkspaceActionsTests(unittest.TestCase):
                 self.assertLessEqual(len(operation.get("description", "")), 300)
 
     def test_openapi_documents_workspace_search_contract(self) -> None:
-        schema = create_app().openapi()["components"]["schemas"]
+        openapi = create_app().openapi()
+        schema = openapi["components"]["schemas"]
         search = schema["WorkspaceSearchRequest"]["properties"]
         inspect = schema["WorkspaceInspectRequest"]["properties"]
+        read = schema["WorkspaceReadFilesRequest"]["properties"]
         search_response = schema["WorkspaceSearchResponse"]["properties"]
 
         self.assertIn("--fixed-strings", search["regex"]["description"])
@@ -75,7 +77,24 @@ class WorkspaceActionsTests(unittest.TestCase):
         self.assertEqual(inspect["queries"]["maxItems"], 10)
         self.assertIn("not supported", inspect["queries"]["description"])
         self.assertIn("not glob patterns", inspect["paths"]["description"])
+        self.assertIn("Exact existing file paths", read["paths"]["description"])
         self.assertIn("all results", search_response["truncated"]["description"])
+        self.assertIn(
+            "exact file or impact location",
+            openapi["paths"]["/v1/workspace/search"]["post"]["description"],
+        )
+        self.assertIn(
+            "First pass",
+            openapi["paths"]["/v1/workspace/inspect"]["post"]["description"],
+        )
+        self.assertIn(
+            "use inspect/search for discovery",
+            openapi["paths"]["/v1/workspace/read-files"]["post"]["description"],
+        )
+        self.assertIn(
+            "terminal state",
+            openapi["paths"]["/v1/workspace/command"]["post"]["description"],
+        )
 
     def test_missing_workspace_root_is_structured(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -411,19 +430,26 @@ class WorkspaceActionsTests(unittest.TestCase):
             root = Path(temp)
             with self._client(root, Path(operations)) as client:
                 workspace_id = self._prepare_workspace(client, "command-workspace")
-                started = client.post(
-                    "/v1/workspace/command",
-                    json={
-                        "action": "start",
-                        "idempotency_key": "command-success-1",
-                        "workspace_id": workspace_id,
-                        "script": "Write-Output 'hello'; [Console]::Error.WriteLine('oops')",
-                        "timeout_seconds": 20,
-                        "plain_output": True,
-                    },
-                )
+                with self.assertLogs("uvicorn.error", level="INFO") as captured:
+                    started = client.post(
+                        "/v1/workspace/command",
+                        json={
+                            "action": "start",
+                            "idempotency_key": "command-success-1",
+                            "workspace_id": workspace_id,
+                            "script": "Write-Output 'hello'; [Console]::Error.WriteLine('oops')",
+                            "timeout_seconds": 20,
+                            "plain_output": True,
+                        },
+                    )
                 self.assertEqual(started.status_code, 200, started.text)
                 operation_id = started.json()["operation"]["operation_id"]
+                action_log = "\n".join(captured.output)
+                self.assertIn("ACTION workspaceCommand action=\"start\"", action_log)
+                self.assertIn(f'workspace_id="{workspace_id}"', action_log)
+                self.assertIn("command=\"Write-Output 'hello';", action_log)
+                self.assertIn(f'operation_id="{operation_id}"', action_log)
+                self.assertIn("timeout_seconds=20", action_log)
                 terminal = self._poll_operation(client, operation_id)
                 self.assertEqual(terminal["state"], "succeeded")
 

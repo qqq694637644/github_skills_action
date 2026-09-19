@@ -227,7 +227,7 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
     @app.get("/v1/action-logs", include_in_schema=False)
     def action_logs(
         after: int = Query(default=0, ge=0),
-        wait: float = Query(default=25.0, ge=0.0, le=30.0),
+        wait: float = Query(default=55.0, ge=0.0, le=60.0),
         limit: int = Query(default=50, ge=1, le=100),
     ) -> dict[str, Any]:
         return wait_for_action_events(after=after, timeout=wait, limit=limit)

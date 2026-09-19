@@ -327,7 +327,7 @@ class RuntimeTests(unittest.TestCase):
         client = TestClient(create_app())
 
         loaded = client.post("/v1/skills/load", json={"skill_ids": ["github-maintenance"]})
-        first = client.get("/v1/action-logs", params={"after": 0, "wait": 0})
+        first = client.get("/v1/action-logs", params={"after": 0, "wait": 55})
 
         self.assertEqual(loaded.status_code, 200)
         self.assertEqual(first.status_code, 200)
@@ -343,6 +343,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.json()["items"], [])
         self.assertEqual(second.json()["last_id"], first_body["last_id"])
+
+        too_long = client.get("/v1/action-logs", params={"wait": 61})
+        self.assertEqual(too_long.status_code, 422)
 
     def test_command_log_text_is_bounded_and_redacts_common_secrets(self) -> None:
         script = (

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.2.0
+// @version      0.2.1
 // @description  Show github_skills_action activity as a compact, unobtrusive status indicator on ChatGPT.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -17,6 +17,7 @@
 
   const BACKEND_KEY = 'gptActionMonitorBackend';
   const TOKEN_KEY = 'gptActionMonitorToken';
+  const POSITION_KEY = 'gptActionMonitorPosition';
   const POLL_WAIT_SECONDS = 25;
   const RETRY_MS = 2000;
   const IDLE_COLLAPSE_MS = 5000;
@@ -49,7 +50,7 @@
   panel.id = 'gpt-action-monitor';
   panel.className = 'gam-idle';
   panel.innerHTML = `
-    <button class="gam-peek" type="button" title="展开 Action 历史" aria-label="展开 GPT Action 历史">
+    <button class="gam-peek" type="button" title="拖动移动 · 点击展开" aria-label="展开 GPT Action 历史">
       <span class="gam-dot"></span>
       <span class="gam-peek-text" role="status" aria-live="polite">
         <strong class="gam-current-action">GPT Actions</strong>
@@ -69,7 +70,7 @@
   style.textContent = `
     #gpt-action-monitor {
       position: fixed;
-      right: 10px;
+      right: 0;
       top: 36vh;
       z-index: 2147483647;
       color: CanvasText;
@@ -80,6 +81,7 @@
     }
     #gpt-action-monitor button { font: inherit; }
     #gpt-action-monitor .gam-peek {
+      box-sizing: border-box;
       width: 238px;
       height: 38px;
       display: flex;
@@ -94,7 +96,7 @@
       box-shadow: 0 4px 16px rgba(0, 0, 0, .10);
       backdrop-filter: blur(10px);
       -webkit-backdrop-filter: blur(10px);
-      cursor: pointer;
+      cursor: grab;
       text-align: left;
       transition: width .14s ease, padding .14s ease, box-shadow .14s ease;
     }
@@ -103,15 +105,24 @@
       box-shadow: 0 6px 22px rgba(0, 0, 0, .15);
     }
     #gpt-action-monitor.gam-idle .gam-peek {
-      width: 34px;
+      width: 30px;
+      height: 40px;
       padding: 0;
       justify-content: center;
+      gap: 0;
+      border-right: 0;
+      border-radius: 13px 0 0 13px;
+      box-shadow: 0 3px 12px rgba(0, 0, 0, .08);
     }
     #gpt-action-monitor.gam-idle .gam-peek:hover,
     #gpt-action-monitor.gam-idle .gam-peek:focus-visible {
       width: 238px;
+      height: 38px;
       padding: 0 11px;
       justify-content: flex-start;
+      gap: 8px;
+      border-right: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+      border-radius: 19px;
     }
     #gpt-action-monitor .gam-peek-text {
       min-width: 0;
@@ -123,9 +134,24 @@
       opacity: 1;
       transition: opacity .10s ease;
     }
-    #gpt-action-monitor.gam-idle .gam-peek-text { opacity: 0; }
+    #gpt-action-monitor.gam-idle .gam-peek-text { display: none; }
     #gpt-action-monitor.gam-idle .gam-peek:hover .gam-peek-text,
-    #gpt-action-monitor.gam-idle .gam-peek:focus-visible .gam-peek-text { opacity: 1; }
+    #gpt-action-monitor.gam-idle .gam-peek:focus-visible .gam-peek-text { display: grid; }
+    #gpt-action-monitor.gam-detached.gam-idle .gam-peek {
+      border-right: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+      border-radius: 13px;
+    }
+    #gpt-action-monitor.gam-dragging .gam-peek,
+    #gpt-action-monitor.gam-dragging .gam-header { cursor: grabbing; }
+    #gpt-action-monitor.gam-dragging.gam-idle .gam-peek,
+    #gpt-action-monitor.gam-dragging.gam-idle .gam-peek:hover {
+      width: 30px;
+      height: 40px;
+      padding: 0;
+      justify-content: center;
+      gap: 0;
+    }
+    #gpt-action-monitor.gam-dragging.gam-idle .gam-peek-text { display: none; }
     #gpt-action-monitor .gam-current-action {
       font-weight: 600;
       overflow: hidden;
@@ -174,6 +200,9 @@
       border-bottom: 1px solid color-mix(in srgb, CanvasText 11%, transparent);
       font-size: 12px;
       font-weight: 600;
+      cursor: grab;
+      user-select: none;
+      touch-action: none;
     }
     #gpt-action-monitor .gam-header > span {
       display: flex;
@@ -243,12 +272,126 @@
   const logBox = panel.querySelector('.gam-log');
   const currentAction = panel.querySelector('.gam-current-action');
   const currentDetail = panel.querySelector('.gam-current-detail');
+  const header = panel.querySelector('.gam-header');
+
+  let suppressPeekClick = false;
+
+  function savePosition() {
+    const rect = panel.getBoundingClientRect();
+    const docked = !panel.classList.contains('gam-detached');
+    GM_setValue(POSITION_KEY, {
+      top: Math.round(rect.top),
+      left: docked ? null : Math.round(rect.left),
+      docked,
+    });
+  }
+
+  function keepInViewport() {
+    const rect = panel.getBoundingClientRect();
+    const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+    const top = Math.min(Math.max(rect.top, 8), maxTop);
+    panel.style.top = `${Math.round(top)}px`;
+
+    if (panel.classList.contains('gam-detached')) {
+      const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+      const left = Math.min(Math.max(rect.left, 8), maxLeft);
+      panel.style.left = `${Math.round(left)}px`;
+      panel.style.right = 'auto';
+    } else {
+      panel.style.left = 'auto';
+      panel.style.right = '0';
+    }
+  }
+
+  function restorePosition() {
+    const saved = GM_getValue(POSITION_KEY, null);
+    if (!saved || typeof saved !== 'object') return;
+    if (Number.isFinite(saved.top)) panel.style.top = `${saved.top}px`;
+    if (saved.docked === false && Number.isFinite(saved.left)) {
+      panel.classList.add('gam-detached');
+      panel.style.left = `${saved.left}px`;
+      panel.style.right = 'auto';
+    }
+    keepInViewport();
+  }
+
+  function makeDraggable(handle, { suppressClick = false } = {}) {
+    handle.style.touchAction = 'none';
+    handle.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      if (event.target.closest('.gam-close')) return;
+
+      // Freeze the compact handle before measuring it so an idle :hover expansion
+      // cannot make the panel jump when dragging starts.
+      panel.classList.add('gam-dragging');
+      const startRect = panel.getBoundingClientRect();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      let dragging = false;
+
+      handle.setPointerCapture(event.pointerId);
+
+      const onMove = (moveEvent) => {
+        const dx = moveEvent.clientX - startX;
+        const dy = moveEvent.clientY - startY;
+        if (!dragging && Math.hypot(dx, dy) < 4) return;
+
+        if (!dragging) {
+          dragging = true;
+          panel.classList.add('gam-detached');
+          panel.style.right = 'auto';
+        }
+
+        const width = panel.getBoundingClientRect().width;
+        const height = panel.getBoundingClientRect().height;
+        const left = Math.min(Math.max(startRect.left + dx, 8), Math.max(8, window.innerWidth - width - 8));
+        const top = Math.min(Math.max(startRect.top + dy, 8), Math.max(8, window.innerHeight - height - 8));
+        panel.style.left = `${Math.round(left)}px`;
+        panel.style.top = `${Math.round(top)}px`;
+      };
+
+      const onEnd = () => {
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', onEnd);
+        handle.removeEventListener('pointercancel', onEnd);
+
+        if (!dragging) {
+          panel.classList.remove('gam-dragging');
+          return;
+        }
+        const rect = panel.getBoundingClientRect();
+        if (window.innerWidth - rect.right < 28) {
+          panel.classList.remove('gam-detached');
+          panel.style.left = 'auto';
+          panel.style.right = '0';
+        }
+        panel.classList.remove('gam-dragging');
+        keepInViewport();
+        savePosition();
+        if (suppressClick) suppressPeekClick = true;
+      };
+
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onEnd);
+      handle.addEventListener('pointercancel', onEnd);
+    });
+  }
+
+  restorePosition();
+  makeDraggable(peek, { suppressClick: true });
+  makeDraggable(header);
+  window.addEventListener('resize', keepInViewport);
 
   peek.addEventListener('click', () => {
+    if (suppressPeekClick) {
+      suppressPeekClick = false;
+      return;
+    }
     manualOpen = true;
     window.clearTimeout(collapseTimer);
     panel.classList.add('gam-open');
     panel.classList.remove('gam-idle');
+    keepInViewport();
     logBox.scrollTop = logBox.scrollHeight;
   });
 
@@ -256,6 +399,8 @@
     manualOpen = false;
     panel.classList.remove('gam-open');
     panel.classList.add('gam-idle');
+    keepInViewport();
+    savePosition();
     peek.focus();
   });
 

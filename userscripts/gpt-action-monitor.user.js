@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.1.0
-// @description  Show recent github_skills_action calls in a small scrolling panel on ChatGPT.
+// @version      0.2.0
+// @description  Show github_skills_action activity as a compact, unobtrusive status indicator on ChatGPT.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @grant        GM_xmlhttpRequest
@@ -19,10 +19,13 @@
   const TOKEN_KEY = 'gptActionMonitorToken';
   const POLL_WAIT_SECONDS = 25;
   const RETRY_MS = 2000;
+  const IDLE_COLLAPSE_MS = 5000;
   const MAX_VISIBLE_LINES = 80;
 
   let lastId = 0;
   let stopped = false;
+  let manualOpen = false;
+  let collapseTimer = null;
 
   GM_registerMenuCommand('设置后端地址', () => {
     const current = GM_getValue(BACKEND_KEY, '');
@@ -44,96 +47,322 @@
 
   const panel = document.createElement('div');
   panel.id = 'gpt-action-monitor';
+  panel.className = 'gam-idle';
   panel.innerHTML = `
-    <div class="gam-header">
-      <span><span class="gam-dot"></span> GPT Actions</span>
-      <button class="gam-toggle" title="收起">−</button>
-    </div>
-    <div class="gam-log"></div>
+    <button class="gam-peek" type="button" title="展开 Action 历史" aria-label="展开 GPT Action 历史">
+      <span class="gam-dot"></span>
+      <span class="gam-peek-text" role="status" aria-live="polite">
+        <strong class="gam-current-action">GPT Actions</strong>
+        <span class="gam-current-detail">等待 Action</span>
+      </span>
+    </button>
+    <section class="gam-expanded" aria-label="GPT Action 历史">
+      <div class="gam-header">
+        <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
+        <button class="gam-close" type="button" title="收起" aria-label="收起 Action 历史">−</button>
+      </div>
+      <div class="gam-log"></div>
+    </section>
   `;
 
   const style = document.createElement('style');
   style.textContent = `
     #gpt-action-monitor {
       position: fixed;
-      right: 12px;
-      top: 92px;
-      width: 310px;
-      height: 260px;
+      right: 10px;
+      top: 36vh;
       z-index: 2147483647;
+      color: CanvasText;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 12px;
+      line-height: 1.35;
+      color-scheme: light dark;
+    }
+    #gpt-action-monitor button { font: inherit; }
+    #gpt-action-monitor .gam-peek {
+      width: 238px;
+      height: 38px;
       display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 11px;
+      overflow: hidden;
+      border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+      border-radius: 19px;
+      background: color-mix(in srgb, Canvas 90%, transparent);
+      color: CanvasText;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, .10);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      cursor: pointer;
+      text-align: left;
+      transition: width .14s ease, padding .14s ease, box-shadow .14s ease;
+    }
+    #gpt-action-monitor .gam-peek:hover,
+    #gpt-action-monitor .gam-peek:focus-visible {
+      box-shadow: 0 6px 22px rgba(0, 0, 0, .15);
+    }
+    #gpt-action-monitor.gam-idle .gam-peek {
+      width: 34px;
+      padding: 0;
+      justify-content: center;
+    }
+    #gpt-action-monitor.gam-idle .gam-peek:hover,
+    #gpt-action-monitor.gam-idle .gam-peek:focus-visible {
+      width: 238px;
+      padding: 0 11px;
+      justify-content: flex-start;
+    }
+    #gpt-action-monitor .gam-peek-text {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 7px;
+      align-items: baseline;
+      white-space: nowrap;
+      opacity: 1;
+      transition: opacity .10s ease;
+    }
+    #gpt-action-monitor.gam-idle .gam-peek-text { opacity: 0; }
+    #gpt-action-monitor.gam-idle .gam-peek:hover .gam-peek-text,
+    #gpt-action-monitor.gam-idle .gam-peek:focus-visible .gam-peek-text { opacity: 1; }
+    #gpt-action-monitor .gam-current-action {
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #gpt-action-monitor .gam-current-detail {
+      min-width: 0;
+      opacity: .62;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #gpt-action-monitor .gam-dot {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 8px;
+      display: inline-block;
+      border-radius: 50%;
+      background: #8b8b8b;
+    }
+    #gpt-action-monitor[data-status="online"] .gam-dot { background: #22a35a; }
+    #gpt-action-monitor[data-status="error"] .gam-dot { background: #d84a4a; }
+    #gpt-action-monitor .gam-expanded {
+      width: min(320px, calc(100vw - 20px));
+      height: min(300px, 54vh);
+      display: none;
       flex-direction: column;
       overflow: hidden;
-      border: 1px solid rgba(127, 127, 127, .28);
-      border-radius: 10px;
-      background: rgba(24, 24, 27, .92);
-      color: #e4e4e7;
-      box-shadow: 0 8px 28px rgba(0, 0, 0, .18);
-      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      backdrop-filter: blur(8px);
+      border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+      border-radius: 12px;
+      background: color-mix(in srgb, Canvas 92%, transparent);
+      color: CanvasText;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, .14);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
     }
-    #gpt-action-monitor.gam-collapsed { height: 34px; }
+    #gpt-action-monitor.gam-open .gam-peek { display: none; }
+    #gpt-action-monitor.gam-open .gam-expanded { display: flex; }
     #gpt-action-monitor .gam-header {
-      height: 34px;
-      flex: 0 0 34px;
+      height: 38px;
+      flex: 0 0 38px;
       box-sizing: border-box;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0 9px;
-      border-bottom: 1px solid rgba(127, 127, 127, .2);
-      font-family: system-ui, sans-serif;
+      padding: 0 10px 0 12px;
+      border-bottom: 1px solid color-mix(in srgb, CanvasText 11%, transparent);
       font-size: 12px;
       font-weight: 600;
     }
-    #gpt-action-monitor .gam-dot {
-      display: inline-block;
-      width: 7px;
-      height: 7px;
-      margin-right: 5px;
-      border-radius: 50%;
-      background: #71717a;
-      vertical-align: 1px;
+    #gpt-action-monitor .gam-header > span {
+      display: flex;
+      align-items: center;
+      gap: 7px;
     }
-    #gpt-action-monitor .gam-dot.online { background: #22c55e; }
-    #gpt-action-monitor .gam-dot.error { background: #ef4444; }
-    #gpt-action-monitor .gam-toggle {
+    #gpt-action-monitor .gam-close {
+      width: 28px;
+      height: 28px;
       border: 0;
+      border-radius: 7px;
       background: transparent;
       color: inherit;
       cursor: pointer;
       font-size: 17px;
       line-height: 1;
-      padding: 2px 5px;
     }
+    #gpt-action-monitor .gam-close:hover { background: color-mix(in srgb, CanvasText 8%, transparent); }
     #gpt-action-monitor .gam-log {
       flex: 1;
       overflow-y: auto;
-      padding: 8px 9px;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
+      padding: 6px 8px 8px;
+      scrollbar-width: thin;
     }
-    #gpt-action-monitor .gam-line { margin: 0 0 7px; opacity: .92; }
-    #gpt-action-monitor .gam-hint { opacity: .62; }
+    #gpt-action-monitor .gam-entry {
+      padding: 7px 8px;
+      border-radius: 8px;
+    }
+    #gpt-action-monitor .gam-entry:hover { background: color-mix(in srgb, CanvasText 5%, transparent); }
+    #gpt-action-monitor .gam-entry-top {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      min-width: 0;
+    }
+    #gpt-action-monitor .gam-time {
+      flex: 0 0 auto;
+      opacity: .48;
+      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #gpt-action-monitor .gam-action {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    #gpt-action-monitor .gam-detail {
+      margin: 2px 0 0 42px;
+      opacity: .62;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #gpt-action-monitor .gam-hint { opacity: .58; }
+    @media (prefers-reduced-motion: reduce) {
+      #gpt-action-monitor .gam-peek,
+      #gpt-action-monitor .gam-peek-text { transition: none; }
+    }
   `;
 
   document.documentElement.appendChild(style);
   document.body.appendChild(panel);
 
+  const peek = panel.querySelector('.gam-peek');
+  const close = panel.querySelector('.gam-close');
   const logBox = panel.querySelector('.gam-log');
-  const dot = panel.querySelector('.gam-dot');
-  const toggle = panel.querySelector('.gam-toggle');
+  const currentAction = panel.querySelector('.gam-current-action');
+  const currentDetail = panel.querySelector('.gam-current-detail');
 
-  toggle.addEventListener('click', () => {
-    const collapsed = panel.classList.toggle('gam-collapsed');
-    toggle.textContent = collapsed ? '+' : '−';
-    toggle.title = collapsed ? '展开' : '收起';
+  peek.addEventListener('click', () => {
+    manualOpen = true;
+    window.clearTimeout(collapseTimer);
+    panel.classList.add('gam-open');
+    panel.classList.remove('gam-idle');
+    logBox.scrollTop = logBox.scrollHeight;
   });
 
-  function appendLine(text, className = 'gam-line') {
+  close.addEventListener('click', () => {
+    manualOpen = false;
+    panel.classList.remove('gam-open');
+    panel.classList.add('gam-idle');
+    peek.focus();
+  });
+
+  function parseField(text, name) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = text.match(new RegExp(`(?:^|\\s)${escaped}=("(?:\\\\.|[^"\\\\])*"|\\[[^\\]]*\\]|[^\\s]+)`));
+    if (!match) return null;
+    const raw = match[1];
+    try {
+      return JSON.parse(raw);
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  function baseName(path) {
+    if (!path || typeof path !== 'string') return '';
+    const parts = path.replace(/\\/g, '/').split('/');
+    return parts[parts.length - 1] || path;
+  }
+
+  function compactList(value, max = 2) {
+    if (!Array.isArray(value) || !value.length) return '';
+    const names = value.slice(0, max).map((item) => baseName(String(item)));
+    return value.length > max ? `${names.join(', ')} +${value.length - max}` : names.join(', ');
+  }
+
+  function shorten(value, limit = 72) {
+    if (value === null || value === undefined) return '';
+    const oneLine = String(value).replace(/\s+/g, ' ').trim();
+    return oneLine.length > limit ? `${oneLine.slice(0, limit - 1)}…` : oneLine;
+  }
+
+  function summarize(text) {
+    const action = text.match(/\bACTION\s+([\w-]+)/)?.[1] || 'Action';
+    const time = text.match(/^\[\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2})\]/)?.[1] || '';
+    let detail = '';
+
+    if (action === 'loadSkills') {
+      detail = compactList(parseField(text, 'skill_ids'));
+    } else if (action === 'readSkillContent') {
+      detail = baseName(parseField(text, 'path'));
+    } else if (action === 'workspaceReadFiles') {
+      detail = compactList(parseField(text, 'paths')) || `${parseField(text, 'files') || ''} files`;
+    } else if (action === 'workspaceSearch') {
+      detail = shorten(parseField(text, 'query'));
+    } else if (action === 'workspaceInspect') {
+      detail = compactList(parseField(text, 'paths'));
+    } else if (action === 'workspaceWriteFile') {
+      detail = baseName(parseField(text, 'path'));
+    } else if (action === 'workspaceApplyPatch') {
+      const files = parseField(text, 'changed_files');
+      detail = Array.isArray(files) ? `${files.length} files · ${compactList(files)}` : '';
+    } else if (action === 'workspaceCommand') {
+      const commandAction = parseField(text, 'action');
+      const command = parseField(text, 'command');
+      const state = parseField(text, 'state');
+      if (command) detail = shorten(command);
+      else if (state && commandAction) detail = `${commandAction} · ${state}`;
+      else detail = shorten(state || commandAction || '');
+    } else {
+      detail = shorten(
+        parseField(text, 'path') ||
+        parseField(text, 'query') ||
+        compactList(parseField(text, 'paths')) ||
+        parseField(text, 'state') ||
+        ''
+      );
+    }
+
+    return { action, detail: detail || 'completed', time, raw: text };
+  }
+
+  function appendEvent(summary) {
     const node = document.createElement('div');
-    node.className = className;
-    node.textContent = text;
+    node.className = 'gam-entry';
+    node.title = summary.raw;
+
+    const top = document.createElement('div');
+    top.className = 'gam-entry-top';
+
+    const time = document.createElement('span');
+    time.className = 'gam-time';
+    time.textContent = summary.time || '--:--';
+
+    const action = document.createElement('span');
+    action.className = 'gam-action';
+    action.textContent = summary.action;
+
+    const detail = document.createElement('div');
+    detail.className = 'gam-detail';
+    detail.textContent = summary.detail;
+
+    top.append(time, action);
+    node.append(top, detail);
+    logBox.appendChild(node);
+
+    while (logBox.children.length > MAX_VISIBLE_LINES) {
+      logBox.firstElementChild.remove();
+    }
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function appendHint(message) {
+    const node = document.createElement('div');
+    node.className = 'gam-entry gam-hint';
+    node.textContent = message;
     logBox.appendChild(node);
     while (logBox.children.length > MAX_VISIBLE_LINES) {
       logBox.firstElementChild.remove();
@@ -141,14 +370,34 @@
     logBox.scrollTop = logBox.scrollHeight;
   }
 
+  function showActivity(summary) {
+    currentAction.textContent = summary.action;
+    currentDetail.textContent = summary.detail;
+    if (manualOpen) return;
+
+    panel.classList.remove('gam-idle');
+    window.clearTimeout(collapseTimer);
+    collapseTimer = window.setTimeout(() => {
+      if (!manualOpen) panel.classList.add('gam-idle');
+    }, IDLE_COLLAPSE_MS);
+  }
+
+  function showAttention(action, detail) {
+    currentAction.textContent = action;
+    currentDetail.textContent = detail;
+    if (!manualOpen) panel.classList.remove('gam-idle');
+    window.clearTimeout(collapseTimer);
+  }
+
   function setStatus(state) {
-    dot.classList.remove('online', 'error');
-    if (state) dot.classList.add(state);
+    if (state) panel.dataset.status = state;
+    else delete panel.dataset.status;
   }
 
   function scheduleRetry(message) {
     setStatus('error');
-    if (message) appendLine(message, 'gam-line gam-hint');
+    showAttention('连接异常', '2 秒后重试');
+    if (message) appendHint(message);
     window.setTimeout(poll, RETRY_MS);
   }
 
@@ -159,9 +408,8 @@
     const token = GM_getValue(TOKEN_KEY, '').trim();
     if (!backend) {
       setStatus('error');
-      if (!logBox.children.length) {
-        appendLine('请从篡改猴菜单设置后端地址。', 'gam-line gam-hint');
-      }
+      showAttention('需要配置后端', '点击后查看提示');
+      if (!logBox.children.length) appendHint('请从篡改猴菜单设置后端地址。');
       return;
     }
 
@@ -177,7 +425,8 @@
         if (response.status === 401) {
           stopped = true;
           setStatus('error');
-          appendLine('认证失败：请检查 Bearer Token。', 'gam-line gam-hint');
+          showAttention('认证失败', '检查 Bearer Token');
+          appendHint('认证失败：请检查 Bearer Token。');
           return;
         }
         if (response.status < 200 || response.status >= 300) {
@@ -187,11 +436,14 @@
 
         try {
           const body = JSON.parse(response.responseText);
+          let newest = null;
           for (const item of body.items || []) {
-            appendLine(item.text);
+            newest = summarize(item.text);
+            appendEvent(newest);
           }
           if (Number.isInteger(body.last_id)) lastId = body.last_id;
           setStatus('online');
+          if (newest) showActivity(newest);
           window.setTimeout(poll, 30);
         } catch (error) {
           scheduleRetry(`响应解析失败：${String(error)}`);

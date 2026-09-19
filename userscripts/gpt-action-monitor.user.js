@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.3.0
+// @version      0.3.1
 // @description  Show github_skills_action activity as a calm, energy-conscious status indicator on ChatGPT.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -18,6 +18,8 @@
   const BACKEND_KEY = 'gptActionMonitorBackend';
   const TOKEN_KEY = 'gptActionMonitorToken';
   const POSITION_KEY = 'gptActionMonitorPosition';
+  const TARGET_GPT_NAME = 'github_skill';
+  const GPT_TITLE_SELECTOR = 'div[type="button"][aria-haspopup="menu"]';
   const POLL_WAIT_SECONDS = 55;
   const RETRY_MS = 3000;
   const ACTIVITY_VISIBLE_MS = 4000;
@@ -26,7 +28,11 @@
   const COMPACT_WIDTH = 30;
 
   let lastId = 0;
+  let needsCursorPrime = true;
   let stopped = false;
+  let monitorActive = false;
+  let activeTitleElement = null;
+  let gateObserver = null;
   let manualOpen = false;
   let suppressHandleClick = false;
   let requestHandle = null;
@@ -274,9 +280,6 @@
     }
   `;
 
-  document.documentElement.appendChild(style);
-  document.body.appendChild(panel);
-
   const handle = panel.querySelector('.gam-handle');
   const close = panel.querySelector('.gam-close');
   const header = panel.querySelector('.gam-header');
@@ -286,6 +289,21 @@
 
   function setStatus(state) {
     panel.dataset.status = state;
+  }
+
+  function mountUi() {
+    if (!style.isConnected) document.documentElement.appendChild(style);
+    if (!panel.isConnected) document.body.appendChild(panel);
+    restorePosition();
+  }
+
+  function unmountUi() {
+    if (panel.isConnected) savePosition();
+    panel.classList.remove('gam-open', 'gam-chip-visible', 'gam-dragging');
+    manualOpen = false;
+    logBox.replaceChildren();
+    panel.remove();
+    style.remove();
   }
 
   function updateChipSide() {
@@ -594,7 +612,7 @@
 
   function queueActivity(summary) {
     pendingLatest = summary;
-    if (uiTimer !== null || document.visibilityState !== 'visible') return;
+    if (!monitorActive || uiTimer !== null || document.visibilityState !== 'visible') return;
     uiTimer = window.setTimeout(flushActivity, UI_COALESCE_MS);
   }
 
@@ -620,7 +638,7 @@
 
   function schedulePoll(delay = 30) {
     clearPollTimer();
-    if (stopped || document.visibilityState !== 'visible') return;
+    if (!monitorActive || stopped || document.visibilityState !== 'visible') return;
     pollTimer = window.setTimeout(() => {
       pollTimer = null;
       poll();
@@ -654,7 +672,7 @@
   }
 
   function resumePolling() {
-    if (stopped || document.visibilityState !== 'visible') return;
+    if (!monitorActive || stopped || document.visibilityState !== 'visible') return;
     if (pendingLatest) queueActivity(pendingLatest);
     schedulePoll(0);
   }
@@ -666,7 +684,7 @@
   }
 
   function poll() {
-    if (stopped || requestHandle || document.visibilityState !== 'visible') return;
+    if (!monitorActive || stopped || requestHandle || document.visibilityState !== 'visible') return;
 
     const backend = GM_getValue(BACKEND_KEY, '').trim().replace(/\/+$/, '');
     const token = GM_getValue(TOKEN_KEY, '').trim();
@@ -680,11 +698,15 @@
     if (token) headers.Authorization = `Bearer ${token}`;
 
     const generation = ++requestGeneration;
+    const priming = needsCursorPrime;
+    const requestAfter = priming ? Number.MAX_SAFE_INTEGER : lastId;
+    const requestWait = priming ? 0 : POLL_WAIT_SECONDS;
+    const requestLimit = priming ? 1 : 50;
     requestHandle = GM_xmlhttpRequest({
       method: 'GET',
-      url: `${backend}/v1/action-logs?after=${lastId}&wait=${POLL_WAIT_SECONDS}&limit=50`,
+      url: `${backend}/v1/action-logs?after=${requestAfter}&wait=${requestWait}&limit=${requestLimit}`,
       headers,
-      timeout: (POLL_WAIT_SECONDS + 5) * 1000,
+      timeout: (requestWait + 5) * 1000,
       onload(response) {
         if (generation !== requestGeneration) return;
         requestHandle = null;
@@ -703,12 +725,18 @@
 
         try {
           const body = JSON.parse(response.responseText);
+          if (Number.isInteger(body.last_id)) lastId = body.last_id;
+          if (priming) {
+            needsCursorPrime = false;
+            setStatus('idle');
+            schedulePoll(0);
+            return;
+          }
           let newest = null;
           for (const item of body.items || []) {
             newest = summarize(item.text);
             recordEvent(newest);
           }
-          if (Number.isInteger(body.last_id)) lastId = body.last_id;
           if (newest) {
             queueActivity(newest);
           } else if (panel.dataset.status === 'error') {
@@ -738,16 +766,129 @@
     });
   }
 
-  restorePosition();
+  function isTargetTitle(element) {
+    return Boolean(
+      element &&
+      element.nodeType === Node.ELEMENT_NODE &&
+      element.matches(GPT_TITLE_SELECTOR) &&
+      (element.textContent || '').replace(/\s+/g, ' ').trim() === TARGET_GPT_NAME
+    );
+  }
+
+  function findTargetTitle(root = document) {
+    if (root.nodeType === Node.ELEMENT_NODE && isTargetTitle(root)) return root;
+    if (typeof root.querySelectorAll !== 'function') return null;
+    for (const element of root.querySelectorAll(GPT_TITLE_SELECTOR)) {
+      if (isTargetTitle(element)) return element;
+    }
+    return null;
+  }
+
+  function resetSessionState() {
+    history.length = 0;
+    lastId = 0;
+    needsCursorPrime = true;
+    stopped = false;
+    pendingLatest = null;
+    if (uiTimer !== null) {
+      window.clearTimeout(uiTimer);
+      uiTimer = null;
+    }
+    window.clearTimeout(activityTimer);
+  }
+
+  function activateMonitor(titleElement) {
+    if (monitorActive) {
+      activeTitleElement = titleElement;
+      return;
+    }
+    monitorActive = true;
+    activeTitleElement = titleElement;
+    resetSessionState();
+    mountUi();
+    setStatus('idle');
+    if (document.visibilityState === 'visible') schedulePoll(0);
+  }
+
+  function deactivateMonitor() {
+    if (!monitorActive) return;
+    monitorActive = false;
+    activeTitleElement = null;
+    suspendPolling();
+    resetSessionState();
+    unmountUi();
+  }
+
+  function evaluateActivation() {
+    const target = findTargetTitle(document);
+    if (target) activateMonitor(target);
+    else deactivateMonitor();
+  }
+
+  function targetFromMutation(mutation) {
+    const mutationElement = mutation.target.nodeType === Node.ELEMENT_NODE
+      ? mutation.target
+      : mutation.target.parentElement;
+    const containingTitle = mutationElement?.closest?.(GPT_TITLE_SELECTOR);
+    if (isTargetTitle(containingTitle)) return containingTitle;
+
+    for (const node of mutation.addedNodes) {
+      const target = findTargetTitle(node);
+      if (target) return target;
+    }
+    return null;
+  }
+
+  function startGateObserver() {
+    if (gateObserver || !document.body) return;
+    gateObserver = new MutationObserver((mutations) => {
+      if (monitorActive) {
+        if (activeTitleElement?.isConnected && isTargetTitle(activeTitleElement)) return;
+        evaluateActivation();
+        return;
+      }
+
+      for (const mutation of mutations) {
+        const target = targetFromMutation(mutation);
+        if (target) {
+          activateMonitor(target);
+          return;
+        }
+      }
+    });
+    gateObserver.observe(document.body, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+  }
+
+  function stopGateObserver() {
+    if (!gateObserver) return;
+    gateObserver.disconnect();
+    gateObserver = null;
+  }
+
   makeDraggable(handle, { suppressClick: true });
   makeDraggable(header);
   handle.addEventListener('click', openHistory);
   close.addEventListener('click', closeHistory);
-  window.addEventListener('resize', keepInViewport);
+  window.addEventListener('resize', () => {
+    if (monitorActive) keepInViewport();
+  });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') resumePolling();
-    else suspendPolling();
+    if (document.visibilityState === 'visible') {
+      startGateObserver();
+      evaluateActivation();
+      resumePolling();
+    } else {
+      stopGateObserver();
+      suspendPolling();
+    }
   });
 
-  if (document.visibilityState === 'visible') poll();
+  if (document.visibilityState === 'visible') {
+    startGateObserver();
+    evaluateActivation();
+  }
 })();

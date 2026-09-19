@@ -218,7 +218,7 @@ Authorization: Bearer <token>
 1. **设置后端地址**：例如 `https://skills.example.com`。
 2. **设置 Bearer Token**：如果服务端配置了 `SKILL_TEMPLE_BEARER_TOKEN`，填写同一个 token；未启用认证时留空。
 
-脚本访问 `GET /v1/action-logs`。该接口不会出现在 GPT 使用的 OpenAPI schema 中，只用于日志小窗；它复用 `/v1/*` 的 Bearer 认证，并仅返回内存中最近的脱敏 Action 日志。页面可见时使用低频长轮询，有 Action 会立即返回；切到后台标签页或最小化浏览器时会中止请求，重新可见后再补拉期间产生的日志。
+脚本只在 ChatGPT 顶部 GPT 菜单的当前名称精确为 `github_skill` 时激活；切换到其他 GPT 后会立即中止请求并卸载日志 UI。脚本访问 `GET /v1/action-logs`，该接口不会出现在 GPT 使用的 OpenAPI schema 中，只用于日志小窗；它复用 `/v1/*` 的 Bearer 认证，并仅返回内存中最近的脱敏 Action 日志。页面可见时使用 55 秒低频长轮询，有 Action 会立即返回；切到后台标签页或最小化浏览器时会中止请求，重新可见后再恢复监听。
 
 ## 安装和运行
 

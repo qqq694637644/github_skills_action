@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from skill_temple.action_logging import command_for_log
+from skill_temple.action_logging import clear_action_events, command_for_log
 from skill_temple.app import create_app, main
 from skill_temple.evals import evaluate_file
 from skill_temple.openapi_builder import build_openapi
@@ -290,6 +290,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(unsafe.json()["detail"]["error"]["code"], "unsafe_or_missing_path")
 
     def test_skill_actions_emit_key_input_logs(self) -> None:
+        clear_action_events()
         client = TestClient(create_app())
 
         with (
@@ -320,6 +321,28 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn('path="references/actions.md"', logs)
         self.assertIn("requested_start_line=3", logs)
         self.assertIn("requested_max_lines=7", logs)
+
+    def test_action_log_monitor_returns_only_new_events(self) -> None:
+        clear_action_events()
+        client = TestClient(create_app())
+
+        loaded = client.post("/v1/skills/load", json={"skill_ids": ["github-maintenance"]})
+        first = client.get("/v1/action-logs", params={"after": 0, "wait": 0})
+
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(first.status_code, 200)
+        first_body = first.json()
+        self.assertEqual(len(first_body["items"]), 1)
+        self.assertIn("ACTION loadSkills", first_body["items"][0]["text"])
+        self.assertGreater(first_body["last_id"], 0)
+
+        second = client.get(
+            "/v1/action-logs",
+            params={"after": first_body["last_id"], "wait": 0},
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["items"], [])
+        self.assertEqual(second.json()["last_id"], first_body["last_id"])
 
     def test_command_log_text_is_bounded_and_redacts_common_secrets(self) -> None:
         script = (
@@ -362,6 +385,14 @@ class RuntimeTests(unittest.TestCase):
                 json={"skill_ids": ["github-maintenance"]},
                 headers={"Authorization": "Bearer secret-token"},
             )
+            action_logs_unauthorized = client.get(
+                "/v1/action-logs", params={"wait": 0}
+            )
+            action_logs_authorized = client.get(
+                "/v1/action-logs",
+                params={"wait": 0},
+                headers={"Authorization": "Bearer secret-token"},
+            )
             console_authorized = client.post(
                 "/console/read",
                 json={"skill_id": "github-maintenance", "path": "SKILL.md"},
@@ -374,6 +405,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(console_unauthorized.status_code, 401)
         self.assertEqual(authorized.status_code, 200)
+        self.assertEqual(action_logs_unauthorized.status_code, 401)
+        self.assertEqual(action_logs_authorized.status_code, 200)
         self.assertEqual(console_authorized.status_code, 200)
         self.assertIn("BearerAuth", schema["components"]["securitySchemes"])
         self.assertEqual(

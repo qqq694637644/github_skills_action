@@ -295,7 +295,11 @@ class LocalWorkspaceService:
     async def command_start(self, *, workspace_id: str, **kwargs: Any) -> dict[str, Any]:
         root = self.root(workspace_id)
         manager = self._operation_manager()
-        return await manager.start(workspace_id=workspace_id, workspace_root=root, **kwargs)
+        operation = await manager.start(workspace_id=workspace_id, workspace_root=root, **kwargs)
+        return await manager.wait_for_terminal(
+            str(operation["operation_id"]),
+            timeout_seconds=manager.settings.sync_wait_seconds,
+        )
 
     async def command_get(self, operation_id: str) -> dict[str, Any]:
         return await self._operation_manager().get(operation_id)
@@ -325,6 +329,9 @@ class LocalWorkspaceService:
                 OperationSettings(
                     root=runtime_root,
                     shell=env_value_from_environment_or_dotenv("WORKSPACE_PWSH_PATH") or "pwsh",
+                    sync_wait_seconds=max(
+                        0, _env_int("WORKSPACE_COMMAND_SYNC_WAIT_SECONDS", 5)
+                    ),
                     default_timeout_seconds=_env_int("WORKSPACE_COMMAND_TIMEOUT_SECONDS", 120),
                     max_timeout_seconds=_env_int("WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS", 3600),
                     default_output_bytes=_env_int("WORKSPACE_COMMAND_OUTPUT_BYTES", 1_000_000),

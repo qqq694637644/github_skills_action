@@ -34,6 +34,7 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 class OperationSettings:
     root: Path
     shell: str = "pwsh"
+    sync_wait_seconds: int = 5
     default_timeout_seconds: int = 120
     max_timeout_seconds: int = 3600
     default_output_bytes: int = 1_000_000
@@ -315,6 +316,22 @@ class WorkspaceOperationManager:
             return self._public_record(record)
 
     async def get(self, operation_id: str) -> dict[str, Any]:
+        return self._public_record(self._require_operation(operation_id))
+
+    async def wait_for_terminal(
+        self, operation_id: str, *, timeout_seconds: int
+    ) -> dict[str, Any]:
+        record = self._require_operation(operation_id)
+        if record.get("state") in _TERMINAL_STATES or timeout_seconds <= 0:
+            return self._public_record(record)
+        runtime = self._runtimes.get(operation_id)
+        task = runtime.task if runtime is not None else None
+        if task is None:
+            return self._public_record(record)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        except TimeoutError:
+            pass
         return self._public_record(self._require_operation(operation_id))
 
     async def list_operations(self, state: str | None = None) -> list[dict[str, Any]]:

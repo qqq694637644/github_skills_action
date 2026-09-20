@@ -24,7 +24,7 @@ Skill Temple 把 Codex 的 Skill 思路适配到 Custom GPT Actions：
 | `workspaceReadFiles` | `POST /v1/workspace/read-files` | 读取工作区文件 |
 | `workspaceWriteFile` | `POST /v1/workspace/write-file` | 创建或覆盖文本文件 |
 | `workspaceApplyPatch` | `POST /v1/workspace/apply-patch` | 应用多文件文本补丁 |
-| `workspaceCommand` | `POST /v1/workspace/command` | 异步运行 PowerShell 7 命令 |
+| `workspaceCommand` | `POST /v1/workspace/command` | 运行 PowerShell 7 命令，短任务同步返回，长任务返回 operation |
 
 ## Workspace 模型
 
@@ -42,7 +42,7 @@ gh pr view 123
 
 同一个 workspace 可以长期复用并自由切换 branch，也可以同时放多个仓库。不同任务需要隔离状态时创建不同的 workspace。
 
-除 `workspaceCommand(action="start")` 外，文件类 Workspace Actions 都要求显式 `workspace_id`；命令启动后，`get`、`logs`、`cancel` 使用全局唯一 `operation_id` 即可。operation 的 timeout、日志、取消、进程树终止、持久状态和 idempotency 机制保持独立于 workspace 生命周期。
+除 `workspaceCommand(action="start")` 外，文件类 Workspace Actions 都要求显式 `workspace_id`；`start` 会先等待一个较短的同步窗口，命令快速完成时直接返回 stdout/stderr 和终态；仍在运行时返回全局唯一 `operation_id`，再用 `get`、`logs`、`cancel` 跟进。operation 的 timeout、日志、取消、进程树终止、持久状态和 idempotency 机制保持独立于 workspace 生命周期。
 
 `workspaceCommand` 是宿主权限下的原生 PowerShell：后端不检查命令字符串、不区分网络命令，也不清洗子进程环境。实际权限边界就是运行服务的操作系统账户以及该账户已经配置的 CLI/凭据。
 
@@ -305,6 +305,14 @@ SKILL_TEMPLE_BEARER_TOKEN=replace-with-a-long-random-secret
 
 不要提交包含真实 token 的 `.env`。
 
+`workspaceCommand(action="start")` 默认等待短命令完成；超过同步等待窗口后才返回仍在运行的 `operation_id`：
+
+```dotenv
+WORKSPACE_COMMAND_SYNC_WAIT_SECONDS=5
+```
+
+这个值只控制 GPT Action 当前请求等待多久，不是命令最大运行时间；命令运行上限仍由 `timeout_seconds` 或 `WORKSPACE_COMMAND_TIMEOUT_SECONDS` 控制。
+
 ### 5. 可选：配置 GitHub CLI
 
 使用 `github-maintenance` Skill 前确认 `gh` 已登录，并让 Git HTTPS 操作使用相同认证：
@@ -343,8 +351,7 @@ skill-temple --host 0.0.0.0 --port 8765
 
 ```text
 ACTION workspaceSearch workspace_id="ws_..." query="workspaceSearch" paths=["repo"] match_count=12 truncated=false
-ACTION workspaceCommand action="start" workspace_id="ws_..." command="git status --short --branch" timeout_seconds=60 operation_id="op_..." state="running"
-ACTION workspaceCommand action="get" operation_id="op_..." state="succeeded" exit_code=0 duration_ms=183
+ACTION workspaceCommand action="start" workspace_id="ws_..." command="git status --short --branch" timeout_seconds=60 operation_id="op_..." state="succeeded" exit_code=0 duration_ms=183
 ```
 
 命令会保留关键文本但限制单条日志长度，并对常见 token/password/secret/API key 赋值做脱敏；文件正文、完整 patch、stdout/stderr 正文不会进入 Action 日志。需要临时恢复原始 HTTP access log 时加 `--access-log`。

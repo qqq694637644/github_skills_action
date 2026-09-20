@@ -249,8 +249,9 @@ class WorkspaceOperationSummary(WorkspaceModel):
 class WorkspaceCommandRequest(WorkspaceModel):
     action: Literal["start", "get", "logs", "cancel", "list"] = Field(
         description=(
-            "start launches a command; get reads status; logs reads output; cancel stops it; "
-            "list enumerates operations."
+            "start executes a command and returns output when it finishes quickly; when it "
+            "returns a running operation_id, get reads status, logs reads output, cancel stops "
+            "it, and list enumerates operations."
         )
     )
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
@@ -357,8 +358,8 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceCommandResponse,
         summary="Start or manage a PowerShell workspace command.",
         description=(
-            "Run or manage asynchronous PowerShell 7 work. start returns an operation; follow "
-            "with get/logs until a terminal state before treating the command as complete."
+            "Run PowerShell 7 work. start returns output if the command finishes quickly; when "
+            "it returns a running operation_id, follow with get/logs until a terminal state."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -392,8 +393,18 @@ def register_workspace_actions(app: FastAPI) -> None:
                     utf8_output=False if not request.utf8_output else None,
                     operation_id=operation.operation_id,
                     state=operation.state,
+                    exit_code=operation.exit_code,
+                    duration_ms=operation.duration_ms if operation.state != "running" else None,
                 )
-                return WorkspaceCommandResponse(action="start", operation=operation)
+                if operation.state == "running":
+                    return WorkspaceCommandResponse(action="start", operation=operation)
+                logs = await service.command_logs(
+                    operation.operation_id,
+                    stdout_offset=0,
+                    stderr_offset=0,
+                    max_bytes=request.max_bytes,
+                )
+                return WorkspaceCommandResponse(action="start", operation=operation, **logs)
             if request.action == "get":
                 assert request.operation_id is not None
                 operation = WorkspaceOperationSummary.model_validate(

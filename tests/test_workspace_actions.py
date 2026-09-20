@@ -19,6 +19,7 @@ class WorkspaceActionsTests(unittest.TestCase):
         environment = {
             "WORKSPACE_ROOT": str(root),
             "WORKSPACE_OPERATION_ROOT": str(operation_root or (root / ".operations")),
+            "WORKSPACE_COMMAND_SYNC_WAIT_SECONDS": "1",
         }
         self.environment_patch = patch.dict(os.environ, environment, clear=False)
         self.environment_patch.start()
@@ -92,7 +93,11 @@ class WorkspaceActionsTests(unittest.TestCase):
             openapi["paths"]["/v1/workspace/read-files"]["post"]["description"],
         )
         self.assertIn(
-            "terminal state",
+            "finishes quickly",
+            openapi["paths"]["/v1/workspace/command"]["post"]["description"],
+        )
+        self.assertIn(
+            "running operation_id",
             openapi["paths"]["/v1/workspace/command"]["post"]["description"],
         )
 
@@ -443,13 +448,20 @@ class WorkspaceActionsTests(unittest.TestCase):
                         },
                     )
                 self.assertEqual(started.status_code, 200, started.text)
-                operation_id = started.json()["operation"]["operation_id"]
+                started_body = started.json()
+                operation_id = started_body["operation"]["operation_id"]
+                self.assertEqual(started_body["operation"]["state"], "succeeded")
+                self.assertIn("hello", started_body["stdout"])
+                self.assertIn("oops", started_body["stderr"])
+                self.assertTrue(started_body["stdout_eof"])
+                self.assertTrue(started_body["stderr_eof"])
                 action_log = "\n".join(captured.output)
                 self.assertIn("ACTION workspaceCommand action=\"start\"", action_log)
                 self.assertIn(f'workspace_id="{workspace_id}"', action_log)
                 self.assertIn("command=\"Write-Output 'hello';", action_log)
                 self.assertIn(f'operation_id="{operation_id}"', action_log)
                 self.assertIn("timeout_seconds=20", action_log)
+                self.assertIn("state=\"succeeded\"", action_log)
                 terminal = self._poll_operation(client, operation_id)
                 self.assertEqual(terminal["state"], "succeeded")
 
@@ -528,6 +540,8 @@ class WorkspaceActionsTests(unittest.TestCase):
                         "timeout_seconds": 20,
                     },
                 )
+                self.assertEqual(cancel.status_code, 200, cancel.text)
+                self.assertEqual(cancel.json()["operation"]["state"], "running")
                 cancel_id = cancel.json()["operation"]["operation_id"]
                 cancel_response = client.post(
                     "/v1/workspace/command",

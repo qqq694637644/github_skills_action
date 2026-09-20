@@ -16,6 +16,7 @@ import * as MonitorConstants from './constants.js';
 import { summarize } from './formatter/action-formatter.js';
 import { loadProfiles, profileForName, validateBackend } from './profile/profile-store.js';
 import { createActionLogClient } from './api/action-log-client.js';
+import { createEventStore } from './store/event-store.js';
 
 (function () {
   'use strict';
@@ -40,7 +41,7 @@ import { createActionLogClient } from './api/action-log-client.js';
   let activityTimer = null;
   let uiTimer = null;
   let pendingLatest = null;
-  const history = [];
+  const eventStore = createEventStore();
   let profiles = loadProfiles();
   let settingsOverlay = null;
   let settingsStyle = null;
@@ -880,36 +881,27 @@ import { createActionLogClient } from './api/action-log-client.js';
     return node;
   }
 
-  function trimHistory() {
-    while (history.length > MAX_HISTORY) {
-      history.shift();
-      if (manualOpen && logBox.firstElementChild) logBox.firstElementChild.remove();
-    }
-  }
-
   function recordEvent(summary) {
-    history.push({ kind: 'event', summary });
+    eventStore.add(summary);
     if (manualOpen) {
       logBox.appendChild(createEventNode(summary));
       logBox.scrollTop = logBox.scrollHeight;
     }
-    trimHistory();
   }
 
   function recordHint(message) {
-    const previous = history[history.length - 1];
+    const previous = eventStore.all().at(-1);
     if (previous?.kind === 'hint' && previous.message === message) return;
-    history.push({ kind: 'hint', message });
+    eventStore.addHint(message);
     if (manualOpen) {
       logBox.appendChild(createHintNode(message));
       logBox.scrollTop = logBox.scrollHeight;
     }
-    trimHistory();
   }
 
   function renderHistory() {
     const fragment = document.createDocumentFragment();
-    for (const item of history) {
+    for (const item of eventStore.all()) {
       fragment.appendChild(
         item.kind === 'event' ? createEventNode(item.summary) : createHintNode(item.message),
       );
@@ -1029,7 +1021,7 @@ import { createActionLogClient } from './api/action-log-client.js';
   }
 
   function resetSessionState() {
-    history.length = 0;
+    eventStore.clear();
     lastId = 0;
     needsCursorPrime = true;
     stopped = false;

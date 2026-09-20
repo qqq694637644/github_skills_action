@@ -29,7 +29,7 @@ Skill 负责领域流程和停止条件；Workspace Actions 负责读取、搜�
 3. **Read**：路径已经确定后，用 `workspaceReadFiles` 读取最少足够上下文。新内容出现高价值标识符、调用方、配置键、测试名或错误文本时，再 Search 追踪；改动点和验证边界已经明确后停止扩大搜索。
 4. **Act**：局部或多文件文本修改优先 `workspaceApplyPatch`；创建或完整替换文本文件用 `workspaceWriteFile`；测试、构建、项目 CLI、git/gh 和必要诊断用 `workspaceCommand`。保留与当前任务无关的已有修改。
 5. **Verify**：先运行最直接的相关检查，再按改动风险扩大到测试、lint、类型检查、构建或集成验证。失败时读取真实错误并针对性修复，不在没有新信息时重复同一失败步骤。
-6. **Recheck**：Action 返回截断、分页或 continuation 时结果不完整；`workspaceCommand` 的 `start` 不是完成，必须跟进到终态。发生外部写操作后重新读取真实远端状态，不根据命令意图推断成功。
+6. **Recheck**：Action 返回截断、分页或 continuation 时结果不完整；`workspaceCommand(action="start")` 若返回完整 stdout/stderr 与终态则可直接使用，若返回 `state="running"` 的 `operation_id`，必须继续用 `get/logs` 跟进到终态。发生外部写操作后重新读取真实远端状态，不根据命令意图推断成功。
 
 大日志或大命令输出优先保存到 workspace，再用 `workspaceSearch` 和分段读取缩小信息量，不把整份输出塞回上下文。不得输出 token、password、private key 或其他 credential/secret 值。
 

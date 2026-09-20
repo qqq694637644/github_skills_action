@@ -1,0 +1,11 @@
+{
+  "name": "gpt-action-monitor-userscript",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/main.js --bundle --outfile=dist/gpt-action-monitor.user.js --format=iife"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}
+

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.3.1
+// @version      0.4.0
 // @description  Show github_skills_action activity as a calm, energy-conscious status indicator on ChatGPT.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -15,10 +15,8 @@
 (function () {
   'use strict';
 
-  const BACKEND_KEY = 'gptActionMonitorBackend';
-  const TOKEN_KEY = 'gptActionMonitorToken';
+  const PROFILES_KEY = 'gptActionMonitorProfiles';
   const POSITION_KEY = 'gptActionMonitorPosition';
-  const TARGET_GPT_NAME = 'github_skill';
   const GPT_TITLE_SELECTOR = 'div[type="button"][aria-haspopup="menu"]';
   const POLL_WAIT_SECONDS = 55;
   const RETRY_MS = 3000;
@@ -32,6 +30,7 @@
   let stopped = false;
   let monitorActive = false;
   let activeTitleElement = null;
+  let activeProfile = null;
   let gateObserver = null;
   let manualOpen = false;
   let suppressHandleClick = false;
@@ -42,24 +41,58 @@
   let uiTimer = null;
   let pendingLatest = null;
   const history = [];
+  let profiles = loadProfiles();
+  let settingsOverlay = null;
+  let settingsStyle = null;
 
-  GM_registerMenuCommand('设置后端地址', () => {
-    const current = GM_getValue(BACKEND_KEY, '');
-    const value = prompt('后端地址，例如 https://skills.example.com', current);
-    if (value !== null) {
-      GM_setValue(BACKEND_KEY, value.trim().replace(/\/+$/, ''));
-      location.reload();
-    }
-  });
+  function createProfileId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
 
-  GM_registerMenuCommand('设置 Bearer Token', () => {
-    const current = GM_getValue(TOKEN_KEY, '');
-    const value = prompt('Bearer Token（后端未启用认证可留空）', current);
-    if (value !== null) {
-      GM_setValue(TOKEN_KEY, value.trim());
-      location.reload();
+  function normalizeBackend(value) {
+    return String(value || '').trim().replace(/\/+$/, '');
+  }
+
+  function normalizeProfile(profile) {
+    return {
+      id: String(profile?.id || createProfileId()),
+      gptName: String(profile?.gptName || '').trim(),
+      backend: normalizeBackend(profile?.backend),
+      token: String(profile?.token || '').trim(),
+      enabled: profile?.enabled !== false,
+    };
+  }
+
+  function loadProfiles() {
+    const stored = GM_getValue(PROFILES_KEY, null);
+    if (!Array.isArray(stored)) return [];
+    return stored.map(normalizeProfile).filter((profile) => profile.gptName && profile.backend);
+  }
+
+  function titleName(element) {
+    return (element?.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function profileForName(name) {
+    return profiles.find((profile) => profile.enabled && profile.gptName === name) || null;
+  }
+
+  function validateBackend(value) {
+    const backend = normalizeBackend(value);
+    let parsed;
+    try {
+      parsed = new URL(backend);
+    } catch (_) {
+      return { ok: false, message: '请输入有效的后端 URL。' };
     }
-  });
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return { ok: false, message: '后端地址仅支持 http:// 或 https://。' };
+    }
+    return { ok: true, backend };
+  }
+
+  GM_registerMenuCommand('⚙ 监控配置...', openSettings);
 
   const panel = document.createElement('div');
   panel.id = 'gpt-action-monitor';
@@ -279,6 +312,445 @@
       #gpt-action-monitor .gam-chip { transition: none; }
     }
   `;
+
+  function backendLabel(backend) {
+    try {
+      const parsed = new URL(backend);
+      return parsed.host + (parsed.pathname === '/' ? '' : parsed.pathname);
+    } catch (_) {
+      return backend;
+    }
+  }
+
+  function applyProfiles(nextProfiles) {
+    profiles = nextProfiles.map(normalizeProfile);
+    GM_setValue(PROFILES_KEY, profiles);
+    if (monitorActive) deactivateMonitor();
+    if (document.visibilityState === 'visible') evaluateActivation();
+  }
+
+  function closeSettings() {
+    settingsOverlay?.remove();
+    settingsStyle?.remove();
+    settingsOverlay = null;
+    settingsStyle = null;
+  }
+
+  function testProfileConnection(profile, statusElement, button) {
+    const validation = validateBackend(profile.backend);
+    if (!validation.ok) {
+      statusElement.textContent = validation.message;
+      statusElement.dataset.state = 'error';
+      return;
+    }
+
+    button.disabled = true;
+    statusElement.textContent = '正在测试连接…';
+    statusElement.dataset.state = 'pending';
+    const headers = {};
+    if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
+
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: `${validation.backend}/v1/action-logs?after=${Number.MAX_SAFE_INTEGER}&wait=0&limit=1`,
+      headers,
+      timeout: 7000,
+      onload(response) {
+        button.disabled = false;
+        if (response.status >= 200 && response.status < 300) {
+          statusElement.textContent = '✓ 连接成功';
+          statusElement.dataset.state = 'success';
+        } else if (response.status === 401) {
+          statusElement.textContent = '认证失败，请检查 Bearer Token。';
+          statusElement.dataset.state = 'error';
+        } else {
+          statusElement.textContent = `后端返回 HTTP ${response.status}。`;
+          statusElement.dataset.state = 'error';
+        }
+      },
+      onerror() {
+        button.disabled = false;
+        statusElement.textContent = '无法连接后端。';
+        statusElement.dataset.state = 'error';
+      },
+      ontimeout() {
+        button.disabled = false;
+        statusElement.textContent = '连接超时。';
+        statusElement.dataset.state = 'error';
+      },
+    });
+  }
+
+  function openSettings() {
+    if (settingsOverlay?.isConnected) return;
+
+    settingsStyle = document.createElement('style');
+    settingsStyle.textContent = `
+      #gam-settings-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: grid;
+        place-items: center;
+        padding: 20px;
+        box-sizing: border-box;
+        background: rgba(0, 0, 0, .28);
+        color-scheme: light dark;
+        font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #gam-settings-overlay * { box-sizing: border-box; }
+      #gam-settings-overlay .gam-settings-card {
+        width: min(620px, 100%);
+        max-height: min(720px, calc(100vh - 40px));
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+        border-radius: 14px;
+        background: Canvas;
+        color: CanvasText;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, .22);
+      }
+      #gam-settings-overlay .gam-settings-header {
+        height: 52px;
+        flex: 0 0 52px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 14px 0 18px;
+        border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+      }
+      #gam-settings-overlay .gam-settings-title { font-size: 15px; font-weight: 650; }
+      #gam-settings-overlay button,
+      #gam-settings-overlay input { font: inherit; }
+      #gam-settings-overlay button { color: inherit; }
+      #gam-settings-overlay .gam-icon-button {
+        width: 30px;
+        height: 30px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        cursor: pointer;
+        font-size: 19px;
+      }
+      #gam-settings-overlay .gam-icon-button:hover { background: color-mix(in srgb, CanvasText 7%, transparent); }
+      #gam-settings-overlay .gam-settings-body {
+        min-height: 0;
+        overflow-y: auto;
+        padding: 14px 16px 16px;
+      }
+      #gam-settings-overlay .gam-settings-note {
+        margin: 0 0 12px;
+        color: color-mix(in srgb, CanvasText 62%, transparent);
+        font-size: 12px;
+      }
+      #gam-settings-overlay .gam-profile-list { display: grid; gap: 8px; }
+      #gam-settings-overlay .gam-profile-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        min-height: 58px;
+        padding: 9px 10px 9px 12px;
+        border: 1px solid color-mix(in srgb, CanvasText 11%, transparent);
+        border-radius: 10px;
+      }
+      #gam-settings-overlay .gam-profile-main { min-width: 0; }
+      #gam-settings-overlay .gam-profile-name-line {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+      }
+      #gam-settings-overlay .gam-profile-state {
+        width: 7px;
+        height: 7px;
+        flex: 0 0 7px;
+        border-radius: 50%;
+        background: #22a35a;
+      }
+      #gam-settings-overlay .gam-profile-row[data-enabled="false"] .gam-profile-state { background: #8b8b8b; }
+      #gam-settings-overlay .gam-profile-name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 620;
+      }
+      #gam-settings-overlay .gam-profile-backend {
+        margin: 3px 0 0 14px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 12px;
+      }
+      #gam-settings-overlay .gam-button {
+        min-height: 32px;
+        padding: 5px 11px;
+        border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+        border-radius: 8px;
+        background: color-mix(in srgb, Canvas 96%, CanvasText 4%);
+        cursor: pointer;
+      }
+      #gam-settings-overlay .gam-button:hover { background: color-mix(in srgb, Canvas 91%, CanvasText 9%); }
+      #gam-settings-overlay .gam-button:disabled { cursor: default; opacity: .5; }
+      #gam-settings-overlay .gam-button-primary {
+        border-color: #2f7d4b;
+        background: #237a42;
+        color: white;
+      }
+      #gam-settings-overlay .gam-button-primary:hover { background: #1d6938; }
+      #gam-settings-overlay .gam-list-footer {
+        display: flex;
+        justify-content: flex-start;
+        margin-top: 12px;
+      }
+      #gam-settings-overlay .gam-empty {
+        padding: 34px 18px;
+        border: 1px dashed color-mix(in srgb, CanvasText 18%, transparent);
+        border-radius: 10px;
+        text-align: center;
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+      }
+      #gam-settings-overlay .gam-editor { display: grid; gap: 13px; }
+      #gam-settings-overlay .gam-editor[hidden],
+      #gam-settings-overlay .gam-list-view[hidden] { display: none; }
+      #gam-settings-overlay .gam-field { display: grid; gap: 6px; }
+      #gam-settings-overlay .gam-field > span { font-weight: 600; }
+      #gam-settings-overlay .gam-input {
+        width: 100%;
+        height: 36px;
+        padding: 0 10px;
+        border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+        border-radius: 8px;
+        background: Canvas;
+        color: CanvasText;
+        outline: none;
+      }
+      #gam-settings-overlay .gam-input:focus { border-color: #4f8e68; box-shadow: 0 0 0 2px rgba(35, 122, 66, .12); }
+      #gam-settings-overlay .gam-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+      #gam-settings-overlay .gam-check-row { display: flex; gap: 8px; align-items: center; }
+      #gam-settings-overlay .gam-form-message { min-height: 19px; font-size: 12px; }
+      #gam-settings-overlay .gam-form-message[data-state="error"] { color: #c53e3e; }
+      #gam-settings-overlay .gam-form-message[data-state="success"] { color: #238349; }
+      #gam-settings-overlay .gam-form-message[data-state="pending"] { color: color-mix(in srgb, CanvasText 60%, transparent); }
+      #gam-settings-overlay .gam-editor-footer {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 2px;
+      }
+      #gam-settings-overlay .gam-editor-footer .gam-spacer { flex: 1; }
+      #gam-settings-overlay .gam-delete { color: #b63c3c; }
+      @media (max-width: 520px) {
+        #gam-settings-overlay { padding: 8px; }
+        #gam-settings-overlay .gam-settings-card { max-height: calc(100vh - 16px); }
+        #gam-settings-overlay .gam-editor-footer { flex-wrap: wrap; }
+      }
+    `;
+
+    settingsOverlay = document.createElement('div');
+    settingsOverlay.id = 'gam-settings-overlay';
+    settingsOverlay.innerHTML = `
+      <div class="gam-settings-card" role="dialog" aria-modal="true" aria-labelledby="gam-settings-title">
+        <div class="gam-settings-header">
+          <div class="gam-settings-title" id="gam-settings-title">Action Monitor 配置</div>
+          <button class="gam-icon-button gam-settings-close" type="button" aria-label="关闭配置">×</button>
+        </div>
+        <div class="gam-settings-body">
+          <section class="gam-list-view">
+            <p class="gam-settings-note">当前 GPT 名称会精确匹配一条已启用配置；没有匹配时监控不会运行。</p>
+            <div class="gam-profile-list"></div>
+            <div class="gam-list-footer">
+              <button class="gam-button gam-add-profile" type="button">＋ 添加监控目标</button>
+            </div>
+          </section>
+          <form class="gam-editor" hidden>
+            <label class="gam-field">
+              <span>GPT 名称</span>
+              <input class="gam-input gam-gpt-name" type="text" autocomplete="off" placeholder="例如 github_skill" required>
+            </label>
+            <label class="gam-field">
+              <span>后端地址</span>
+              <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://skills.example.com" required>
+            </label>
+            <label class="gam-field">
+              <span>Bearer Token</span>
+              <div class="gam-token-row">
+                <input class="gam-input gam-token" type="password" autocomplete="off" placeholder="未启用认证可留空">
+                <button class="gam-button gam-token-toggle" type="button">显示</button>
+              </div>
+            </label>
+            <label class="gam-check-row">
+              <input class="gam-enabled" type="checkbox" checked>
+              <span>启用此监控</span>
+            </label>
+            <div class="gam-form-message" aria-live="polite"></div>
+            <div class="gam-editor-footer">
+              <button class="gam-button gam-delete" type="button">删除</button>
+              <span class="gam-spacer"></span>
+              <button class="gam-button gam-test" type="button">测试连接</button>
+              <button class="gam-button gam-cancel-edit" type="button">取消</button>
+              <button class="gam-button gam-button-primary gam-save" type="submit">保存</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+
+    document.documentElement.appendChild(settingsStyle);
+    document.body.appendChild(settingsOverlay);
+
+    const listView = settingsOverlay.querySelector('.gam-list-view');
+    const list = settingsOverlay.querySelector('.gam-profile-list');
+    const editor = settingsOverlay.querySelector('.gam-editor');
+    const gptNameInput = settingsOverlay.querySelector('.gam-gpt-name');
+    const backendInput = settingsOverlay.querySelector('.gam-backend');
+    const tokenInput = settingsOverlay.querySelector('.gam-token');
+    const enabledInput = settingsOverlay.querySelector('.gam-enabled');
+    const formMessage = settingsOverlay.querySelector('.gam-form-message');
+    const deleteButton = settingsOverlay.querySelector('.gam-delete');
+    const testButton = settingsOverlay.querySelector('.gam-test');
+    let editingId = null;
+
+    function renderList() {
+      list.replaceChildren();
+      if (!profiles.length) {
+        const empty = document.createElement('div');
+        empty.className = 'gam-empty';
+        empty.textContent = '还没有监控配置。添加一组 GPT、后端地址和 Bearer Token。';
+        list.appendChild(empty);
+        return;
+      }
+
+      for (const profile of profiles) {
+        const row = document.createElement('div');
+        row.className = 'gam-profile-row';
+        row.dataset.enabled = String(profile.enabled);
+
+        const main = document.createElement('div');
+        main.className = 'gam-profile-main';
+        const nameLine = document.createElement('div');
+        nameLine.className = 'gam-profile-name-line';
+        const dot = document.createElement('span');
+        dot.className = 'gam-profile-state';
+        const name = document.createElement('span');
+        name.className = 'gam-profile-name';
+        name.textContent = profile.gptName;
+        const backend = document.createElement('div');
+        backend.className = 'gam-profile-backend';
+        backend.textContent = `${profile.enabled ? '已启用' : '已停用'} · ${backendLabel(profile.backend)}`;
+        nameLine.append(dot, name);
+        main.append(nameLine, backend);
+
+        const edit = document.createElement('button');
+        edit.className = 'gam-button';
+        edit.type = 'button';
+        edit.textContent = '编辑';
+        edit.addEventListener('click', () => showEditor(profile));
+        row.append(main, edit);
+        list.appendChild(row);
+      }
+    }
+
+    function clearMessage() {
+      formMessage.textContent = '';
+      delete formMessage.dataset.state;
+    }
+
+    function showEditor(profile = null) {
+      editingId = profile?.id || null;
+      gptNameInput.value = profile?.gptName || '';
+      backendInput.value = profile?.backend || '';
+      tokenInput.value = profile?.token || '';
+      tokenInput.type = 'password';
+      settingsOverlay.querySelector('.gam-token-toggle').textContent = '显示';
+      enabledInput.checked = profile?.enabled !== false;
+      deleteButton.hidden = !profile;
+      clearMessage();
+      listView.hidden = true;
+      editor.hidden = false;
+      window.setTimeout(() => gptNameInput.focus(), 0);
+    }
+
+    function showList() {
+      editor.hidden = true;
+      listView.hidden = false;
+      editingId = null;
+      renderList();
+    }
+
+    function formProfile() {
+      return {
+        id: editingId || createProfileId(),
+        gptName: gptNameInput.value.trim(),
+        backend: normalizeBackend(backendInput.value),
+        token: tokenInput.value.trim(),
+        enabled: enabledInput.checked,
+      };
+    }
+
+    function validateProfile(profile) {
+      if (!profile.gptName) return '请输入 GPT 名称。';
+      const duplicate = profiles.find(
+        (item) => item.id !== editingId && item.gptName === profile.gptName,
+      );
+      if (duplicate) return `GPT 名称 “${profile.gptName}” 已存在。`;
+      const backendValidation = validateBackend(profile.backend);
+      if (!backendValidation.ok) return backendValidation.message;
+      profile.backend = backendValidation.backend;
+      return '';
+    }
+
+    settingsOverlay.querySelector('.gam-settings-close').addEventListener('click', closeSettings);
+    settingsOverlay.querySelector('.gam-add-profile').addEventListener('click', () => showEditor());
+    settingsOverlay.querySelector('.gam-cancel-edit').addEventListener('click', showList);
+    settingsOverlay.querySelector('.gam-token-toggle').addEventListener('click', (event) => {
+      const visible = tokenInput.type === 'text';
+      tokenInput.type = visible ? 'password' : 'text';
+      event.currentTarget.textContent = visible ? '显示' : '隐藏';
+    });
+    testButton.addEventListener('click', () => {
+      const profile = formProfile();
+      clearMessage();
+      testProfileConnection(profile, formMessage, testButton);
+    });
+    deleteButton.addEventListener('click', () => {
+      if (!editingId) return;
+      const profile = profiles.find((item) => item.id === editingId);
+      if (!profile || !confirm(`删除 “${profile.gptName}” 的监控配置？`)) return;
+      applyProfiles(profiles.filter((item) => item.id !== editingId));
+      showList();
+    });
+    editor.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const profile = formProfile();
+      const error = validateProfile(profile);
+      if (error) {
+        formMessage.textContent = error;
+        formMessage.dataset.state = 'error';
+        return;
+      }
+
+      const next = editingId
+        ? profiles.map((item) => (item.id === editingId ? profile : item))
+        : [...profiles, profile];
+      applyProfiles(next);
+      showList();
+    });
+    settingsOverlay.addEventListener('click', (event) => {
+      if (event.target === settingsOverlay) closeSettings();
+    });
+    settingsOverlay.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        if (!editor.hidden) showList();
+        else closeSettings();
+      }
+    });
+
+    renderList();
+    settingsOverlay.querySelector('.gam-settings-close').focus();
+  }
 
   const handle = panel.querySelector('.gam-handle');
   const close = panel.querySelector('.gam-close');
@@ -686,13 +1158,13 @@
   function poll() {
     if (!monitorActive || stopped || requestHandle || document.visibilityState !== 'visible') return;
 
-    const backend = GM_getValue(BACKEND_KEY, '').trim().replace(/\/+$/, '');
-    const token = GM_getValue(TOKEN_KEY, '').trim();
-    if (!backend) {
-      showAttention('需要配置后端', '点击后查看提示');
-      recordHint('请从篡改猴菜单设置后端地址。');
+    const profile = activeProfile;
+    if (!profile) {
+      deactivateMonitor();
       return;
     }
+    const backend = profile.backend;
+    const token = profile.token;
 
     const headers = {};
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -766,20 +1238,26 @@
     });
   }
 
-  function isTargetTitle(element) {
-    return Boolean(
-      element &&
-      element.nodeType === Node.ELEMENT_NODE &&
-      element.matches(GPT_TITLE_SELECTOR) &&
-      (element.textContent || '').replace(/\s+/g, ' ').trim() === TARGET_GPT_NAME
-    );
+  function matchingProfile(element) {
+    if (
+      !element ||
+      element.nodeType !== Node.ELEMENT_NODE ||
+      !element.matches(GPT_TITLE_SELECTOR)
+    ) {
+      return null;
+    }
+    return profileForName(titleName(element));
   }
 
   function findTargetTitle(root = document) {
-    if (root.nodeType === Node.ELEMENT_NODE && isTargetTitle(root)) return root;
+    if (root.nodeType === Node.ELEMENT_NODE) {
+      const profile = matchingProfile(root);
+      if (profile) return { element: root, profile };
+    }
     if (typeof root.querySelectorAll !== 'function') return null;
     for (const element of root.querySelectorAll(GPT_TITLE_SELECTOR)) {
-      if (isTargetTitle(element)) return element;
+      const profile = matchingProfile(element);
+      if (profile) return { element, profile };
     }
     return null;
   }
@@ -797,13 +1275,16 @@
     window.clearTimeout(activityTimer);
   }
 
-  function activateMonitor(titleElement) {
-    if (monitorActive) {
+  function activateMonitor(titleElement, profile) {
+    if (monitorActive && activeProfile?.id === profile.id) {
       activeTitleElement = titleElement;
+      activeProfile = profile;
       return;
     }
+    if (monitorActive) deactivateMonitor();
     monitorActive = true;
     activeTitleElement = titleElement;
+    activeProfile = profile;
     resetSessionState();
     mountUi();
     setStatus('idle');
@@ -814,6 +1295,7 @@
     if (!monitorActive) return;
     monitorActive = false;
     activeTitleElement = null;
+    activeProfile = null;
     suspendPolling();
     resetSessionState();
     unmountUi();
@@ -821,7 +1303,7 @@
 
   function evaluateActivation() {
     const target = findTargetTitle(document);
-    if (target) activateMonitor(target);
+    if (target) activateMonitor(target.element, target.profile);
     else deactivateMonitor();
   }
 
@@ -830,7 +1312,8 @@
       ? mutation.target
       : mutation.target.parentElement;
     const containingTitle = mutationElement?.closest?.(GPT_TITLE_SELECTOR);
-    if (isTargetTitle(containingTitle)) return containingTitle;
+    const containingProfile = matchingProfile(containingTitle);
+    if (containingProfile) return { element: containingTitle, profile: containingProfile };
 
     for (const node of mutation.addedNodes) {
       const target = findTargetTitle(node);
@@ -843,7 +1326,10 @@
     if (gateObserver || !document.body) return;
     gateObserver = new MutationObserver((mutations) => {
       if (monitorActive) {
-        if (activeTitleElement?.isConnected && isTargetTitle(activeTitleElement)) return;
+        const currentProfile = activeTitleElement?.isConnected
+          ? matchingProfile(activeTitleElement)
+          : null;
+        if (currentProfile?.id === activeProfile?.id) return;
         evaluateActivation();
         return;
       }
@@ -851,7 +1337,7 @@
       for (const mutation of mutations) {
         const target = targetFromMutation(mutation);
         if (target) {
-          activateMonitor(target);
+          activateMonitor(target.element, target.profile);
           return;
         }
       }

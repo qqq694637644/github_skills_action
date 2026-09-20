@@ -213,12 +213,11 @@ Authorization: Bearer <token>
 
 仓库提供 `userscripts/gpt-action-monitor.user.js`。安装到 Tampermonkey 后，它会在 ChatGPT 页面右侧显示一个可折叠的小日志窗，并通过长轮询读取最近的 `ACTION ...` 日志。
 
-安装脚本后，在 Tampermonkey 菜单中设置：
+安装脚本后，在 Tampermonkey 菜单中打开 **⚙ 监控配置...**。每条监控配置由 GPT 名称、后端地址、Bearer Token 和启用状态组成，可以维护多组映射；GPT 名称要求唯一。配置页支持添加、编辑、删除、启停和“测试连接”，列表不会直接显示 Token。
 
-1. **设置后端地址**：例如 `https://skills.example.com`。
-2. **设置 Bearer Token**：如果服务端配置了 `SKILL_TEMPLE_BEARER_TOKEN`，填写同一个 token；未启用认证时留空。
+脚本会读取 ChatGPT 顶部 GPT 菜单的当前名称，并精确匹配一条已启用配置。例如 `github_skill` 可以指向后端 A，`company_github` 可以指向后端 B；没有匹配配置时不会挂载监控 UI，也不会请求任何后端。切换到另一条已配置 GPT 时会停止当前连接并改用对应的后端和 Token。0.4.0 起配置格式为破坏式升级，不再读取旧版单组“后端地址 + Token”设置，需要在 **⚙ 监控配置...** 中重新创建 Profile。
 
-脚本只在 ChatGPT 顶部 GPT 菜单的当前名称精确为 `github_skill` 时激活；切换到其他 GPT 后会立即中止请求并卸载日志 UI。脚本访问 `GET /v1/action-logs`，该接口不会出现在 GPT 使用的 OpenAPI schema 中，只用于日志小窗；它复用 `/v1/*` 的 Bearer 认证，并仅返回内存中最近的脱敏 Action 日志。页面可见时使用 55 秒低频长轮询，有 Action 会立即返回；切到后台标签页或最小化浏览器时会中止请求，重新可见后再恢复监听。
+脚本访问 `GET /v1/action-logs`，该接口不会出现在 GPT 使用的 OpenAPI schema 中，只用于日志小窗；它复用 `/v1/*` 的 Bearer 认证，并仅返回内存中最近的脱敏 Action 日志。页面可见时使用 55 秒低频长轮询，有 Action 会立即返回；切到后台标签页或最小化浏览器时会中止请求，重新可见后再恢复监听。
 
 ## 安装和运行
 

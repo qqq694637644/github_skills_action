@@ -357,4 +357,3 @@ export const SETTINGS_CSS = `
         #gam-settings-overlay .gam-editor-footer { flex-wrap: wrap; }
       }
     `;
-

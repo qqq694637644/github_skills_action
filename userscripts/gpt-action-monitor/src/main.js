@@ -64,12 +64,12 @@ import { createSettingsPanel } from './ui/settings-panel.js';
           monitorUi.recordEvent(newest);
         }
         if (newest) monitorUi.queueActivity(newest);
-        else monitorUi.clearAttention();
+        else if (monitorUi.getStatus() === 'error') monitorUi.clearAttention();
       },
       onHint: (message) => monitorUi.recordHint(message),
       onAttention: (action, detail) => monitorUi.showAttention(action, detail),
       onStatus(status) {
-        if (status === 'idle') monitorUi.clearAttention();
+        monitorUi.setStatus(status);
       },
     });
 

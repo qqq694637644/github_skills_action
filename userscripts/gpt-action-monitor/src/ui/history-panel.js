@@ -1,4 +1,11 @@
 export function createHistoryPanel({ logBox, eventStore }) {
+  function trimToStore() {
+    const maxNodes = eventStore.all().length;
+    while (logBox.childElementCount > maxNodes && logBox.firstElementChild) {
+      logBox.firstElementChild.remove();
+    }
+  }
+
   function createEventNode(summary) {
     const node = document.createElement('div');
     node.className = 'gam-entry';
@@ -33,11 +40,13 @@ export function createHistoryPanel({ logBox, eventStore }) {
 
   function appendEvent(summary) {
     logBox.appendChild(createEventNode(summary));
+    trimToStore();
     logBox.scrollTop = logBox.scrollHeight;
   }
 
   function appendHint(message) {
     logBox.appendChild(createHintNode(message));
+    trimToStore();
     logBox.scrollTop = logBox.scrollHeight;
   }
 

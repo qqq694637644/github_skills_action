@@ -2,6 +2,8 @@ import { GPT_TITLE_SELECTOR } from '../constants.js';
 
 export function createChatGPTAdapter({ getProfiles, onActivate, onDeactivate }) {
   let observer = null;
+  let activeTitleElement = null;
+  let activeProfileId = null;
 
   function titleName(element) {
     return (element?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -27,8 +29,20 @@ export function createChatGPTAdapter({ getProfiles, onActivate, onDeactivate }) 
 
   function evaluateActivation() {
     const target = findTargetTitle(document);
-    if (target) onActivate(target.element, target.profile);
-    else onDeactivate();
+    if (target) activate(target.element, target.profile);
+    else deactivate();
+  }
+
+  function activate(element, profile) {
+    activeTitleElement = element;
+    activeProfileId = profile.id;
+    onActivate(element, profile);
+  }
+
+  function deactivate() {
+    activeTitleElement = null;
+    activeProfileId = null;
+    onDeactivate();
   }
 
   function targetFromMutation(mutation) {
@@ -48,14 +62,22 @@ export function createChatGPTAdapter({ getProfiles, onActivate, onDeactivate }) 
   function start() {
     if (observer || !document.body) return;
     observer = new MutationObserver((mutations) => {
+      if (activeProfileId) {
+        const currentProfile = activeTitleElement?.isConnected
+          ? matchingProfile(activeTitleElement)
+          : null;
+        if (currentProfile?.id === activeProfileId) return;
+        evaluateActivation();
+        return;
+      }
+
       for (const mutation of mutations) {
         const target = targetFromMutation(mutation);
         if (target) {
-          onActivate(target.element, target.profile);
+          activate(target.element, target.profile);
           return;
         }
       }
-      evaluateActivation();
     });
     observer.observe(document.body, { childList: true, characterData: true, subtree: true });
     evaluateActivation();

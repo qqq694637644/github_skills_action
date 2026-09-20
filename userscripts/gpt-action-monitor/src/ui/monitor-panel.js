@@ -224,6 +224,18 @@ export function createMonitorPanel({ eventStore, isActive }) {
     if (panel.dataset.status === 'error') setStatus('idle');
   }
 
+  function resetSession() {
+    pendingLatest = null;
+    if (uiTimer !== null) {
+      window.clearTimeout(uiTimer);
+      uiTimer = null;
+    }
+    if (activityTimer !== null) {
+      window.clearTimeout(activityTimer);
+      activityTimer = null;
+    }
+  }
+
   function recordEvent(summary) {
     eventStore.add(summary);
     if (manualOpen) historyPanel.appendEvent(summary);
@@ -242,6 +254,7 @@ export function createMonitorPanel({ eventStore, isActive }) {
       uiTimer = null;
     }
     window.clearTimeout(activityTimer);
+    activityTimer = null;
     panel.classList.remove('gam-chip-visible');
     if (panel.dataset.status === 'active') setStatus('idle');
   }
@@ -258,7 +271,9 @@ export function createMonitorPanel({ eventStore, isActive }) {
 
   function unmount() {
     if (panel.isConnected) savePosition();
-    suspendActivity();
+    resetSession();
+    panel.classList.remove('gam-chip-visible');
+    if (panel.dataset.status === 'active') setStatus('idle');
     panel.classList.remove('gam-open', 'gam-chip-visible', 'gam-dragging');
     manualOpen = false;
     historyPanel.clear();
@@ -282,6 +297,7 @@ export function createMonitorPanel({ eventStore, isActive }) {
     queueActivity,
     showAttention,
     clearAttention,
+    resetSession,
     suspendActivity,
     resumeActivity,
   };

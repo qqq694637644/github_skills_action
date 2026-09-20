@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createActionLogClient } from './src/api/action-log-client.js';
+import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
 import { createChatGPTAdapter } from './src/adapters/chatgpt.js';
+import { createComposerAdapter, loadSkillsCall } from './src/adapters/composer.js';
 import { summarize } from './src/formatter/action-formatter.js';
 import { validateBackend } from './src/profile/profile-store.js';
 import { createEventStore } from './src/store/event-store.js';
@@ -28,10 +30,75 @@ assert.deepEqual(validateBackend('https://skills.example.com/'), {
   backend: 'https://skills.example.com',
 });
 assert.equal(validateBackend('ftp://skills.example.com').ok, false);
+assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintenance"])');
 
 const store = createEventStore();
 for (let index = 0; index < 101; index += 1) {
   store.add({ action: `action-${index}`, detail: 'ok', time: '', raw: '' });
+}
+
+// Skill catalog reads are cached in-page, while explicit refresh performs a
+// new backend read so the server can rescan its on-disk Skill catalog.
+{
+  installDomFixture();
+  let requests = 0;
+  globalThis.GM_xmlhttpRequest = ({ onload }) => {
+    requests += 1;
+    onload({
+      status: 200,
+      responseText: JSON.stringify({
+        skills: [{
+          skill_id: requests === 1 ? 'alpha' : 'beta',
+          name: requests === 1 ? 'alpha' : 'beta',
+          description: 'Demo skill.',
+        }],
+      }),
+    });
+    return { abort() {} };
+  };
+  const catalog = createSkillCatalogClient({
+    getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
+  });
+  assert.equal((await catalog.list())[0].skill_id, 'alpha');
+  assert.equal((await catalog.list())[0].skill_id, 'alpha');
+  assert.equal(requests, 1);
+  assert.equal((await catalog.list({ refresh: true }))[0].skill_id, 'beta');
+  assert.equal(requests, 2);
+}
+
+// Composer selection is captured only when the Skills menu is opened and is
+// restored for insertion; there is no persistent selection listener.
+{
+  const { document, window } = installDomFixture();
+  const editor = new FakeElement('div');
+  const range = {
+    commonAncestorContainer: editor,
+    cloneRange() { return this; },
+  };
+  let restoredRange = null;
+  let insertedText = null;
+  const selection = {
+    rangeCount: 1,
+    getRangeAt: () => range,
+    removeAllRanges() {},
+    addRange(value) { restoredRange = value; },
+  };
+  editor.contains = (node) => node === editor;
+  document.querySelector = (selector) => (
+    selector.includes('contenteditable="true"') ? editor : null
+  );
+  document.execCommand = (command, _showUi, value) => {
+    assert.equal(command, 'insertText');
+    insertedText = value;
+    return true;
+  };
+  window.getSelection = () => selection;
+
+  const composer = createComposerAdapter();
+  assert.equal(composer.captureSelection(), true);
+  assert.equal(composer.insertText(loadSkillsCall('github-maintenance')), true);
+  assert.equal(restoredRange, range);
+  assert.equal(insertedText, 'loadSkills(["github-maintenance"])');
 }
 assert.equal(store.all().length, 100);
 assert.equal(store.all()[0].summary.action, 'action-1');

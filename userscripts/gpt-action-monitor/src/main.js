@@ -1,10 +1,13 @@
 import { summarize } from './formatter/action-formatter.js';
 import { createActionLogClient } from './api/action-log-client.js';
+import { createSkillCatalogClient } from './api/skill-catalog-client.js';
 import { createChatGPTAdapter } from './adapters/chatgpt.js';
+import { createComposerAdapter, loadSkillsCall } from './adapters/composer.js';
 import { createEventStore } from './store/event-store.js';
 import { loadProfiles, saveProfiles } from './profile/profile-store.js';
 import { createMonitorPanel } from './ui/monitor-panel.js';
 import { createSettingsPanel } from './ui/settings-panel.js';
+import { createSkillsMenu } from './ui/skills-menu.js';
 
 (function () {
   'use strict';
@@ -14,11 +17,28 @@ import { createSettingsPanel } from './ui/settings-panel.js';
   let activeProfile = null;
   let actionLogClient = null;
   let chatAdapter = null;
+  const composerAdapter = createComposerAdapter();
+  const skillCatalogClient = createSkillCatalogClient({
+    getProfile: () => activeProfile,
+  });
 
   const eventStore = createEventStore();
-  const monitorUi = createMonitorPanel({
+  let monitorUi = null;
+  const skillsMenu = createSkillsMenu({
+    loadSkills: (options) => skillCatalogClient.list(options),
+    onBeforeOpen: () => composerAdapter.captureSelection(),
+    onSelect(skill) {
+      const inserted = composerAdapter.insertText(loadSkillsCall(skill.skill_id));
+      if (!inserted) {
+        monitorUi?.showAttention('插入失败', '未找到 ChatGPT 输入框');
+      }
+      return inserted;
+    },
+  });
+  monitorUi = createMonitorPanel({
     eventStore,
     isActive: () => monitorActive,
+    skillsMenu,
   });
 
   function deactivateMonitor() {
@@ -27,6 +47,8 @@ import { createSettingsPanel } from './ui/settings-panel.js';
     activeProfile = null;
     actionLogClient?.stop();
     actionLogClient = null;
+    skillCatalogClient.clear();
+    skillsMenu.close();
     eventStore.clear();
     monitorUi.unmount();
   }
@@ -51,6 +73,7 @@ import { createSettingsPanel } from './ui/settings-panel.js';
 
     monitorActive = true;
     activeProfile = profile;
+    skillCatalogClient.clear();
     eventStore.clear();
     monitorUi.mount();
     monitorUi.setStatus('idle');

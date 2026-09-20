@@ -63,6 +63,29 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(example["entrypoint"], "SKILL.md")
         self.assertTrue(example["content_hash"].startswith("sha256:"))
 
+    def test_list_skills_refreshes_runtime_catalog_from_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "skills"
+            _write_skill(root, "alpha", "Alpha tasks.", "# Alpha")
+            runtime = SkillRuntime(root)
+
+            self.assertEqual(
+                [item["skill_id"] for item in runtime.list_skills()["skills"]],
+                ["alpha"],
+            )
+
+            _write_skill(root, "beta", "Beta tasks.", "# Beta")
+            refreshed = runtime.list_skills()["skills"]
+
+            self.assertEqual(
+                [item["skill_id"] for item in refreshed],
+                ["alpha", "beta"],
+            )
+            self.assertEqual(
+                runtime.load_skills(["beta"])["loaded_skill_ids"],
+                ["beta"],
+            )
+
     def test_load_skills_returns_full_codex_style_context(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "skills"
@@ -288,6 +311,29 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(missing.json()["detail"]["error"]["code"], "skill_not_found")
         self.assertEqual(unsafe.status_code, 404)
         self.assertEqual(unsafe.json()["detail"]["error"]["code"], "unsafe_or_missing_path")
+
+    def test_skill_catalog_endpoint_rescans_skills_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "skills"
+            _write_skill(root, "alpha", "Alpha tasks.", "# Alpha")
+            client = TestClient(create_app(root))
+
+            first = client.get("/v1/skills")
+            _write_skill(root, "beta", "Beta tasks.", "# Beta")
+            second = client.get("/v1/skills")
+            loaded = client.post("/v1/skills/load", json={"skill_ids": ["beta"]})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(
+            [item["skill_id"] for item in first.json()["skills"]],
+            ["alpha"],
+        )
+        self.assertEqual(
+            [item["skill_id"] for item in second.json()["skills"]],
+            ["alpha", "beta"],
+        )
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(loaded.json()["loaded_skill_ids"], ["beta"])
 
     def test_skill_actions_emit_key_input_logs(self) -> None:
         clear_action_events()

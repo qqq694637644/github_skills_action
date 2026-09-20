@@ -1,37 +1,64 @@
-export function createChatGPTAdapter({ getProfiles, onMatch }) {
+import { GPT_TITLE_SELECTOR } from '../constants.js';
+
+export function createChatGPTAdapter({ getProfiles, onActivate, onDeactivate }) {
+  let observer = null;
+
   function titleName(element) {
     return element?.textContent?.trim() || '';
   }
 
-  function findTargetTitle(root = document) {
-    return [...root.querySelectorAll('div[type="button"][aria-haspopup="menu"]')]
-      .find((element) => titleName(element));
-  }
-
   function matchingProfile(element) {
-    const name = titleName(element);
-    return getProfiles().find((profile) => profile.enabled && profile.gptName === name) || null;
+    if (!element || element.nodeType !== Node.ELEMENT_NODE || !element.matches(GPT_TITLE_SELECTOR)) return null;
+    return getProfiles().find((profile) => profile.enabled && profile.gptName === titleName(element)) || null;
   }
 
-  function evaluate(root = document) {
-    const target = findTargetTitle(root);
-    const profile = target ? matchingProfile(target) : null;
-    if (profile) onMatch(target, profile);
+  function findTargetTitle(root = document) {
+    if (root.nodeType === Node.ELEMENT_NODE) {
+      const profile = matchingProfile(root);
+      if (profile) return { element: root, profile };
+    }
+    if (typeof root.querySelectorAll !== 'function') return null;
+    for (const element of root.querySelectorAll(GPT_TITLE_SELECTOR)) {
+      const profile = matchingProfile(element);
+      if (profile) return { element, profile };
+    }
+    return null;
   }
 
-  let observer = null;
+  function evaluateActivation() {
+    const target = findTargetTitle(document);
+    if (target) onActivate(target.element, target.profile);
+    else onDeactivate();
+  }
+
+  function targetFromMutation(mutation) {
+    const mutationElement = mutation.target.nodeType === Node.ELEMENT_NODE
+      ? mutation.target
+      : mutation.target.parentElement;
+    const containingTitle = mutationElement?.closest?.(GPT_TITLE_SELECTOR);
+    const containingProfile = matchingProfile(containingTitle);
+    if (containingProfile) return { element: containingTitle, profile: containingProfile };
+    for (const node of mutation.addedNodes) {
+      const target = findTargetTitle(node);
+      if (target) return target;
+    }
+    return null;
+  }
 
   function start() {
-    evaluate();
+    if (observer || !document.body) return;
     observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
-        if (mutation.addedNodes.length) {
-          evaluate(mutation.target);
-          break;
+        const target = targetFromMutation(mutation);
+        if (target) {
+          onActivate(target.element, target.profile);
+          return;
         }
       }
+      evaluateActivation();
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, characterData: true, subtree: true });
+    evaluateActivation();
   }
 
   function stop() {
@@ -39,5 +66,5 @@ export function createChatGPTAdapter({ getProfiles, onMatch }) {
     observer = null;
   }
 
-  return { start, stop, evaluate };
+  return { start, stop, evaluateActivation };
 }

@@ -17,6 +17,7 @@ import { summarize } from './formatter/action-formatter.js';
 import { loadProfiles, profileForName, validateBackend } from './profile/profile-store.js';
 import { createActionLogClient } from './api/action-log-client.js';
 import { createEventStore } from './store/event-store.js';
+import { createChatGPTAdapter } from './adapters/chatgpt.js';
 
 (function () {
   'use strict';
@@ -46,6 +47,7 @@ import { createEventStore } from './store/event-store.js';
   let settingsOverlay = null;
   let settingsStyle = null;
   let actionLogClient = null;
+  let chatAdapter = null;
 
   function titleName(element) {
     return (element?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -1083,10 +1085,14 @@ import { createEventStore } from './store/event-store.js';
     unmountUi();
   }
 
+  chatAdapter = createChatGPTAdapter({
+    getProfiles: () => profiles,
+    onActivate: activateMonitor,
+    onDeactivate: deactivateMonitor,
+  });
+
   function evaluateActivation() {
-    const target = findTargetTitle(document);
-    if (target) activateMonitor(target.element, target.profile);
-    else deactivateMonitor();
+    chatAdapter?.evaluateActivation();
   }
 
   function targetFromMutation(mutation) {

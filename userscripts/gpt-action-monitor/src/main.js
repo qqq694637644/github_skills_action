@@ -12,18 +12,22 @@
 // @connect      *
 // ==/UserScript==
 
+import * as MonitorConstants from './constants.js';
+
 (function () {
   'use strict';
 
-  const PROFILES_KEY = 'gptActionMonitorProfiles';
-  const POSITION_KEY = 'gptActionMonitorPosition';
-  const GPT_TITLE_SELECTOR = 'div[type="button"][aria-haspopup="menu"]';
-  const POLL_WAIT_SECONDS = 55;
-  const RETRY_MS = 3000;
-  const ACTIVITY_VISIBLE_MS = 4000;
-  const UI_COALESCE_MS = 200;
-  const MAX_HISTORY = 100;
-  const COMPACT_WIDTH = 30;
+  const {
+    PROFILES_KEY,
+    POSITION_KEY,
+    GPT_TITLE_SELECTOR,
+    POLL_WAIT_SECONDS,
+    RETRY_MS,
+    ACTIVITY_VISIBLE_MS,
+    UI_COALESCE_MS,
+    MAX_HISTORY,
+    COMPACT_WIDTH,
+  } = MonitorConstants;
 
   let lastId = 0;
   let needsCursorPrime = true;

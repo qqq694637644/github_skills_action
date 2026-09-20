@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .action_logging import log_action, log_action_error
+from .action_logging import log_action, log_action_error, wait_for_action_events
 from .runtime import (
     SkillNotFoundError,
     SkillPathError,
@@ -223,6 +223,14 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
     @app.get("/v1/skills", include_in_schema=False)
     def list_skills() -> dict[str, object]:
         return runtime.list_skills()
+
+    @app.get("/v1/action-logs", include_in_schema=False)
+    def action_logs(
+        after: int = Query(default=0, ge=0),
+        wait: float = Query(default=55.0, ge=0.0, le=60.0),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return wait_for_action_events(after=after, timeout=wait, limit=limit)
 
     @app.get("/console", response_class=HTMLResponse, include_in_schema=False)
     def console() -> HTMLResponse:

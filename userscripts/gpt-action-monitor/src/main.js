@@ -15,6 +15,7 @@
 import * as MonitorConstants from './constants.js';
 import { summarize } from './formatter/action-formatter.js';
 import { loadProfiles, profileForName, validateBackend } from './profile/profile-store.js';
+import { createActionLogClient } from './api/action-log-client.js';
 
 (function () {
   'use strict';
@@ -23,16 +24,12 @@ import { loadProfiles, profileForName, validateBackend } from './profile/profile
     PROFILES_KEY,
     POSITION_KEY,
     GPT_TITLE_SELECTOR,
-    POLL_WAIT_SECONDS,
-    RETRY_MS,
     ACTIVITY_VISIBLE_MS,
     UI_COALESCE_MS,
     MAX_HISTORY,
     COMPACT_WIDTH,
   } = MonitorConstants;
 
-  let lastId = 0;
-  let needsCursorPrime = true;
   let stopped = false;
   let monitorActive = false;
   let activeTitleElement = null;
@@ -40,9 +37,6 @@ import { loadProfiles, profileForName, validateBackend } from './profile/profile
   let gateObserver = null;
   let manualOpen = false;
   let suppressHandleClick = false;
-  let requestHandle = null;
-  let requestGeneration = 0;
-  let pollTimer = null;
   let activityTimer = null;
   let uiTimer = null;
   let pendingLatest = null;
@@ -50,6 +44,7 @@ import { loadProfiles, profileForName, validateBackend } from './profile/profile
   let profiles = loadProfiles();
   let settingsOverlay = null;
   let settingsStyle = null;
+  let actionLogClient = null;
 
   function titleName(element) {
     return (element?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -992,39 +987,8 @@ import { loadProfiles, profileForName, validateBackend } from './profile/profile
     if (!manualOpen) panel.classList.add('gam-chip-visible');
   }
 
-  function clearPollTimer() {
-    if (pollTimer !== null) {
-      window.clearTimeout(pollTimer);
-      pollTimer = null;
-    }
-  }
-
-  function schedulePoll(delay = 30) {
-    clearPollTimer();
-    if (!monitorActive || stopped || document.visibilityState !== 'visible') return;
-    pollTimer = window.setTimeout(() => {
-      pollTimer = null;
-      poll();
-    }, delay);
-  }
-
-  function abortRequest() {
-    if (!requestHandle) return;
-    const active = requestHandle;
-    requestHandle = null;
-    if (typeof active.abort === 'function') {
-      try {
-        active.abort();
-      } catch (_) {
-        // The request may already have completed between visibility events.
-      }
-    }
-  }
-
   function suspendPolling() {
-    requestGeneration += 1;
-    clearPollTimer();
-    abortRequest();
+    actionLogClient?.suspend();
     if (uiTimer !== null) {
       window.clearTimeout(uiTimer);
       uiTimer = null;
@@ -1037,96 +1001,7 @@ import { loadProfiles, profileForName, validateBackend } from './profile/profile
   function resumePolling() {
     if (!monitorActive || stopped || document.visibilityState !== 'visible') return;
     if (pendingLatest) queueActivity(pendingLatest);
-    schedulePoll(0);
-  }
-
-  function scheduleRetry(message) {
-    recordHint(message);
-    showAttention('连接异常', '3 秒后重试');
-    schedulePoll(RETRY_MS);
-  }
-
-  function poll() {
-    if (!monitorActive || stopped || requestHandle || document.visibilityState !== 'visible') return;
-
-    const profile = activeProfile;
-    if (!profile) {
-      deactivateMonitor();
-      return;
-    }
-    const backend = profile.backend;
-    const token = profile.token;
-
-    const headers = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    const generation = ++requestGeneration;
-    const priming = needsCursorPrime;
-    const requestAfter = priming ? Number.MAX_SAFE_INTEGER : lastId;
-    const requestWait = priming ? 0 : POLL_WAIT_SECONDS;
-    const requestLimit = priming ? 1 : 50;
-    requestHandle = GM_xmlhttpRequest({
-      method: 'GET',
-      url: `${backend}/v1/action-logs?after=${requestAfter}&wait=${requestWait}&limit=${requestLimit}`,
-      headers,
-      timeout: (requestWait + 5) * 1000,
-      onload(response) {
-        if (generation !== requestGeneration) return;
-        requestHandle = null;
-        if (document.visibilityState !== 'visible') return;
-
-        if (response.status === 401) {
-          stopped = true;
-          showAttention('认证失败', '检查 Bearer Token');
-          recordHint('认证失败：请检查 Bearer Token。');
-          return;
-        }
-        if (response.status < 200 || response.status >= 300) {
-          scheduleRetry(`后端返回 HTTP ${response.status}，3 秒后重试。`);
-          return;
-        }
-
-        try {
-          const body = JSON.parse(response.responseText);
-          if (Number.isInteger(body.last_id)) lastId = body.last_id;
-          if (priming) {
-            needsCursorPrime = false;
-            setStatus('idle');
-            schedulePoll(0);
-            return;
-          }
-          let newest = null;
-          for (const item of body.items || []) {
-            newest = summarize(item.text);
-            recordEvent(newest);
-          }
-          if (newest) {
-            queueActivity(newest);
-          } else if (panel.dataset.status === 'error') {
-            panel.classList.remove('gam-chip-visible');
-            setStatus('idle');
-          }
-          schedulePoll();
-        } catch (error) {
-          scheduleRetry(`响应解析失败：${String(error)}`);
-        }
-      },
-      onerror() {
-        if (generation !== requestGeneration) return;
-        requestHandle = null;
-        if (document.visibilityState === 'visible') {
-          scheduleRetry('连接后端失败，3 秒后重试。');
-        }
-      },
-      ontimeout() {
-        if (generation !== requestGeneration) return;
-        requestHandle = null;
-        schedulePoll(100);
-      },
-      onabort() {
-        if (generation === requestGeneration) requestHandle = null;
-      },
-    });
+    actionLogClient?.resume();
   }
 
   function matchingProfile(element) {
@@ -1176,10 +1051,32 @@ import { loadProfiles, profileForName, validateBackend } from './profile/profile
     monitorActive = true;
     activeTitleElement = titleElement;
     activeProfile = profile;
+    actionLogClient = createActionLogClient({
+      getProfile: () => activeProfile,
+      onItems(items) {
+        let newest = null;
+        for (const item of items) {
+          newest = summarize(item.text);
+          recordEvent(newest);
+        }
+        if (newest) queueActivity(newest);
+        else if (panel.dataset.status === 'error') {
+          panel.classList.remove('gam-chip-visible');
+          setStatus('idle');
+        }
+      },
+      onHint(message) {
+        recordHint(message);
+        showAttention('连接异常', '3 秒后重试');
+      },
+      onStatus(status) {
+        if (status === 'idle' && panel.dataset.status === 'error') setStatus('idle');
+      },
+    });
     resetSessionState();
     mountUi();
     setStatus('idle');
-    if (document.visibilityState === 'visible') schedulePoll(0);
+    if (document.visibilityState === 'visible') actionLogClient.start();
   }
 
   function deactivateMonitor() {
@@ -1187,6 +1084,8 @@ import { loadProfiles, profileForName, validateBackend } from './profile/profile
     monitorActive = false;
     activeTitleElement = null;
     activeProfile = null;
+    actionLogClient?.stop();
+    actionLogClient = null;
     suspendPolling();
     resetSessionState();
     unmountUi();

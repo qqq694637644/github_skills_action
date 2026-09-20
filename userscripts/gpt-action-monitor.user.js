@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.4.0
+// @version      0.4.1
 // @description  Show github_skills_action activity as a calm, energy-conscious status indicator on ChatGPT.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -1048,7 +1048,12 @@
       const commandAction = parseField(text, 'action');
       const command = parseField(text, 'command');
       const state = parseField(text, 'state');
-      if (command) detail = shorten(command);
+      const exitCode = parseField(text, 'exit_code');
+      if (command) {
+        const status = [commandAction, state].filter(Boolean).join(' · ');
+        const exit = state === 'failed' && exitCode !== null ? ` · exit ${exitCode}` : '';
+        detail = `${status}${exit}${status ? ' · ' : ''}${shorten(command, 48)}`;
+      }
       else if (state && commandAction) detail = `${commandAction} · ${state}`;
       else detail = shorten(state || commandAction || '');
     } else {

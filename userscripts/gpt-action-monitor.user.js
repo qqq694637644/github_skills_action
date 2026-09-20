@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.4.1
+// @version      0.5.0
 // @description  Show github_skills_action activity as a calm, energy-conscious status indicator on ChatGPT.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -11,113 +11,321 @@
 // @grant        GM_registerMenuCommand
 // @connect      *
 // ==/UserScript==
+(() => {
+  // src/formatter/action-formatter.js
+  function parseField(text, name) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = text.match(
+      new RegExp(`(?:^|\\s)${escaped}=("(?:\\\\.|[^"\\\\])*"|\\[[^\\]]*\\]|[^\\s]+)`)
+    );
+    if (!match) return null;
+    const raw = match[1];
+    try {
+      return JSON.parse(raw);
+    } catch (_) {
+      return raw;
+    }
+  }
+  function baseName(path) {
+    if (!path || typeof path !== "string") return "";
+    const parts = path.replace(/\\/g, "/").split("/");
+    return parts[parts.length - 1] || path;
+  }
+  function compactList(value, max = 2) {
+    if (!Array.isArray(value) || !value.length) return "";
+    const names = value.slice(0, max).map((item) => baseName(String(item)));
+    return value.length > max ? `${names.join(", ")} +${value.length - max}` : names.join(", ");
+  }
+  function shorten(value, limit = 72) {
+    if (value === null || value === void 0) return "";
+    const oneLine = String(value).replace(/\s+/g, " ").trim();
+    return oneLine.length > limit ? `${oneLine.slice(0, limit - 1)}\u2026` : oneLine;
+  }
+  function summarize(text) {
+    const action = text.match(/\bACTION\s+([\w-]+)/)?.[1] || "Action";
+    const time = text.match(/^\[\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2})\]/)?.[1] || "";
+    let detail = "";
+    if (action === "loadSkills") detail = compactList(parseField(text, "skill_ids"));
+    else if (action === "readSkillContent") detail = baseName(parseField(text, "path"));
+    else if (action === "workspaceReadFiles") detail = compactList(parseField(text, "paths")) || `${parseField(text, "files") || ""} files`;
+    else if (action === "workspaceSearch") detail = shorten(parseField(text, "query"));
+    else if (action === "workspaceInspect") detail = compactList(parseField(text, "paths"));
+    else if (action === "workspaceWriteFile") detail = baseName(parseField(text, "path"));
+    else if (action === "workspaceApplyPatch") {
+      const files = parseField(text, "changed_files");
+      detail = Array.isArray(files) ? `${files.length} files \xB7 ${compactList(files)}` : "";
+    } else if (action === "workspaceCommand") {
+      const commandAction = parseField(text, "action");
+      const command = parseField(text, "command");
+      const state = parseField(text, "state");
+      const exitCode = parseField(text, "exit_code");
+      if (command) {
+        const status = [commandAction, state].filter(Boolean).join(" \xB7 ");
+        const exit = state === "failed" && exitCode !== null ? ` \xB7 exit ${exitCode}` : "";
+        detail = `${status}${exit}${status ? " \xB7 " : ""}${shorten(command, 48)}`;
+      } else if (state && commandAction) detail = `${commandAction} \xB7 ${state}`;
+      else detail = shorten(state || commandAction || "");
+    } else {
+      detail = shorten(parseField(text, "path") || parseField(text, "query") || compactList(parseField(text, "paths")) || parseField(text, "state") || "");
+    }
+    return { action, detail: detail || "completed", time, raw: text };
+  }
 
-(function () {
-  'use strict';
+  // src/constants.js
+  var PROFILES_KEY = "gptActionMonitorProfiles";
+  var POSITION_KEY = "gptActionMonitorPosition";
+  var GPT_TITLE_SELECTOR = 'div[type="button"][aria-haspopup="menu"]';
+  var POLL_WAIT_SECONDS = 55;
+  var RETRY_MS = 3e3;
+  var ACTIVITY_VISIBLE_MS = 4e3;
+  var UI_COALESCE_MS = 200;
+  var MAX_HISTORY = 100;
+  var COMPACT_WIDTH = 30;
 
-  const PROFILES_KEY = 'gptActionMonitorProfiles';
-  const POSITION_KEY = 'gptActionMonitorPosition';
-  const GPT_TITLE_SELECTOR = 'div[type="button"][aria-haspopup="menu"]';
-  const POLL_WAIT_SECONDS = 55;
-  const RETRY_MS = 3000;
-  const ACTIVITY_VISIBLE_MS = 4000;
-  const UI_COALESCE_MS = 200;
-  const MAX_HISTORY = 100;
-  const COMPACT_WIDTH = 30;
+  // src/api/action-log-client.js
+  function createActionLogClient({ getProfile, onItems, onHint, onStatus, onAttention }) {
+    let lastId = 0;
+    let needsCursorPrime = true;
+    let stopped = false;
+    let requestHandle = null;
+    let requestGeneration = 0;
+    let pollTimer = null;
+    function clearPollTimer() {
+      if (pollTimer !== null) {
+        window.clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+    }
+    function schedulePoll(delay = 30) {
+      clearPollTimer();
+      pollTimer = window.setTimeout(() => {
+        pollTimer = null;
+        poll();
+      }, delay);
+    }
+    function abortRequest() {
+      const active = requestHandle;
+      requestHandle = null;
+      if (active && typeof active.abort === "function") {
+        try {
+          active.abort();
+        } catch (_) {
+        }
+      }
+    }
+    function suspend() {
+      requestGeneration += 1;
+      clearPollTimer();
+      abortRequest();
+    }
+    function resume() {
+      if (!stopped) schedulePoll(0);
+    }
+    function stop() {
+      stopped = true;
+      suspend();
+    }
+    function start() {
+      stopped = false;
+      needsCursorPrime = true;
+      schedulePoll(0);
+    }
+    function scheduleRetry(message) {
+      onHint(message);
+      onAttention?.("\u8FDE\u63A5\u5F02\u5E38", "3 \u79D2\u540E\u91CD\u8BD5");
+      onStatus?.("error");
+      schedulePoll(RETRY_MS);
+    }
+    function poll() {
+      if (stopped || requestHandle || document.visibilityState !== "visible") return;
+      const profile = getProfile();
+      if (!profile) return;
+      const headers = {};
+      if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
+      const generation = ++requestGeneration;
+      const priming = needsCursorPrime;
+      const wait = priming ? 0 : POLL_WAIT_SECONDS;
+      const after = priming ? Number.MAX_SAFE_INTEGER : lastId;
+      requestHandle = GM_xmlhttpRequest({
+        method: "GET",
+        url: `${profile.backend}/v1/action-logs?after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
+        headers,
+        timeout: (wait + 5) * 1e3,
+        onload(response) {
+          if (generation !== requestGeneration) return;
+          requestHandle = null;
+          if (response.status === 401) {
+            stopped = true;
+            onHint("\u8BA4\u8BC1\u5931\u8D25\uFF1A\u8BF7\u68C0\u67E5 Bearer Token\u3002");
+            onAttention?.("\u8BA4\u8BC1\u5931\u8D25", "\u68C0\u67E5 Bearer Token");
+            onStatus?.("error");
+            return;
+          }
+          if (response.status < 200 || response.status >= 300) {
+            scheduleRetry(`\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002`);
+            return;
+          }
+          try {
+            const body = JSON.parse(response.responseText);
+            if (Number.isInteger(body.last_id)) lastId = body.last_id;
+            if (priming) {
+              needsCursorPrime = false;
+              onStatus?.("idle");
+              schedulePoll(0);
+              return;
+            }
+            onItems(body.items || []);
+            schedulePoll();
+          } catch (error) {
+            scheduleRetry(`\u54CD\u5E94\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`);
+          }
+        },
+        onerror() {
+          if (generation === requestGeneration) {
+            requestHandle = null;
+            scheduleRetry("\u8FDE\u63A5\u540E\u7AEF\u5931\u8D25\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002");
+          }
+        },
+        ontimeout() {
+          if (generation === requestGeneration) {
+            requestHandle = null;
+            schedulePoll(100);
+          }
+        },
+        onabort() {
+          if (generation === requestGeneration) requestHandle = null;
+        }
+      });
+    }
+    return { start, stop, suspend, resume, poll };
+  }
 
-  let lastId = 0;
-  let needsCursorPrime = true;
-  let stopped = false;
-  let monitorActive = false;
-  let activeTitleElement = null;
-  let activeProfile = null;
-  let gateObserver = null;
-  let manualOpen = false;
-  let suppressHandleClick = false;
-  let requestHandle = null;
-  let requestGeneration = 0;
-  let pollTimer = null;
-  let activityTimer = null;
-  let uiTimer = null;
-  let pendingLatest = null;
-  const history = [];
-  let profiles = loadProfiles();
-  let settingsOverlay = null;
-  let settingsStyle = null;
+  // src/adapters/chatgpt.js
+  function createChatGPTAdapter({ getProfiles, onActivate, onDeactivate }) {
+    let observer = null;
+    function titleName(element) {
+      return (element?.textContent || "").replace(/\s+/g, " ").trim();
+    }
+    function matchingProfile(element) {
+      if (!element || element.nodeType !== Node.ELEMENT_NODE || !element.matches(GPT_TITLE_SELECTOR)) return null;
+      return getProfiles().find((profile) => profile.enabled && profile.gptName === titleName(element)) || null;
+    }
+    function findTargetTitle(root = document) {
+      if (root.nodeType === Node.ELEMENT_NODE) {
+        const profile = matchingProfile(root);
+        if (profile) return { element: root, profile };
+      }
+      if (typeof root.querySelectorAll !== "function") return null;
+      for (const element of root.querySelectorAll(GPT_TITLE_SELECTOR)) {
+        const profile = matchingProfile(element);
+        if (profile) return { element, profile };
+      }
+      return null;
+    }
+    function evaluateActivation() {
+      const target = findTargetTitle(document);
+      if (target) onActivate(target.element, target.profile);
+      else onDeactivate();
+    }
+    function targetFromMutation(mutation) {
+      const mutationElement = mutation.target.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target.parentElement;
+      const containingTitle = mutationElement?.closest?.(GPT_TITLE_SELECTOR);
+      const containingProfile = matchingProfile(containingTitle);
+      if (containingProfile) return { element: containingTitle, profile: containingProfile };
+      for (const node of mutation.addedNodes) {
+        const target = findTargetTitle(node);
+        if (target) return target;
+      }
+      return null;
+    }
+    function start() {
+      if (observer || !document.body) return;
+      observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          const target = targetFromMutation(mutation);
+          if (target) {
+            onActivate(target.element, target.profile);
+            return;
+          }
+        }
+        evaluateActivation();
+      });
+      observer.observe(document.body, { childList: true, characterData: true, subtree: true });
+      evaluateActivation();
+    }
+    function stop() {
+      observer?.disconnect();
+      observer = null;
+    }
+    return { start, stop, evaluateActivation };
+  }
 
+  // src/store/event-store.js
+  function createEventStore() {
+    let history = [];
+    function trim() {
+      if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
+    }
+    function add(summary) {
+      history.push({ kind: "event", summary });
+      trim();
+    }
+    function addHint(message) {
+      history.push({ kind: "hint", message });
+      trim();
+    }
+    function all() {
+      return [...history];
+    }
+    function clear() {
+      history = [];
+    }
+    return { add, addHint, all, clear };
+  }
+
+  // src/profile/profile-store.js
   function createProfileId() {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   }
-
   function normalizeBackend(value) {
-    return String(value || '').trim().replace(/\/+$/, '');
+    return String(value || "").trim().replace(/\/+$/, "");
   }
-
   function normalizeProfile(profile) {
     return {
       id: String(profile?.id || createProfileId()),
-      gptName: String(profile?.gptName || '').trim(),
+      gptName: String(profile?.gptName || "").trim(),
       backend: normalizeBackend(profile?.backend),
-      token: String(profile?.token || '').trim(),
-      enabled: profile?.enabled !== false,
+      token: String(profile?.token || "").trim(),
+      enabled: profile?.enabled !== false
     };
   }
-
   function loadProfiles() {
     const stored = GM_getValue(PROFILES_KEY, null);
     if (!Array.isArray(stored)) return [];
     return stored.map(normalizeProfile).filter((profile) => profile.gptName && profile.backend);
   }
-
-  function titleName(element) {
-    return (element?.textContent || '').replace(/\s+/g, ' ').trim();
+  function saveProfiles(profiles) {
+    const normalized = profiles.map(normalizeProfile);
+    GM_setValue(PROFILES_KEY, normalized);
+    return normalized;
   }
-
-  function profileForName(name) {
-    return profiles.find((profile) => profile.enabled && profile.gptName === name) || null;
-  }
-
   function validateBackend(value) {
     const backend = normalizeBackend(value);
     let parsed;
     try {
       parsed = new URL(backend);
     } catch (_) {
-      return { ok: false, message: '请输入有效的后端 URL。' };
+      return { ok: false, message: "\u8BF7\u8F93\u5165\u6709\u6548\u7684\u540E\u7AEF URL\u3002" };
     }
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      return { ok: false, message: '后端地址仅支持 http:// 或 https://。' };
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return { ok: false, message: "\u540E\u7AEF\u5730\u5740\u4EC5\u652F\u6301 http:// \u6216 https://\u3002" };
     }
     return { ok: true, backend };
   }
 
-  GM_registerMenuCommand('⚙ 监控配置...', openSettings);
-
-  const panel = document.createElement('div');
-  panel.id = 'gpt-action-monitor';
-  panel.dataset.status = 'idle';
-  panel.innerHTML = `
-    <div class="gam-compact">
-      <div class="gam-chip" role="status" aria-live="polite" aria-atomic="true">
-        <strong class="gam-current-action">GPT Actions</strong>
-        <span class="gam-current-detail">等待 Action</span>
-      </div>
-      <button class="gam-handle" type="button" title="拖动移动 · 点击展开" aria-label="展开 GPT Action 历史">
-        <span class="gam-dot"></span>
-      </button>
-    </div>
-    <section class="gam-expanded" aria-label="GPT Action 历史">
-      <div class="gam-header">
-        <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
-        <button class="gam-close" type="button" title="收起" aria-label="收起 Action 历史">−</button>
-      </div>
-      <div class="gam-log" role="log" aria-label="Action 历史"></div>
-    </section>
-  `;
-
-  const style = document.createElement('style');
-  style.textContent = `
+  // src/ui/styles.js
+  var MONITOR_CSS = `
     #gpt-action-monitor {
       position: fixed;
       right: 0;
@@ -312,80 +520,7 @@
       #gpt-action-monitor .gam-chip { transition: none; }
     }
   `;
-
-  function backendLabel(backend) {
-    try {
-      const parsed = new URL(backend);
-      return parsed.host + (parsed.pathname === '/' ? '' : parsed.pathname);
-    } catch (_) {
-      return backend;
-    }
-  }
-
-  function applyProfiles(nextProfiles) {
-    profiles = nextProfiles.map(normalizeProfile);
-    GM_setValue(PROFILES_KEY, profiles);
-    if (monitorActive) deactivateMonitor();
-    if (document.visibilityState === 'visible') evaluateActivation();
-  }
-
-  function closeSettings() {
-    settingsOverlay?.remove();
-    settingsStyle?.remove();
-    settingsOverlay = null;
-    settingsStyle = null;
-  }
-
-  function testProfileConnection(profile, statusElement, button) {
-    const validation = validateBackend(profile.backend);
-    if (!validation.ok) {
-      statusElement.textContent = validation.message;
-      statusElement.dataset.state = 'error';
-      return;
-    }
-
-    button.disabled = true;
-    statusElement.textContent = '正在测试连接…';
-    statusElement.dataset.state = 'pending';
-    const headers = {};
-    if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
-
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: `${validation.backend}/v1/action-logs?after=${Number.MAX_SAFE_INTEGER}&wait=0&limit=1`,
-      headers,
-      timeout: 7000,
-      onload(response) {
-        button.disabled = false;
-        if (response.status >= 200 && response.status < 300) {
-          statusElement.textContent = '✓ 连接成功';
-          statusElement.dataset.state = 'success';
-        } else if (response.status === 401) {
-          statusElement.textContent = '认证失败，请检查 Bearer Token。';
-          statusElement.dataset.state = 'error';
-        } else {
-          statusElement.textContent = `后端返回 HTTP ${response.status}。`;
-          statusElement.dataset.state = 'error';
-        }
-      },
-      onerror() {
-        button.disabled = false;
-        statusElement.textContent = '无法连接后端。';
-        statusElement.dataset.state = 'error';
-      },
-      ontimeout() {
-        button.disabled = false;
-        statusElement.textContent = '连接超时。';
-        statusElement.dataset.state = 'error';
-      },
-    });
-  }
-
-  function openSettings() {
-    if (settingsOverlay?.isConnected) return;
-
-    settingsStyle = document.createElement('style');
-    settingsStyle.textContent = `
+  var SETTINGS_CSS = `
       #gam-settings-overlay {
         position: fixed;
         inset: 0;
@@ -549,837 +684,659 @@
       }
     `;
 
-    settingsOverlay = document.createElement('div');
-    settingsOverlay.id = 'gam-settings-overlay';
-    settingsOverlay.innerHTML = `
+  // src/ui/history-panel.js
+  function createHistoryPanel({ logBox, eventStore }) {
+    function createEventNode(summary) {
+      const node = document.createElement("div");
+      node.className = "gam-entry";
+      node.title = summary.raw;
+      const top = document.createElement("div");
+      top.className = "gam-entry-top";
+      const time = document.createElement("span");
+      time.className = "gam-time";
+      time.textContent = summary.time || "--:--";
+      const action = document.createElement("span");
+      action.className = "gam-action";
+      action.textContent = summary.action;
+      const detail = document.createElement("div");
+      detail.className = "gam-detail";
+      detail.textContent = summary.detail;
+      top.append(time, action);
+      node.append(top, detail);
+      return node;
+    }
+    function createHintNode(message) {
+      const node = document.createElement("div");
+      node.className = "gam-entry gam-hint";
+      node.textContent = message;
+      return node;
+    }
+    function appendEvent(summary) {
+      logBox.appendChild(createEventNode(summary));
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+    function appendHint(message) {
+      logBox.appendChild(createHintNode(message));
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+    function render() {
+      const fragment = document.createDocumentFragment();
+      for (const item of eventStore.all()) {
+        fragment.appendChild(
+          item.kind === "event" ? createEventNode(item.summary) : createHintNode(item.message)
+        );
+      }
+      logBox.replaceChildren(fragment);
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+    function clear() {
+      logBox.replaceChildren();
+    }
+    return { appendEvent, appendHint, render, clear };
+  }
+
+  // src/ui/monitor-panel.js
+  function createMonitorPanel({ eventStore, isActive }) {
+    const panel = document.createElement("div");
+    panel.id = "gpt-action-monitor";
+    panel.dataset.status = "idle";
+    panel.innerHTML = `
+    <div class="gam-compact">
+      <div class="gam-chip" role="status" aria-live="polite" aria-atomic="true">
+        <strong class="gam-current-action">GPT Actions</strong>
+        <span class="gam-current-detail">\u7B49\u5F85 Action</span>
+      </div>
+      <button class="gam-handle" type="button" title="\u62D6\u52A8\u79FB\u52A8 \xB7 \u70B9\u51FB\u5C55\u5F00" aria-label="\u5C55\u5F00 GPT Action \u5386\u53F2">
+        <span class="gam-dot"></span>
+      </button>
+    </div>
+    <section class="gam-expanded" aria-label="GPT Action \u5386\u53F2">
+      <div class="gam-header">
+        <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
+        <button class="gam-close" type="button" title="\u6536\u8D77" aria-label="\u6536\u8D77 Action \u5386\u53F2">\u2212</button>
+      </div>
+      <div class="gam-log" role="log" aria-label="Action \u5386\u53F2"></div>
+    </section>
+  `;
+    const style = document.createElement("style");
+    style.textContent = MONITOR_CSS;
+    const handle = panel.querySelector(".gam-handle");
+    const close = panel.querySelector(".gam-close");
+    const header = panel.querySelector(".gam-header");
+    const logBox = panel.querySelector(".gam-log");
+    const currentAction = panel.querySelector(".gam-current-action");
+    const currentDetail = panel.querySelector(".gam-current-detail");
+    const historyPanel = createHistoryPanel({ logBox, eventStore });
+    let manualOpen = false;
+    let suppressHandleClick = false;
+    let activityTimer = null;
+    let uiTimer = null;
+    let pendingLatest = null;
+    function setStatus(state) {
+      panel.dataset.status = state;
+    }
+    function getStatus() {
+      return panel.dataset.status;
+    }
+    function updateChipSide() {
+      if (panel.classList.contains("gam-open")) return;
+      const rect = panel.getBoundingClientRect();
+      panel.classList.toggle("gam-chip-right", rect.left < 275);
+    }
+    function savePosition() {
+      const rect = panel.getBoundingClientRect();
+      const docked = !panel.classList.contains("gam-detached");
+      const compactLeft = panel.classList.contains("gam-open") ? rect.right - COMPACT_WIDTH : rect.left;
+      GM_setValue(POSITION_KEY, {
+        top: Math.round(rect.top),
+        left: docked ? null : Math.round(compactLeft),
+        docked
+      });
+    }
+    function keepInViewport() {
+      if (!panel.isConnected) return;
+      const rect = panel.getBoundingClientRect();
+      const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+      panel.style.top = `${Math.round(Math.min(Math.max(rect.top, 8), maxTop))}px`;
+      if (panel.classList.contains("gam-detached")) {
+        const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+        panel.style.left = `${Math.round(Math.min(Math.max(rect.left, 8), maxLeft))}px`;
+        panel.style.right = "auto";
+      } else {
+        panel.style.left = "auto";
+        panel.style.right = "0";
+      }
+      updateChipSide();
+    }
+    function restorePosition() {
+      const saved = GM_getValue(POSITION_KEY, null);
+      if (!saved || typeof saved !== "object") {
+        updateChipSide();
+        return;
+      }
+      if (Number.isFinite(saved.top)) panel.style.top = `${saved.top}px`;
+      if (saved.docked === false && Number.isFinite(saved.left)) {
+        panel.classList.add("gam-detached");
+        panel.style.left = `${saved.left}px`;
+        panel.style.right = "auto";
+      }
+      keepInViewport();
+    }
+    function makeDraggable(dragHandle, { suppressClick = false } = {}) {
+      dragHandle.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0 || event.target.closest(".gam-close")) return;
+        const startRect = panel.getBoundingClientRect();
+        const startX = event.clientX;
+        const startY = event.clientY;
+        let dragging = false;
+        panel.classList.add("gam-dragging");
+        dragHandle.setPointerCapture(event.pointerId);
+        const onMove = (moveEvent) => {
+          const dx = moveEvent.clientX - startX;
+          const dy = moveEvent.clientY - startY;
+          if (!dragging && Math.hypot(dx, dy) < 4) return;
+          if (!dragging) {
+            dragging = true;
+            panel.classList.add("gam-detached");
+            panel.style.left = `${Math.round(startRect.left)}px`;
+            panel.style.right = "auto";
+          }
+          const width = panel.getBoundingClientRect().width;
+          const height = panel.getBoundingClientRect().height;
+          const left = Math.min(Math.max(startRect.left + dx, 8), Math.max(8, window.innerWidth - width - 8));
+          const top = Math.min(Math.max(startRect.top + dy, 8), Math.max(8, window.innerHeight - height - 8));
+          panel.style.left = `${Math.round(left)}px`;
+          panel.style.top = `${Math.round(top)}px`;
+          updateChipSide();
+        };
+        const onEnd = () => {
+          dragHandle.removeEventListener("pointermove", onMove);
+          dragHandle.removeEventListener("pointerup", onEnd);
+          dragHandle.removeEventListener("pointercancel", onEnd);
+          panel.classList.remove("gam-dragging");
+          if (!dragging) return;
+          const rect = panel.getBoundingClientRect();
+          if (window.innerWidth - rect.right < 28) {
+            panel.classList.remove("gam-detached");
+            panel.style.left = "auto";
+            panel.style.right = "0";
+          }
+          keepInViewport();
+          savePosition();
+          if (suppressClick) suppressHandleClick = true;
+        };
+        dragHandle.addEventListener("pointermove", onMove);
+        dragHandle.addEventListener("pointerup", onEnd);
+        dragHandle.addEventListener("pointercancel", onEnd);
+      });
+    }
+    function openHistory() {
+      if (suppressHandleClick) {
+        suppressHandleClick = false;
+        return;
+      }
+      const compactRect = panel.getBoundingClientRect();
+      const rightEdge = compactRect.right;
+      manualOpen = true;
+      panel.classList.remove("gam-chip-visible");
+      panel.classList.add("gam-open");
+      if (panel.classList.contains("gam-detached")) {
+        const width = panel.getBoundingClientRect().width;
+        panel.style.left = `${Math.round(rightEdge - width)}px`;
+      }
+      keepInViewport();
+      historyPanel.render();
+    }
+    function closeHistory() {
+      const openRect = panel.getBoundingClientRect();
+      const rightEdge = openRect.right;
+      manualOpen = false;
+      panel.classList.remove("gam-open");
+      if (panel.classList.contains("gam-detached")) {
+        panel.style.left = `${Math.round(rightEdge - COMPACT_WIDTH)}px`;
+      }
+      historyPanel.clear();
+      keepInViewport();
+      savePosition();
+      handle.focus();
+    }
+    function hideActivity() {
+      panel.classList.remove("gam-chip-visible");
+      if (panel.dataset.status === "active") setStatus("idle");
+    }
+    function flushActivity() {
+      uiTimer = null;
+      if (!pendingLatest) return;
+      const summary = pendingLatest;
+      pendingLatest = null;
+      currentAction.textContent = summary.action;
+      currentDetail.textContent = summary.detail;
+      setStatus("active");
+      if (!manualOpen) panel.classList.add("gam-chip-visible");
+      window.clearTimeout(activityTimer);
+      activityTimer = window.setTimeout(hideActivity, ACTIVITY_VISIBLE_MS);
+    }
+    function queueActivity(summary) {
+      pendingLatest = summary;
+      if (!isActive() || uiTimer !== null || document.visibilityState !== "visible") return;
+      uiTimer = window.setTimeout(flushActivity, UI_COALESCE_MS);
+    }
+    function showAttention(action, detail) {
+      pendingLatest = null;
+      if (uiTimer !== null) {
+        window.clearTimeout(uiTimer);
+        uiTimer = null;
+      }
+      window.clearTimeout(activityTimer);
+      currentAction.textContent = action;
+      currentDetail.textContent = detail;
+      setStatus("error");
+      if (!manualOpen) panel.classList.add("gam-chip-visible");
+    }
+    function clearAttention() {
+      panel.classList.remove("gam-chip-visible");
+      if (panel.dataset.status === "error") setStatus("idle");
+    }
+    function recordEvent(summary) {
+      eventStore.add(summary);
+      if (manualOpen) historyPanel.appendEvent(summary);
+    }
+    function recordHint(message) {
+      const previous = eventStore.all().at(-1);
+      if (previous?.kind === "hint" && previous.message === message) return;
+      eventStore.addHint(message);
+      if (manualOpen) historyPanel.appendHint(message);
+    }
+    function suspendActivity() {
+      if (uiTimer !== null) {
+        window.clearTimeout(uiTimer);
+        uiTimer = null;
+      }
+      window.clearTimeout(activityTimer);
+      panel.classList.remove("gam-chip-visible");
+      if (panel.dataset.status === "active") setStatus("idle");
+    }
+    function resumeActivity() {
+      if (pendingLatest) queueActivity(pendingLatest);
+    }
+    function mount() {
+      if (!style.isConnected) document.documentElement.appendChild(style);
+      if (!panel.isConnected) document.body.appendChild(panel);
+      restorePosition();
+    }
+    function unmount() {
+      if (panel.isConnected) savePosition();
+      suspendActivity();
+      panel.classList.remove("gam-open", "gam-chip-visible", "gam-dragging");
+      manualOpen = false;
+      historyPanel.clear();
+      panel.remove();
+      style.remove();
+    }
+    makeDraggable(handle, { suppressClick: true });
+    makeDraggable(header);
+    handle.addEventListener("click", openHistory);
+    close.addEventListener("click", closeHistory);
+    return {
+      mount,
+      unmount,
+      keepInViewport,
+      setStatus,
+      getStatus,
+      recordEvent,
+      recordHint,
+      queueActivity,
+      showAttention,
+      clearAttention,
+      suspendActivity,
+      resumeActivity
+    };
+  }
+
+  // src/ui/settings-panel.js
+  function backendLabel(backend) {
+    try {
+      const parsed = new URL(backend);
+      return parsed.host + (parsed.pathname === "/" ? "" : parsed.pathname);
+    } catch (_) {
+      return backend;
+    }
+  }
+  function testProfileConnection(profile, statusElement, button) {
+    const validation = validateBackend(profile.backend);
+    if (!validation.ok) {
+      statusElement.textContent = validation.message;
+      statusElement.dataset.state = "error";
+      return;
+    }
+    button.disabled = true;
+    statusElement.textContent = "\u6B63\u5728\u6D4B\u8BD5\u8FDE\u63A5\u2026";
+    statusElement.dataset.state = "pending";
+    const headers = {};
+    if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
+    GM_xmlhttpRequest({
+      method: "GET",
+      url: `${validation.backend}/v1/action-logs?after=${Number.MAX_SAFE_INTEGER}&wait=0&limit=1`,
+      headers,
+      timeout: 7e3,
+      onload(response) {
+        button.disabled = false;
+        if (response.status >= 200 && response.status < 300) {
+          statusElement.textContent = "\u2713 \u8FDE\u63A5\u6210\u529F";
+          statusElement.dataset.state = "success";
+        } else if (response.status === 401) {
+          statusElement.textContent = "\u8BA4\u8BC1\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5 Bearer Token\u3002";
+          statusElement.dataset.state = "error";
+        } else {
+          statusElement.textContent = `\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\u3002`;
+          statusElement.dataset.state = "error";
+        }
+      },
+      onerror() {
+        button.disabled = false;
+        statusElement.textContent = "\u65E0\u6CD5\u8FDE\u63A5\u540E\u7AEF\u3002";
+        statusElement.dataset.state = "error";
+      },
+      ontimeout() {
+        button.disabled = false;
+        statusElement.textContent = "\u8FDE\u63A5\u8D85\u65F6\u3002";
+        statusElement.dataset.state = "error";
+      }
+    });
+  }
+  function createSettingsPanel({ getProfiles, onApplyProfiles }) {
+    let overlay = null;
+    let style = null;
+    function close() {
+      overlay?.remove();
+      style?.remove();
+      overlay = null;
+      style = null;
+    }
+    function open() {
+      if (overlay?.isConnected) return;
+      style = document.createElement("style");
+      style.textContent = SETTINGS_CSS;
+      overlay = document.createElement("div");
+      overlay.id = "gam-settings-overlay";
+      overlay.innerHTML = `
       <div class="gam-settings-card" role="dialog" aria-modal="true" aria-labelledby="gam-settings-title">
         <div class="gam-settings-header">
-          <div class="gam-settings-title" id="gam-settings-title">Action Monitor 配置</div>
-          <button class="gam-icon-button gam-settings-close" type="button" aria-label="关闭配置">×</button>
+          <div class="gam-settings-title" id="gam-settings-title">Action Monitor \u914D\u7F6E</div>
+          <button class="gam-icon-button gam-settings-close" type="button" aria-label="\u5173\u95ED\u914D\u7F6E">\xD7</button>
         </div>
         <div class="gam-settings-body">
           <section class="gam-list-view">
-            <p class="gam-settings-note">当前 GPT 名称会精确匹配一条已启用配置；没有匹配时监控不会运行。</p>
+            <p class="gam-settings-note">\u5F53\u524D GPT \u540D\u79F0\u4F1A\u7CBE\u786E\u5339\u914D\u4E00\u6761\u5DF2\u542F\u7528\u914D\u7F6E\uFF1B\u6CA1\u6709\u5339\u914D\u65F6\u76D1\u63A7\u4E0D\u4F1A\u8FD0\u884C\u3002</p>
             <div class="gam-profile-list"></div>
             <div class="gam-list-footer">
-              <button class="gam-button gam-add-profile" type="button">＋ 添加监控目标</button>
+              <button class="gam-button gam-add-profile" type="button">\uFF0B \u6DFB\u52A0\u76D1\u63A7\u76EE\u6807</button>
             </div>
           </section>
           <form class="gam-editor" hidden>
             <label class="gam-field">
-              <span>GPT 名称</span>
-              <input class="gam-input gam-gpt-name" type="text" autocomplete="off" placeholder="例如 github_skill" required>
+              <span>GPT \u540D\u79F0</span>
+              <input class="gam-input gam-gpt-name" type="text" autocomplete="off" placeholder="\u4F8B\u5982 github_skill" required>
             </label>
             <label class="gam-field">
-              <span>后端地址</span>
+              <span>\u540E\u7AEF\u5730\u5740</span>
               <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://skills.example.com" required>
             </label>
             <label class="gam-field">
               <span>Bearer Token</span>
               <div class="gam-token-row">
-                <input class="gam-input gam-token" type="password" autocomplete="off" placeholder="未启用认证可留空">
-                <button class="gam-button gam-token-toggle" type="button">显示</button>
+                <input class="gam-input gam-token" type="password" autocomplete="off" placeholder="\u672A\u542F\u7528\u8BA4\u8BC1\u53EF\u7559\u7A7A">
+                <button class="gam-button gam-token-toggle" type="button">\u663E\u793A</button>
               </div>
             </label>
             <label class="gam-check-row">
               <input class="gam-enabled" type="checkbox" checked>
-              <span>启用此监控</span>
+              <span>\u542F\u7528\u6B64\u76D1\u63A7</span>
             </label>
             <div class="gam-form-message" aria-live="polite"></div>
             <div class="gam-editor-footer">
-              <button class="gam-button gam-delete" type="button">删除</button>
+              <button class="gam-button gam-delete" type="button">\u5220\u9664</button>
               <span class="gam-spacer"></span>
-              <button class="gam-button gam-test" type="button">测试连接</button>
-              <button class="gam-button gam-cancel-edit" type="button">取消</button>
-              <button class="gam-button gam-button-primary gam-save" type="submit">保存</button>
+              <button class="gam-button gam-test" type="button">\u6D4B\u8BD5\u8FDE\u63A5</button>
+              <button class="gam-button gam-cancel-edit" type="button">\u53D6\u6D88</button>
+              <button class="gam-button gam-button-primary gam-save" type="submit">\u4FDD\u5B58</button>
             </div>
           </form>
         </div>
       </div>
     `;
-
-    document.documentElement.appendChild(settingsStyle);
-    document.body.appendChild(settingsOverlay);
-
-    const listView = settingsOverlay.querySelector('.gam-list-view');
-    const list = settingsOverlay.querySelector('.gam-profile-list');
-    const editor = settingsOverlay.querySelector('.gam-editor');
-    const gptNameInput = settingsOverlay.querySelector('.gam-gpt-name');
-    const backendInput = settingsOverlay.querySelector('.gam-backend');
-    const tokenInput = settingsOverlay.querySelector('.gam-token');
-    const enabledInput = settingsOverlay.querySelector('.gam-enabled');
-    const formMessage = settingsOverlay.querySelector('.gam-form-message');
-    const deleteButton = settingsOverlay.querySelector('.gam-delete');
-    const testButton = settingsOverlay.querySelector('.gam-test');
-    let editingId = null;
-
-    function renderList() {
-      list.replaceChildren();
-      if (!profiles.length) {
-        const empty = document.createElement('div');
-        empty.className = 'gam-empty';
-        empty.textContent = '还没有监控配置。添加一组 GPT、后端地址和 Bearer Token。';
-        list.appendChild(empty);
-        return;
+      document.documentElement.appendChild(style);
+      document.body.appendChild(overlay);
+      const listView = overlay.querySelector(".gam-list-view");
+      const list = overlay.querySelector(".gam-profile-list");
+      const editor = overlay.querySelector(".gam-editor");
+      const gptNameInput = overlay.querySelector(".gam-gpt-name");
+      const backendInput = overlay.querySelector(".gam-backend");
+      const tokenInput = overlay.querySelector(".gam-token");
+      const enabledInput = overlay.querySelector(".gam-enabled");
+      const formMessage = overlay.querySelector(".gam-form-message");
+      const deleteButton = overlay.querySelector(".gam-delete");
+      const testButton = overlay.querySelector(".gam-test");
+      let editingId = null;
+      function profiles() {
+        return getProfiles();
       }
-
-      for (const profile of profiles) {
-        const row = document.createElement('div');
-        row.className = 'gam-profile-row';
-        row.dataset.enabled = String(profile.enabled);
-
-        const main = document.createElement('div');
-        main.className = 'gam-profile-main';
-        const nameLine = document.createElement('div');
-        nameLine.className = 'gam-profile-name-line';
-        const dot = document.createElement('span');
-        dot.className = 'gam-profile-state';
-        const name = document.createElement('span');
-        name.className = 'gam-profile-name';
-        name.textContent = profile.gptName;
-        const backend = document.createElement('div');
-        backend.className = 'gam-profile-backend';
-        backend.textContent = `${profile.enabled ? '已启用' : '已停用'} · ${backendLabel(profile.backend)}`;
-        nameLine.append(dot, name);
-        main.append(nameLine, backend);
-
-        const edit = document.createElement('button');
-        edit.className = 'gam-button';
-        edit.type = 'button';
-        edit.textContent = '编辑';
-        edit.addEventListener('click', () => showEditor(profile));
-        row.append(main, edit);
-        list.appendChild(row);
+      function renderList() {
+        list.replaceChildren();
+        if (!profiles().length) {
+          const empty = document.createElement("div");
+          empty.className = "gam-empty";
+          empty.textContent = "\u8FD8\u6CA1\u6709\u76D1\u63A7\u914D\u7F6E\u3002\u6DFB\u52A0\u4E00\u7EC4 GPT\u3001\u540E\u7AEF\u5730\u5740\u548C Bearer Token\u3002";
+          list.appendChild(empty);
+          return;
+        }
+        for (const profile of profiles()) {
+          const row = document.createElement("div");
+          row.className = "gam-profile-row";
+          row.dataset.enabled = String(profile.enabled);
+          const main = document.createElement("div");
+          main.className = "gam-profile-main";
+          const nameLine = document.createElement("div");
+          nameLine.className = "gam-profile-name-line";
+          const dot = document.createElement("span");
+          dot.className = "gam-profile-state";
+          const name = document.createElement("span");
+          name.className = "gam-profile-name";
+          name.textContent = profile.gptName;
+          const backend = document.createElement("div");
+          backend.className = "gam-profile-backend";
+          backend.textContent = `${profile.enabled ? "\u5DF2\u542F\u7528" : "\u5DF2\u505C\u7528"} \xB7 ${backendLabel(profile.backend)}`;
+          nameLine.append(dot, name);
+          main.append(nameLine, backend);
+          const edit = document.createElement("button");
+          edit.className = "gam-button";
+          edit.type = "button";
+          edit.textContent = "\u7F16\u8F91";
+          edit.addEventListener("click", () => showEditor(profile));
+          row.append(main, edit);
+          list.appendChild(row);
+        }
       }
-    }
-
-    function clearMessage() {
-      formMessage.textContent = '';
-      delete formMessage.dataset.state;
-    }
-
-    function showEditor(profile = null) {
-      editingId = profile?.id || null;
-      gptNameInput.value = profile?.gptName || '';
-      backendInput.value = profile?.backend || '';
-      tokenInput.value = profile?.token || '';
-      tokenInput.type = 'password';
-      settingsOverlay.querySelector('.gam-token-toggle').textContent = '显示';
-      enabledInput.checked = profile?.enabled !== false;
-      deleteButton.hidden = !profile;
-      clearMessage();
-      listView.hidden = true;
-      editor.hidden = false;
-      window.setTimeout(() => gptNameInput.focus(), 0);
-    }
-
-    function showList() {
-      editor.hidden = true;
-      listView.hidden = false;
-      editingId = null;
+      function clearMessage() {
+        formMessage.textContent = "";
+        delete formMessage.dataset.state;
+      }
+      function showEditor(profile = null) {
+        editingId = profile?.id || null;
+        gptNameInput.value = profile?.gptName || "";
+        backendInput.value = profile?.backend || "";
+        tokenInput.value = profile?.token || "";
+        tokenInput.type = "password";
+        overlay.querySelector(".gam-token-toggle").textContent = "\u663E\u793A";
+        enabledInput.checked = profile?.enabled !== false;
+        deleteButton.hidden = !profile;
+        clearMessage();
+        listView.hidden = true;
+        editor.hidden = false;
+        window.setTimeout(() => gptNameInput.focus(), 0);
+      }
+      function showList() {
+        editor.hidden = true;
+        listView.hidden = false;
+        editingId = null;
+        renderList();
+      }
+      function formProfile() {
+        return {
+          id: editingId || createProfileId(),
+          gptName: gptNameInput.value.trim(),
+          backend: normalizeBackend(backendInput.value),
+          token: tokenInput.value.trim(),
+          enabled: enabledInput.checked
+        };
+      }
+      function validateProfile(profile) {
+        if (!profile.gptName) return "\u8BF7\u8F93\u5165 GPT \u540D\u79F0\u3002";
+        const duplicate = profiles().find(
+          (item) => item.id !== editingId && item.gptName === profile.gptName
+        );
+        if (duplicate) return `GPT \u540D\u79F0 \u201C${profile.gptName}\u201D \u5DF2\u5B58\u5728\u3002`;
+        const backendValidation = validateBackend(profile.backend);
+        if (!backendValidation.ok) return backendValidation.message;
+        profile.backend = backendValidation.backend;
+        return "";
+      }
+      overlay.querySelector(".gam-settings-close").addEventListener("click", close);
+      overlay.querySelector(".gam-add-profile").addEventListener("click", () => showEditor());
+      overlay.querySelector(".gam-cancel-edit").addEventListener("click", showList);
+      overlay.querySelector(".gam-token-toggle").addEventListener("click", (event) => {
+        const visible = tokenInput.type === "text";
+        tokenInput.type = visible ? "password" : "text";
+        event.currentTarget.textContent = visible ? "\u663E\u793A" : "\u9690\u85CF";
+      });
+      testButton.addEventListener("click", () => {
+        const profile = formProfile();
+        clearMessage();
+        testProfileConnection(profile, formMessage, testButton);
+      });
+      deleteButton.addEventListener("click", () => {
+        if (!editingId) return;
+        const profile = profiles().find((item) => item.id === editingId);
+        if (!profile || !confirm(`\u5220\u9664 \u201C${profile.gptName}\u201D \u7684\u76D1\u63A7\u914D\u7F6E\uFF1F`)) return;
+        onApplyProfiles(profiles().filter((item) => item.id !== editingId));
+        showList();
+      });
+      editor.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const profile = formProfile();
+        const error = validateProfile(profile);
+        if (error) {
+          formMessage.textContent = error;
+          formMessage.dataset.state = "error";
+          return;
+        }
+        const next = editingId ? profiles().map((item) => item.id === editingId ? profile : item) : [...profiles(), profile];
+        onApplyProfiles(next);
+        showList();
+      });
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) close();
+      });
+      overlay.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          if (!editor.hidden) showList();
+          else close();
+        }
+      });
       renderList();
+      overlay.querySelector(".gam-settings-close").focus();
     }
+    return { open, close };
+  }
 
-    function formProfile() {
-      return {
-        id: editingId || createProfileId(),
-        gptName: gptNameInput.value.trim(),
-        backend: normalizeBackend(backendInput.value),
-        token: tokenInput.value.trim(),
-        enabled: enabledInput.checked,
-      };
-    }
-
-    function validateProfile(profile) {
-      if (!profile.gptName) return '请输入 GPT 名称。';
-      const duplicate = profiles.find(
-        (item) => item.id !== editingId && item.gptName === profile.gptName,
-      );
-      if (duplicate) return `GPT 名称 “${profile.gptName}” 已存在。`;
-      const backendValidation = validateBackend(profile.backend);
-      if (!backendValidation.ok) return backendValidation.message;
-      profile.backend = backendValidation.backend;
-      return '';
-    }
-
-    settingsOverlay.querySelector('.gam-settings-close').addEventListener('click', closeSettings);
-    settingsOverlay.querySelector('.gam-add-profile').addEventListener('click', () => showEditor());
-    settingsOverlay.querySelector('.gam-cancel-edit').addEventListener('click', showList);
-    settingsOverlay.querySelector('.gam-token-toggle').addEventListener('click', (event) => {
-      const visible = tokenInput.type === 'text';
-      tokenInput.type = visible ? 'password' : 'text';
-      event.currentTarget.textContent = visible ? '显示' : '隐藏';
+  // src/main.js
+  (function() {
+    "use strict";
+    let profiles = loadProfiles();
+    let monitorActive = false;
+    let activeProfile = null;
+    let actionLogClient = null;
+    let chatAdapter = null;
+    const eventStore = createEventStore();
+    const monitorUi = createMonitorPanel({
+      eventStore,
+      isActive: () => monitorActive
     });
-    testButton.addEventListener('click', () => {
-      const profile = formProfile();
-      clearMessage();
-      testProfileConnection(profile, formMessage, testButton);
-    });
-    deleteButton.addEventListener('click', () => {
-      if (!editingId) return;
-      const profile = profiles.find((item) => item.id === editingId);
-      if (!profile || !confirm(`删除 “${profile.gptName}” 的监控配置？`)) return;
-      applyProfiles(profiles.filter((item) => item.id !== editingId));
-      showList();
-    });
-    editor.addEventListener('submit', (event) => {
-      event.preventDefault();
-      const profile = formProfile();
-      const error = validateProfile(profile);
-      if (error) {
-        formMessage.textContent = error;
-        formMessage.dataset.state = 'error';
-        return;
-      }
-
-      const next = editingId
-        ? profiles.map((item) => (item.id === editingId ? profile : item))
-        : [...profiles, profile];
-      applyProfiles(next);
-      showList();
-    });
-    settingsOverlay.addEventListener('click', (event) => {
-      if (event.target === settingsOverlay) closeSettings();
-    });
-    settingsOverlay.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        if (!editor.hidden) showList();
-        else closeSettings();
-      }
-    });
-
-    renderList();
-    settingsOverlay.querySelector('.gam-settings-close').focus();
-  }
-
-  const handle = panel.querySelector('.gam-handle');
-  const close = panel.querySelector('.gam-close');
-  const header = panel.querySelector('.gam-header');
-  const logBox = panel.querySelector('.gam-log');
-  const currentAction = panel.querySelector('.gam-current-action');
-  const currentDetail = panel.querySelector('.gam-current-detail');
-
-  function setStatus(state) {
-    panel.dataset.status = state;
-  }
-
-  function mountUi() {
-    if (!style.isConnected) document.documentElement.appendChild(style);
-    if (!panel.isConnected) document.body.appendChild(panel);
-    restorePosition();
-  }
-
-  function unmountUi() {
-    if (panel.isConnected) savePosition();
-    panel.classList.remove('gam-open', 'gam-chip-visible', 'gam-dragging');
-    manualOpen = false;
-    logBox.replaceChildren();
-    panel.remove();
-    style.remove();
-  }
-
-  function updateChipSide() {
-    if (panel.classList.contains('gam-open')) return;
-    const rect = panel.getBoundingClientRect();
-    panel.classList.toggle('gam-chip-right', rect.left < 275);
-  }
-
-  function savePosition() {
-    const rect = panel.getBoundingClientRect();
-    const docked = !panel.classList.contains('gam-detached');
-    const compactLeft = panel.classList.contains('gam-open')
-      ? rect.right - COMPACT_WIDTH
-      : rect.left;
-    GM_setValue(POSITION_KEY, {
-      top: Math.round(rect.top),
-      left: docked ? null : Math.round(compactLeft),
-      docked,
-    });
-  }
-
-  function keepInViewport() {
-    const rect = panel.getBoundingClientRect();
-    const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-    panel.style.top = `${Math.round(Math.min(Math.max(rect.top, 8), maxTop))}px`;
-
-    if (panel.classList.contains('gam-detached')) {
-      const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
-      panel.style.left = `${Math.round(Math.min(Math.max(rect.left, 8), maxLeft))}px`;
-      panel.style.right = 'auto';
-    } else {
-      panel.style.left = 'auto';
-      panel.style.right = '0';
+    function deactivateMonitor() {
+      if (!monitorActive) return;
+      monitorActive = false;
+      activeProfile = null;
+      actionLogClient?.stop();
+      actionLogClient = null;
+      eventStore.clear();
+      monitorUi.unmount();
     }
-    updateChipSide();
-  }
-
-  function restorePosition() {
-    const saved = GM_getValue(POSITION_KEY, null);
-    if (!saved || typeof saved !== 'object') {
-      updateChipSide();
-      return;
-    }
-    if (Number.isFinite(saved.top)) panel.style.top = `${saved.top}px`;
-    if (saved.docked === false && Number.isFinite(saved.left)) {
-      panel.classList.add('gam-detached');
-      panel.style.left = `${saved.left}px`;
-      panel.style.right = 'auto';
-    }
-    keepInViewport();
-  }
-
-  function makeDraggable(dragHandle, { suppressClick = false } = {}) {
-    dragHandle.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0 || event.target.closest('.gam-close')) return;
-
-      const startRect = panel.getBoundingClientRect();
-      const startX = event.clientX;
-      const startY = event.clientY;
-      let dragging = false;
-      panel.classList.add('gam-dragging');
-      dragHandle.setPointerCapture(event.pointerId);
-
-      const onMove = (moveEvent) => {
-        const dx = moveEvent.clientX - startX;
-        const dy = moveEvent.clientY - startY;
-        if (!dragging && Math.hypot(dx, dy) < 4) return;
-
-        if (!dragging) {
-          dragging = true;
-          panel.classList.add('gam-detached');
-          panel.style.left = `${Math.round(startRect.left)}px`;
-          panel.style.right = 'auto';
-        }
-
-        const width = panel.getBoundingClientRect().width;
-        const height = panel.getBoundingClientRect().height;
-        const left = Math.min(
-          Math.max(startRect.left + dx, 8),
-          Math.max(8, window.innerWidth - width - 8),
-        );
-        const top = Math.min(
-          Math.max(startRect.top + dy, 8),
-          Math.max(8, window.innerHeight - height - 8),
-        );
-        panel.style.left = `${Math.round(left)}px`;
-        panel.style.top = `${Math.round(top)}px`;
-        updateChipSide();
-      };
-
-      const onEnd = () => {
-        dragHandle.removeEventListener('pointermove', onMove);
-        dragHandle.removeEventListener('pointerup', onEnd);
-        dragHandle.removeEventListener('pointercancel', onEnd);
-        panel.classList.remove('gam-dragging');
-
-        if (!dragging) return;
-        const rect = panel.getBoundingClientRect();
-        if (window.innerWidth - rect.right < 28) {
-          panel.classList.remove('gam-detached');
-          panel.style.left = 'auto';
-          panel.style.right = '0';
-        }
-        keepInViewport();
-        savePosition();
-        if (suppressClick) suppressHandleClick = true;
-      };
-
-      dragHandle.addEventListener('pointermove', onMove);
-      dragHandle.addEventListener('pointerup', onEnd);
-      dragHandle.addEventListener('pointercancel', onEnd);
-    });
-  }
-
-  function createEventNode(summary) {
-    const node = document.createElement('div');
-    node.className = 'gam-entry';
-    node.title = summary.raw;
-
-    const top = document.createElement('div');
-    top.className = 'gam-entry-top';
-
-    const time = document.createElement('span');
-    time.className = 'gam-time';
-    time.textContent = summary.time || '--:--';
-
-    const action = document.createElement('span');
-    action.className = 'gam-action';
-    action.textContent = summary.action;
-
-    const detail = document.createElement('div');
-    detail.className = 'gam-detail';
-    detail.textContent = summary.detail;
-
-    top.append(time, action);
-    node.append(top, detail);
-    return node;
-  }
-
-  function createHintNode(message) {
-    const node = document.createElement('div');
-    node.className = 'gam-entry gam-hint';
-    node.textContent = message;
-    return node;
-  }
-
-  function trimHistory() {
-    while (history.length > MAX_HISTORY) {
-      history.shift();
-      if (manualOpen && logBox.firstElementChild) logBox.firstElementChild.remove();
-    }
-  }
-
-  function recordEvent(summary) {
-    history.push({ kind: 'event', summary });
-    if (manualOpen) {
-      logBox.appendChild(createEventNode(summary));
-      logBox.scrollTop = logBox.scrollHeight;
-    }
-    trimHistory();
-  }
-
-  function recordHint(message) {
-    const previous = history[history.length - 1];
-    if (previous?.kind === 'hint' && previous.message === message) return;
-    history.push({ kind: 'hint', message });
-    if (manualOpen) {
-      logBox.appendChild(createHintNode(message));
-      logBox.scrollTop = logBox.scrollHeight;
-    }
-    trimHistory();
-  }
-
-  function renderHistory() {
-    const fragment = document.createDocumentFragment();
-    for (const item of history) {
-      fragment.appendChild(
-        item.kind === 'event' ? createEventNode(item.summary) : createHintNode(item.message),
-      );
-    }
-    logBox.replaceChildren(fragment);
-    logBox.scrollTop = logBox.scrollHeight;
-  }
-
-  function openHistory() {
-    if (suppressHandleClick) {
-      suppressHandleClick = false;
-      return;
-    }
-    const compactRect = panel.getBoundingClientRect();
-    const rightEdge = compactRect.right;
-    manualOpen = true;
-    panel.classList.remove('gam-chip-visible');
-    panel.classList.add('gam-open');
-    if (panel.classList.contains('gam-detached')) {
-      const width = panel.getBoundingClientRect().width;
-      panel.style.left = `${Math.round(rightEdge - width)}px`;
-    }
-    keepInViewport();
-    renderHistory();
-  }
-
-  function closeHistory() {
-    const openRect = panel.getBoundingClientRect();
-    const rightEdge = openRect.right;
-    manualOpen = false;
-    panel.classList.remove('gam-open');
-    if (panel.classList.contains('gam-detached')) {
-      panel.style.left = `${Math.round(rightEdge - COMPACT_WIDTH)}px`;
-    }
-    logBox.replaceChildren();
-    keepInViewport();
-    savePosition();
-    handle.focus();
-  }
-
-  function parseField(text, name) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const match = text.match(
-      new RegExp(`(?:^|\\s)${escaped}=("(?:\\\\.|[^"\\\\])*"|\\[[^\\]]*\\]|[^\\s]+)`),
-    );
-    if (!match) return null;
-    const raw = match[1];
-    try {
-      return JSON.parse(raw);
-    } catch (_) {
-      return raw;
-    }
-  }
-
-  function baseName(path) {
-    if (!path || typeof path !== 'string') return '';
-    const parts = path.replace(/\\/g, '/').split('/');
-    return parts[parts.length - 1] || path;
-  }
-
-  function compactList(value, max = 2) {
-    if (!Array.isArray(value) || !value.length) return '';
-    const names = value.slice(0, max).map((item) => baseName(String(item)));
-    return value.length > max ? `${names.join(', ')} +${value.length - max}` : names.join(', ');
-  }
-
-  function shorten(value, limit = 72) {
-    if (value === null || value === undefined) return '';
-    const oneLine = String(value).replace(/\s+/g, ' ').trim();
-    return oneLine.length > limit ? `${oneLine.slice(0, limit - 1)}…` : oneLine;
-  }
-
-  function summarize(text) {
-    const action = text.match(/\bACTION\s+([\w-]+)/)?.[1] || 'Action';
-    const time = text.match(/^\[\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2})\]/)?.[1] || '';
-    let detail = '';
-
-    if (action === 'loadSkills') {
-      detail = compactList(parseField(text, 'skill_ids'));
-    } else if (action === 'readSkillContent') {
-      detail = baseName(parseField(text, 'path'));
-    } else if (action === 'workspaceReadFiles') {
-      detail = compactList(parseField(text, 'paths')) || `${parseField(text, 'files') || ''} files`;
-    } else if (action === 'workspaceSearch') {
-      detail = shorten(parseField(text, 'query'));
-    } else if (action === 'workspaceInspect') {
-      detail = compactList(parseField(text, 'paths'));
-    } else if (action === 'workspaceWriteFile') {
-      detail = baseName(parseField(text, 'path'));
-    } else if (action === 'workspaceApplyPatch') {
-      const files = parseField(text, 'changed_files');
-      detail = Array.isArray(files) ? `${files.length} files · ${compactList(files)}` : '';
-    } else if (action === 'workspaceCommand') {
-      const commandAction = parseField(text, 'action');
-      const command = parseField(text, 'command');
-      const state = parseField(text, 'state');
-      const exitCode = parseField(text, 'exit_code');
-      if (command) {
-        const status = [commandAction, state].filter(Boolean).join(' · ');
-        const exit = state === 'failed' && exitCode !== null ? ` · exit ${exitCode}` : '';
-        detail = `${status}${exit}${status ? ' · ' : ''}${shorten(command, 48)}`;
-      }
-      else if (state && commandAction) detail = `${commandAction} · ${state}`;
-      else detail = shorten(state || commandAction || '');
-    } else {
-      detail = shorten(
-        parseField(text, 'path') ||
-        parseField(text, 'query') ||
-        compactList(parseField(text, 'paths')) ||
-        parseField(text, 'state') ||
-        '',
-      );
-    }
-
-    return { action, detail: detail || 'completed', time, raw: text };
-  }
-
-  function hideActivity() {
-    panel.classList.remove('gam-chip-visible');
-    if (panel.dataset.status === 'active') setStatus('idle');
-  }
-
-  function flushActivity() {
-    uiTimer = null;
-    if (!pendingLatest) return;
-    const summary = pendingLatest;
-    pendingLatest = null;
-    currentAction.textContent = summary.action;
-    currentDetail.textContent = summary.detail;
-    setStatus('active');
-    if (!manualOpen) panel.classList.add('gam-chip-visible');
-    window.clearTimeout(activityTimer);
-    activityTimer = window.setTimeout(hideActivity, ACTIVITY_VISIBLE_MS);
-  }
-
-  function queueActivity(summary) {
-    pendingLatest = summary;
-    if (!monitorActive || uiTimer !== null || document.visibilityState !== 'visible') return;
-    uiTimer = window.setTimeout(flushActivity, UI_COALESCE_MS);
-  }
-
-  function showAttention(action, detail) {
-    pendingLatest = null;
-    if (uiTimer !== null) {
-      window.clearTimeout(uiTimer);
-      uiTimer = null;
-    }
-    window.clearTimeout(activityTimer);
-    currentAction.textContent = action;
-    currentDetail.textContent = detail;
-    setStatus('error');
-    if (!manualOpen) panel.classList.add('gam-chip-visible');
-  }
-
-  function clearPollTimer() {
-    if (pollTimer !== null) {
-      window.clearTimeout(pollTimer);
-      pollTimer = null;
-    }
-  }
-
-  function schedulePoll(delay = 30) {
-    clearPollTimer();
-    if (!monitorActive || stopped || document.visibilityState !== 'visible') return;
-    pollTimer = window.setTimeout(() => {
-      pollTimer = null;
-      poll();
-    }, delay);
-  }
-
-  function abortRequest() {
-    if (!requestHandle) return;
-    const active = requestHandle;
-    requestHandle = null;
-    if (typeof active.abort === 'function') {
-      try {
-        active.abort();
-      } catch (_) {
-        // The request may already have completed between visibility events.
-      }
-    }
-  }
-
-  function suspendPolling() {
-    requestGeneration += 1;
-    clearPollTimer();
-    abortRequest();
-    if (uiTimer !== null) {
-      window.clearTimeout(uiTimer);
-      uiTimer = null;
-    }
-    window.clearTimeout(activityTimer);
-    panel.classList.remove('gam-chip-visible');
-    if (panel.dataset.status === 'active') setStatus('idle');
-  }
-
-  function resumePolling() {
-    if (!monitorActive || stopped || document.visibilityState !== 'visible') return;
-    if (pendingLatest) queueActivity(pendingLatest);
-    schedulePoll(0);
-  }
-
-  function scheduleRetry(message) {
-    recordHint(message);
-    showAttention('连接异常', '3 秒后重试');
-    schedulePoll(RETRY_MS);
-  }
-
-  function poll() {
-    if (!monitorActive || stopped || requestHandle || document.visibilityState !== 'visible') return;
-
-    const profile = activeProfile;
-    if (!profile) {
+    function applyProfiles(nextProfiles) {
+      profiles = saveProfiles(nextProfiles);
       deactivateMonitor();
-      return;
+      if (document.visibilityState === "visible") chatAdapter?.evaluateActivation();
     }
-    const backend = profile.backend;
-    const token = profile.token;
-
-    const headers = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    const generation = ++requestGeneration;
-    const priming = needsCursorPrime;
-    const requestAfter = priming ? Number.MAX_SAFE_INTEGER : lastId;
-    const requestWait = priming ? 0 : POLL_WAIT_SECONDS;
-    const requestLimit = priming ? 1 : 50;
-    requestHandle = GM_xmlhttpRequest({
-      method: 'GET',
-      url: `${backend}/v1/action-logs?after=${requestAfter}&wait=${requestWait}&limit=${requestLimit}`,
-      headers,
-      timeout: (requestWait + 5) * 1000,
-      onload(response) {
-        if (generation !== requestGeneration) return;
-        requestHandle = null;
-        if (document.visibilityState !== 'visible') return;
-
-        if (response.status === 401) {
-          stopped = true;
-          showAttention('认证失败', '检查 Bearer Token');
-          recordHint('认证失败：请检查 Bearer Token。');
-          return;
-        }
-        if (response.status < 200 || response.status >= 300) {
-          scheduleRetry(`后端返回 HTTP ${response.status}，3 秒后重试。`);
-          return;
-        }
-
-        try {
-          const body = JSON.parse(response.responseText);
-          if (Number.isInteger(body.last_id)) lastId = body.last_id;
-          if (priming) {
-            needsCursorPrime = false;
-            setStatus('idle');
-            schedulePoll(0);
-            return;
-          }
-          let newest = null;
-          for (const item of body.items || []) {
-            newest = summarize(item.text);
-            recordEvent(newest);
-          }
-          if (newest) {
-            queueActivity(newest);
-          } else if (panel.dataset.status === 'error') {
-            panel.classList.remove('gam-chip-visible');
-            setStatus('idle');
-          }
-          schedulePoll();
-        } catch (error) {
-          scheduleRetry(`响应解析失败：${String(error)}`);
-        }
-      },
-      onerror() {
-        if (generation !== requestGeneration) return;
-        requestHandle = null;
-        if (document.visibilityState === 'visible') {
-          scheduleRetry('连接后端失败，3 秒后重试。');
-        }
-      },
-      ontimeout() {
-        if (generation !== requestGeneration) return;
-        requestHandle = null;
-        schedulePoll(100);
-      },
-      onabort() {
-        if (generation === requestGeneration) requestHandle = null;
-      },
+    const settingsPanel = createSettingsPanel({
+      getProfiles: () => profiles,
+      onApplyProfiles: applyProfiles
     });
-  }
-
-  function matchingProfile(element) {
-    if (
-      !element ||
-      element.nodeType !== Node.ELEMENT_NODE ||
-      !element.matches(GPT_TITLE_SELECTOR)
-    ) {
-      return null;
-    }
-    return profileForName(titleName(element));
-  }
-
-  function findTargetTitle(root = document) {
-    if (root.nodeType === Node.ELEMENT_NODE) {
-      const profile = matchingProfile(root);
-      if (profile) return { element: root, profile };
-    }
-    if (typeof root.querySelectorAll !== 'function') return null;
-    for (const element of root.querySelectorAll(GPT_TITLE_SELECTOR)) {
-      const profile = matchingProfile(element);
-      if (profile) return { element, profile };
-    }
-    return null;
-  }
-
-  function resetSessionState() {
-    history.length = 0;
-    lastId = 0;
-    needsCursorPrime = true;
-    stopped = false;
-    pendingLatest = null;
-    if (uiTimer !== null) {
-      window.clearTimeout(uiTimer);
-      uiTimer = null;
-    }
-    window.clearTimeout(activityTimer);
-  }
-
-  function activateMonitor(titleElement, profile) {
-    if (monitorActive && activeProfile?.id === profile.id) {
-      activeTitleElement = titleElement;
-      activeProfile = profile;
-      return;
-    }
-    if (monitorActive) deactivateMonitor();
-    monitorActive = true;
-    activeTitleElement = titleElement;
-    activeProfile = profile;
-    resetSessionState();
-    mountUi();
-    setStatus('idle');
-    if (document.visibilityState === 'visible') schedulePoll(0);
-  }
-
-  function deactivateMonitor() {
-    if (!monitorActive) return;
-    monitorActive = false;
-    activeTitleElement = null;
-    activeProfile = null;
-    suspendPolling();
-    resetSessionState();
-    unmountUi();
-  }
-
-  function evaluateActivation() {
-    const target = findTargetTitle(document);
-    if (target) activateMonitor(target.element, target.profile);
-    else deactivateMonitor();
-  }
-
-  function targetFromMutation(mutation) {
-    const mutationElement = mutation.target.nodeType === Node.ELEMENT_NODE
-      ? mutation.target
-      : mutation.target.parentElement;
-    const containingTitle = mutationElement?.closest?.(GPT_TITLE_SELECTOR);
-    const containingProfile = matchingProfile(containingTitle);
-    if (containingProfile) return { element: containingTitle, profile: containingProfile };
-
-    for (const node of mutation.addedNodes) {
-      const target = findTargetTitle(node);
-      if (target) return target;
-    }
-    return null;
-  }
-
-  function startGateObserver() {
-    if (gateObserver || !document.body) return;
-    gateObserver = new MutationObserver((mutations) => {
-      if (monitorActive) {
-        const currentProfile = activeTitleElement?.isConnected
-          ? matchingProfile(activeTitleElement)
-          : null;
-        if (currentProfile?.id === activeProfile?.id) return;
-        evaluateActivation();
+    function activateMonitor(_titleElement, profile) {
+      if (monitorActive && activeProfile?.id === profile.id) {
+        activeProfile = profile;
         return;
       }
-
-      for (const mutation of mutations) {
-        const target = targetFromMutation(mutation);
-        if (target) {
-          activateMonitor(target.element, target.profile);
-          return;
+      if (monitorActive) deactivateMonitor();
+      monitorActive = true;
+      activeProfile = profile;
+      eventStore.clear();
+      monitorUi.mount();
+      monitorUi.setStatus("idle");
+      actionLogClient = createActionLogClient({
+        getProfile: () => activeProfile,
+        onItems(items) {
+          let newest = null;
+          for (const item of items) {
+            newest = summarize(item.text);
+            monitorUi.recordEvent(newest);
+          }
+          if (newest) monitorUi.queueActivity(newest);
+          else monitorUi.clearAttention();
+        },
+        onHint: (message) => monitorUi.recordHint(message),
+        onAttention: (action, detail) => monitorUi.showAttention(action, detail),
+        onStatus(status) {
+          if (status === "idle") monitorUi.clearAttention();
         }
+      });
+      if (document.visibilityState === "visible") actionLogClient.start();
+    }
+    chatAdapter = createChatGPTAdapter({
+      getProfiles: () => profiles,
+      onActivate: activateMonitor,
+      onDeactivate: deactivateMonitor
+    });
+    function suspend() {
+      actionLogClient?.suspend();
+      monitorUi.suspendActivity();
+    }
+    function resume() {
+      if (!monitorActive) return;
+      monitorUi.resumeActivity();
+      actionLogClient?.resume();
+    }
+    GM_registerMenuCommand("\u2699 \u76D1\u63A7\u914D\u7F6E...", settingsPanel.open);
+    window.addEventListener("resize", () => {
+      if (monitorActive) monitorUi.keepInViewport();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        chatAdapter.start();
+        resume();
+      } else {
+        chatAdapter.stop();
+        suspend();
       }
     });
-    gateObserver.observe(document.body, {
-      childList: true,
-      characterData: true,
-      subtree: true,
-    });
-  }
-
-  function stopGateObserver() {
-    if (!gateObserver) return;
-    gateObserver.disconnect();
-    gateObserver = null;
-  }
-
-  makeDraggable(handle, { suppressClick: true });
-  makeDraggable(header);
-  handle.addEventListener('click', openHistory);
-  close.addEventListener('click', closeHistory);
-  window.addEventListener('resize', () => {
-    if (monitorActive) keepInViewport();
-  });
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      startGateObserver();
-      evaluateActivation();
-      resumePolling();
-    } else {
-      stopGateObserver();
-      suspendPolling();
-    }
-  });
-
-  if (document.visibilityState === 'visible') {
-    startGateObserver();
-    evaluateActivation();
-  }
+    if (document.visibilityState === "visible") chatAdapter.start();
+  })();
 })();

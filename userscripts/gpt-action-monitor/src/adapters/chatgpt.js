@@ -4,7 +4,7 @@ export function createChatGPTAdapter({ getProfiles, onActivate, onDeactivate }) 
   let observer = null;
 
   function titleName(element) {
-    return element?.textContent?.trim() || '';
+    return (element?.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
   function matchingProfile(element) {

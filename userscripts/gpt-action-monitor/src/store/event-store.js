@@ -8,12 +8,12 @@ export function createEventStore() {
   }
 
   function add(summary) {
-    history.push({ type: 'event', ...summary });
+    history.push({ kind: 'event', summary });
     trim();
   }
 
   function addHint(message) {
-    history.push({ type: 'hint', message, time: new Date().toTimeString().slice(0, 8) });
+    history.push({ kind: 'hint', message });
     trim();
   }
 

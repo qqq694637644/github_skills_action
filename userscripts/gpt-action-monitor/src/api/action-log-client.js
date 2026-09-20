@@ -1,6 +1,6 @@
 import { POLL_WAIT_SECONDS, RETRY_MS } from '../constants.js';
 
-export function createActionLogClient({ getProfile, onItems, onHint, onStatus }) {
+export function createActionLogClient({ getProfile, onItems, onHint, onStatus, onAttention }) {
   let lastId = 0;
   let needsCursorPrime = true;
   let stopped = false;
@@ -54,6 +54,7 @@ export function createActionLogClient({ getProfile, onItems, onHint, onStatus })
 
   function scheduleRetry(message) {
     onHint(message);
+    onAttention?.('连接异常', '3 秒后重试');
     onStatus?.('error');
     schedulePoll(RETRY_MS);
   }
@@ -81,6 +82,8 @@ export function createActionLogClient({ getProfile, onItems, onHint, onStatus })
         if (response.status === 401) {
           stopped = true;
           onHint('认证失败：请检查 Bearer Token。');
+          onAttention?.('认证失败', '检查 Bearer Token');
+          onStatus?.('error');
           return;
         }
         if (response.status < 200 || response.status >= 300) {

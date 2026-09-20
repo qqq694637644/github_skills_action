@@ -1,6 +1,6 @@
 import { PROFILES_KEY } from '../constants.js';
 
-function createProfileId() {
+export function createProfileId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -23,6 +23,12 @@ export function loadProfiles() {
   const stored = GM_getValue(PROFILES_KEY, null);
   if (!Array.isArray(stored)) return [];
   return stored.map(normalizeProfile).filter((profile) => profile.gptName && profile.backend);
+}
+
+export function saveProfiles(profiles) {
+  const normalized = profiles.map(normalizeProfile);
+  GM_setValue(PROFILES_KEY, normalized);
+  return normalized;
 }
 
 export function profileForName(profiles, name) {

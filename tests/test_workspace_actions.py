@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from skill_temple.action_logging import clear_action_events
 from skill_temple.app import create_app
 
 
@@ -429,12 +431,97 @@ class WorkspaceActionsTests(unittest.TestCase):
             self.assertEqual(deleted.status_code, 200, deleted.text)
             self.assertFalse((workspace_root / "beta.txt").exists())
 
+    @unittest.skipUnless(shutil.which("rg"), "ripgrep is required")
+    def test_structured_activity_events_cover_workspace_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            client = self._client(root)
+            workspace_id = self._prepare_workspace(client, "activity-workspace")
+            clear_action_events()
+
+            written = client.post(
+                "/v1/workspace/write-file",
+                json={
+                    "workspace_id": workspace_id,
+                    "path": "notes.txt",
+                    "content": "hello\n",
+                },
+            )
+            searched = client.post(
+                "/v1/workspace/search",
+                json={
+                    "workspace_id": workspace_id,
+                    "query": "hello",
+                    "paths": ["notes.txt"],
+                },
+            )
+            read = client.post(
+                "/v1/workspace/read-files",
+                json={"workspace_id": workspace_id, "paths": ["notes.txt"]},
+            )
+            inspected = client.post(
+                "/v1/workspace/inspect",
+                json={
+                    "workspace_id": workspace_id,
+                    "paths": ["notes.txt"],
+                    "queries": ["hello"],
+                },
+            )
+            patched = client.post(
+                "/v1/workspace/apply-patch",
+                json={
+                    "workspace_id": workspace_id,
+                    "patch": (
+                        "*** Begin Patch\n"
+                        "*** Update File: notes.txt\n"
+                        "@@\n"
+                        "-hello\n"
+                        "+HELLO\n"
+                        "*** End Patch\n"
+                    ),
+                },
+            )
+
+            for response in (written, searched, read, inspected, patched):
+                self.assertEqual(response.status_code, 200, response.text)
+
+            items = client.get(
+                "/v1/action-logs", params={"after": 0, "wait": 0, "limit": 100}
+            ).json()["items"]
+            events = [
+                item["event"]
+                for item in items
+                if item.get("event", {}).get("phase") in {"completed", "failed"}
+            ]
+            started = [
+                item["event"]
+                for item in items
+                if item.get("event", {}).get("phase") == "started"
+            ]
+
+            self.assertEqual(
+                [event["kind"] for event in events],
+                ["write", "exploration", "exploration", "exploration", "patch"],
+            )
+            self.assertEqual(events[0]["payload"]["path"], "notes.txt")
+            self.assertEqual(events[1]["payload"]["query"], "hello")
+            self.assertEqual(events[2]["payload"]["paths"], ["notes.txt"])
+            self.assertEqual(events[3]["payload"]["operation"], "inspect")
+            self.assertEqual(events[4]["payload"]["changed_files"][0]["path"], "notes.txt")
+            self.assertEqual(events[4]["payload"]["changed_files"][0]["additions"], 1)
+            self.assertEqual(events[4]["payload"]["changed_files"][0]["deletions"], 1)
+            self.assertEqual(
+                {event["activity_id"] for event in started},
+                {event["activity_id"] for event in events},
+            )
+
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is required")
     def test_command_start_get_logs_list_timeout_and_cancel(self) -> None:
         with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as operations:
             root = Path(temp)
             with self._client(root, Path(operations)) as client:
                 workspace_id = self._prepare_workspace(client, "command-workspace")
+                clear_action_events()
                 with self.assertLogs("uvicorn.error", level="INFO") as captured:
                     started = client.post(
                         "/v1/workspace/command",
@@ -462,6 +549,19 @@ class WorkspaceActionsTests(unittest.TestCase):
                 self.assertIn(f'operation_id="{operation_id}"', action_log)
                 self.assertIn("timeout_seconds=20", action_log)
                 self.assertIn("state=\"succeeded\"", action_log)
+                activity_items = client.get(
+                    "/v1/action-logs", params={"after": 0, "wait": 0, "limit": 100}
+                ).json()["items"]
+                command_events = [
+                    item["event"]
+                    for item in activity_items
+                    if item.get("event", {}).get("activity_id") == f"command:{operation_id}"
+                ]
+                self.assertEqual(command_events[0]["phase"], "started")
+                self.assertTrue(any(event["phase"] == "updated" for event in command_events))
+                self.assertEqual(command_events[-1]["phase"], "completed")
+                self.assertEqual(command_events[-1]["payload"]["stdout_preview"], ["hello"])
+                self.assertEqual(command_events[-1]["payload"]["stderr_preview"], ["oops"])
                 terminal = self._poll_operation(client, operation_id)
                 self.assertEqual(terminal["state"], "succeeded")
 
@@ -484,6 +584,7 @@ class WorkspaceActionsTests(unittest.TestCase):
                 self.assertTrue(second_logs["stdout_eof"])
 
                 with patch.dict(os.environ, {"GH_TOKEN": "workspace-test-token"}, clear=False):
+                    clear_action_events()
                     raw_shell = client.post(
                         "/v1/workspace/command",
                         json={
@@ -492,6 +593,7 @@ class WorkspaceActionsTests(unittest.TestCase):
                             "workspace_id": workspace_id,
                             "script": (
                                 "Get-ChildItem Env:GH_TOKEN | Out-Null; "
+                                "Write-Output 'workspace-test-token'; "
                                 "Write-Output $env:GH_TOKEN"
                             ),
                             "timeout_seconds": 20,
@@ -506,6 +608,12 @@ class WorkspaceActionsTests(unittest.TestCase):
                         json={"action": "logs", "operation_id": raw_id},
                     ).json()
                     self.assertIn("workspace-test-token", raw_logs["stdout"])
+                    monitor_items = client.get(
+                        "/v1/action-logs", params={"after": 0, "wait": 0, "limit": 100}
+                    ).json()["items"]
+                    monitor_text = json.dumps(monitor_items, ensure_ascii=False)
+                    self.assertNotIn("workspace-test-token", monitor_text)
+                    self.assertIn("<redacted>", monitor_text)
 
                 listed = client.post(
                     "/v1/workspace/command", json={"action": "list", "state": "succeeded"}
@@ -549,6 +657,95 @@ class WorkspaceActionsTests(unittest.TestCase):
                 )
                 self.assertEqual(cancel_response.status_code, 200)
                 self.assertEqual(self._poll_operation(client, cancel_id)["state"], "canceled")
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is required")
+    def test_failed_command_activity_keeps_compact_stderr_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as operations:
+            root = Path(temp)
+            with self._client(root, Path(operations)) as client:
+                workspace_id = self._prepare_workspace(client, "failed-command-activity")
+                clear_action_events()
+
+                started = client.post(
+                    "/v1/workspace/command",
+                    json={
+                        "action": "start",
+                        "idempotency_key": "failed-command-activity-1",
+                        "workspace_id": workspace_id,
+                        "script": "[Console]::Error.WriteLine('boom'); exit 7",
+                        "timeout_seconds": 20,
+                        "plain_output": True,
+                    },
+                )
+                self.assertEqual(started.status_code, 200, started.text)
+                operation_id = started.json()["operation"]["operation_id"]
+                terminal = self._poll_operation(client, operation_id)
+                self.assertEqual(terminal["state"], "failed")
+                self.assertEqual(terminal["exit_code"], 7)
+
+                items = client.get(
+                    "/v1/action-logs", params={"after": 0, "wait": 0, "limit": 100}
+                ).json()["items"]
+                command_events = [
+                    item["event"]
+                    for item in items
+                    if item.get("event", {}).get("activity_id") == f"command:{operation_id}"
+                ]
+                failed = command_events[-1]
+                self.assertEqual(failed["phase"], "failed")
+                self.assertEqual(failed["payload"]["exit_code"], 7)
+                self.assertIn("boom", "\n".join(failed["payload"]["stderr_preview"]))
+                self.assertLessEqual(len(failed["payload"]["stderr_preview"]), 3)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is required")
+    def test_command_activity_preview_keeps_real_tail_after_operation_log_truncation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as operations:
+            root = Path(temp)
+            with self._client(root, Path(operations)) as client:
+                workspace_id = self._prepare_workspace(client, "command-tail-preview")
+                clear_action_events()
+
+                started = client.post(
+                    "/v1/workspace/command",
+                    json={
+                        "action": "start",
+                        "idempotency_key": "command-tail-preview-1",
+                        "workspace_id": workspace_id,
+                        "script": (
+                            "1..20 | ForEach-Object { "
+                            "Write-Output ('line-{0:00}' -f $_) }"
+                        ),
+                        "max_output_bytes": 32,
+                        "timeout_seconds": 20,
+                        "plain_output": True,
+                    },
+                )
+                self.assertEqual(started.status_code, 200, started.text)
+                operation_id = started.json()["operation"]["operation_id"]
+                terminal = self._poll_operation(client, operation_id)
+                self.assertEqual(terminal["state"], "succeeded")
+                self.assertTrue(terminal["stdout_truncated"])
+
+                stored = client.post(
+                    "/v1/workspace/command",
+                    json={"action": "logs", "operation_id": operation_id},
+                ).json()["stdout"]
+                self.assertNotIn("line-20", stored)
+
+                items = client.get(
+                    "/v1/action-logs", params={"after": 0, "wait": 0, "limit": 100}
+                ).json()["items"]
+                command_events = [
+                    item["event"]
+                    for item in items
+                    if item.get("event", {}).get("activity_id") == f"command:{operation_id}"
+                ]
+                completed = command_events[-1]
+                self.assertEqual(completed["phase"], "completed")
+                self.assertEqual(
+                    completed["payload"]["stdout_preview"],
+                    ["line-18", "line-19", "line-20"],
+                )
 
     @unittest.skipUnless(
         shutil.which("pwsh") and shutil.which("git"),

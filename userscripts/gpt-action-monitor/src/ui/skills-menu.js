@@ -60,16 +60,11 @@ export function createSkillsMenu({ loadSkills, onBeforeOpen, onSelect }) {
 
   async function refresh({ force = false } = {}) {
     const generation = ++requestGeneration;
-    console.debug('[GPT Action Monitor][Skills UI] open/refresh', { force });
     if (force) setState('刷新中…');
     else if (!hasRendered) setState('加载 Skills…');
 
     try {
       const skills = await loadSkills({ refresh: force });
-      console.debug('[GPT Action Monitor][Skills UI] render', {
-        count: skills.length,
-        force,
-      });
       if (!open || generation !== requestGeneration) return;
       render(skills);
     } catch (error) {

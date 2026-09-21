@@ -5,16 +5,37 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
 import threading
 from collections import deque
-from datetime import datetime
-from typing import Any
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import Any, Literal, TypedDict
 
 LOGGER = logging.getLogger("uvicorn.error")
 COMMAND_LOG_LIMIT = 2_400
-ACTION_EVENT_LIMIT = 200
+ACTION_EVENT_LIMIT = 1_000
 
-_ACTION_EVENTS: deque[dict[str, Any]] = deque(maxlen=ACTION_EVENT_LIMIT)
+
+ActivityKind = Literal["command", "exploration", "patch", "write", "skill", "generic"]
+ActivityPhase = Literal["started", "updated", "completed", "failed"]
+
+
+class ActivityEvent(TypedDict):
+    activity_id: str
+    kind: ActivityKind
+    phase: ActivityPhase
+    timestamp: str
+    payload: dict[str, Any]
+
+
+class ActionEventItem(TypedDict, total=False):
+    id: int
+    text: str
+    event: ActivityEvent
+
+
+_ACTION_EVENTS: deque[ActionEventItem] = deque(maxlen=ACTION_EVENT_LIMIT)
 _ACTION_EVENTS_CONDITION = threading.Condition()
 _ACTION_EVENT_ID = 0
 
@@ -26,14 +47,28 @@ _SECRET_PATTERNS = (
     ),
     re.compile(r"(?i)(--(?:token|password|secret|api[-_]?key)(?:=|\s+))(?:['\"])?([^'\"\s;]+)"),
 )
+_SENSITIVE_ENV_NAME = re.compile(r"(?i)(?:TOKEN|PASSWORD|SECRET|API[_-]?KEY)")
 
 
-def redact_text(value: str) -> str:
+def sensitive_environment_values(environment: Mapping[str, str]) -> tuple[str, ...]:
+    """Return non-trivial sensitive env values for output-only redaction."""
+
+    values = {
+        value
+        for key, value in environment.items()
+        if value and len(value) >= 4 and _SENSITIVE_ENV_NAME.search(key)
+    }
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def redact_text(value: str, *, extra_secrets: tuple[str, ...] = ()) -> str:
     """Redact common credential forms before values reach logs."""
 
     redacted = value
     for pattern in _SECRET_PATTERNS:
         redacted = pattern.sub(lambda match: f"{match.group(1)}<redacted>", redacted)
+    for secret in extra_secrets:
+        redacted = redacted.replace(secret, "<redacted>")
     return redacted
 
 
@@ -69,21 +104,85 @@ def _format_value(value: Any) -> str:
     return json.dumps(_safe_value(value), ensure_ascii=False, separators=(",", ":"))
 
 
-def log_action(action: str, /, **fields: Any) -> None:
-    """Emit one compact action event; omit unset fields."""
+def new_activity_id(kind: str) -> str:
+    """Return a compact opaque id for one monitor activity lifecycle."""
 
+    return f"{kind}:{secrets.token_hex(8)}"
+
+
+def _action_line(action: str, fields: dict[str, Any]) -> str:
     parts = [datetime.now().astimezone().strftime("[%Y-%m-%d %H:%M]"), f"ACTION {action}"]
     parts.extend(
         f"{key}={_format_value(value)}" for key, value in fields.items() if value is not None
     )
-    line = " ".join(parts)
-    LOGGER.info(line)
+    return " ".join(parts)
 
+
+def _append_action_event(line: str, event: ActivityEvent | None) -> None:
     global _ACTION_EVENT_ID
     with _ACTION_EVENTS_CONDITION:
         _ACTION_EVENT_ID += 1
-        _ACTION_EVENTS.append({"id": _ACTION_EVENT_ID, "text": line})
+        item: ActionEventItem = {"id": _ACTION_EVENT_ID, "text": line}
+        if event is not None:
+            safe_event = _safe_value(event)
+            if not safe_event.get("activity_id"):
+                safe_event["activity_id"] = f"event:{_ACTION_EVENT_ID}"
+            item["event"] = safe_event
+        _ACTION_EVENTS.append(item)
         _ACTION_EVENTS_CONDITION.notify_all()
+
+
+def log_action(
+    action: str,
+    /,
+    *,
+    activity: dict[str, Any] | None = None,
+    publish: bool = True,
+    **fields: Any,
+) -> None:
+    """Emit one compact action event; omit unset fields."""
+
+    line = _action_line(action, fields)
+    LOGGER.info(line)
+    if not publish:
+        return
+
+    event: ActivityEvent | None = None
+    if activity is not None:
+        event = {
+            "activity_id": activity.get("activity_id"),
+            "kind": activity["kind"],
+            "phase": activity.get("phase", "completed"),
+            "timestamp": activity.get("timestamp") or datetime.now(UTC).isoformat(),
+            "payload": activity.get("payload") or {},
+        }
+    _append_action_event(line, event)
+
+
+def log_activity(
+    *,
+    activity_id: str,
+    kind: ActivityKind,
+    phase: ActivityPhase,
+    payload: dict[str, Any],
+    legacy_action: str,
+    legacy_fields: dict[str, Any] | None = None,
+) -> None:
+    """Publish one structured activity event with a legacy debug text representation."""
+
+    fields = legacy_fields or {}
+    line = _action_line(legacy_action, fields)
+    LOGGER.info(line)
+    _append_action_event(
+        line,
+        {
+            "activity_id": activity_id,
+            "kind": kind,
+            "phase": phase,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "payload": payload,
+        },
+    )
 
 
 def wait_for_action_events(
@@ -116,7 +215,22 @@ def clear_action_events() -> None:
         _ACTION_EVENT_ID = 0
 
 
-def log_action_error(action: str, /, *, error_code: str, **fields: Any) -> None:
+def log_action_error(
+    action: str,
+    /,
+    *,
+    error_code: str,
+    activity: dict[str, Any] | None = None,
+    publish: bool = True,
+    **fields: Any,
+) -> None:
     """Emit one concise failed-action event."""
 
-    log_action(action, **fields, result="error", error_code=error_code)
+    log_action(
+        action,
+        activity=activity,
+        publish=publish,
+        **fields,
+        result="error",
+        error_code=error_code,
+    )

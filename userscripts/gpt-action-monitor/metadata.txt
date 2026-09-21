@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.6.2
-// @description  Show github_skills_action activity as a calm, energy-conscious status indicator on ChatGPT.
+// @version      0.7.2
+// @description  Show Codex-style github_skills_action activity on ChatGPT without changing the page layout.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @grant        GM_xmlhttpRequest

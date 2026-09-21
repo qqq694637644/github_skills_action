@@ -103,17 +103,22 @@ export const MONITOR_CSS = `
     #gpt-action-monitor.gam-dragging .gam-header { cursor: grabbing; }
     #gpt-action-monitor .gam-expanded { display: none; }
     #gpt-action-monitor.gam-open {
-      width: min(320px, calc(100vw - 16px));
-      height: min(300px, 54vh);
+      width: auto;
+      height: auto;
     }
     #gpt-action-monitor.gam-open .gam-compact { display: none; }
     #gpt-action-monitor.gam-open .gam-expanded {
       position: relative;
-      width: 100%;
-      height: 100%;
+      width: min(380px, calc(100vw - 16px));
+      height: min(420px, 62vh);
+      min-width: min(280px, calc(100vw - 16px));
+      min-height: min(220px, calc(100vh - 16px));
+      max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 16px);
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      resize: both;
       box-sizing: border-box;
       border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
       border-radius: 12px;
@@ -178,43 +183,103 @@ export const MONITOR_CSS = `
       line-height: 1;
     }
     #gpt-action-monitor .gam-close:hover { background: color-mix(in srgb, CanvasText 7%, transparent); }
-    #gpt-action-monitor .gam-log {
+    #gpt-action-monitor .gam-activity-root {
       flex: 1;
-      overflow-y: auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       padding: 6px 8px 8px;
+    }
+    #gpt-action-monitor .gam-monitor-hint {
+      margin: 4px 2px 8px;
+      padding: 7px 9px;
+      border-radius: 8px;
+      background: color-mix(in srgb, #d84a4a 9%, transparent);
+      color: color-mix(in srgb, CanvasText 76%, transparent);
+      font-size: 11px;
+    }
+    #gpt-action-monitor .gam-monitor-hint[hidden],
+    #gpt-action-monitor .gam-activity-section[hidden] { display: none; }
+    #gpt-action-monitor .gam-activity-section + .gam-activity-section {
+      margin-top: 9px;
+      padding-top: 8px;
+      border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+    }
+    #gpt-action-monitor .gam-now-section {
+      flex: 0 1 auto;
+      max-height: 45%;
+      overflow-y: auto;
       scrollbar-width: thin;
     }
-    #gpt-action-monitor .gam-entry {
-      padding: 7px 8px;
+    #gpt-action-monitor .gam-recent-section {
+      min-height: 0;
+      flex: 1 1 auto;
+      overflow-y: auto;
+      scrollbar-width: thin;
+    }
+    #gpt-action-monitor .gam-activity-section-label {
+      padding: 2px 8px 5px;
+      color: color-mix(in srgb, CanvasText 44%, transparent);
+      font: 600 10px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: .08em;
+    }
+    #gpt-action-monitor .gam-activity-cell {
+      padding: 7px 8px 8px;
       border-radius: 8px;
     }
-    #gpt-action-monitor .gam-entry:hover { background: color-mix(in srgb, CanvasText 5%, transparent); }
-    #gpt-action-monitor .gam-entry-top {
+    #gpt-action-monitor .gam-activity-cell:hover {
+      background: color-mix(in srgb, CanvasText 4%, transparent);
+    }
+    #gpt-action-monitor .gam-activity-title {
       display: flex;
-      gap: 8px;
-      align-items: baseline;
+      align-items: flex-start;
+      gap: 7px;
       min-width: 0;
     }
-    #gpt-action-monitor .gam-time {
-      flex: 0 0 auto;
-      opacity: .48;
-      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    #gpt-action-monitor .gam-action {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-weight: 600;
-    }
-    #gpt-action-monitor .gam-detail {
-      margin: 2px 0 0 42px;
+    #gpt-action-monitor .gam-activity-marker {
+      width: 12px;
+      flex: 0 0 12px;
+      text-align: center;
       opacity: .62;
+      font-weight: 700;
+    }
+    #gpt-action-monitor .gam-activity-cell[data-status="active"] .gam-activity-marker {
+      color: #22a35a;
+      opacity: 1;
+    }
+    #gpt-action-monitor .gam-activity-cell[data-status="failed"] .gam-activity-marker {
+      color: #d84a4a;
+      opacity: 1;
+    }
+    #gpt-action-monitor .gam-activity-cell[data-kind="patch"][data-status="failed"] .gam-activity-marker {
+      color: #a855c7;
+    }
+    #gpt-action-monitor .gam-activity-label {
+      min-width: 0;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 3;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      font-weight: 590;
+    }
+    #gpt-action-monitor .gam-activity-details {
+      margin: 3px 0 0 19px;
+      color: color-mix(in srgb, CanvasText 62%, transparent);
+      font: 11px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #gpt-action-monitor .gam-activity-detail-line {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    #gpt-action-monitor .gam-hint { opacity: .58; }
+    #gpt-action-monitor .gam-activity-detail-line::before {
+      content: "  ";
+      opacity: .48;
+    }
+    #gpt-action-monitor .gam-activity-detail-line:first-child::before { content: "└ "; }
     #gpt-action-monitor .gam-skills-picker {
       position: absolute;
       top: 34px;

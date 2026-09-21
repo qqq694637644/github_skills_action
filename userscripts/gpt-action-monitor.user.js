@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.6.2
-// @description  Show github_skills_action activity as a calm, energy-conscious status indicator on ChatGPT.
+// @version      0.7.2
+// @description  Show Codex-style github_skills_action activity on ChatGPT without changing the page layout.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @grant        GM_xmlhttpRequest
@@ -12,6 +12,17 @@
 // @connect      *
 // ==/UserScript==
 (() => {
+  // src/constants.js
+  var PROFILES_KEY = "gptActionMonitorProfiles";
+  var POSITION_KEY = "gptActionMonitorPosition";
+  var GPT_TITLE_SELECTOR = 'div[type="button"][aria-haspopup="menu"]';
+  var POLL_WAIT_SECONDS = 55;
+  var RETRY_MS = 3e3;
+  var ACTIVITY_VISIBLE_MS = 4e3;
+  var UI_COALESCE_MS = 200;
+  var MAX_HISTORY = 100;
+  var COMPACT_WIDTH = 30;
+
   // src/formatter/action-formatter.js
   function parseField(text, name) {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -71,21 +82,590 @@
     return { action, detail: detail || "completed", time, raw: text };
   }
 
-  // src/constants.js
-  var PROFILES_KEY = "gptActionMonitorProfiles";
-  var POSITION_KEY = "gptActionMonitorPosition";
-  var GPT_TITLE_SELECTOR = 'div[type="button"][aria-haspopup="menu"]';
-  var POLL_WAIT_SECONDS = 55;
-  var RETRY_MS = 3e3;
-  var ACTIVITY_VISIBLE_MS = 4e3;
-  var UI_COALESCE_MS = 200;
-  var MAX_HISTORY = 100;
-  var COMPACT_WIDTH = 30;
+  // src/activity/activity-reducer.js
+  var MAX_LIVE_OUTPUT_CHARS = 24e3;
+  function clonePayload(payload) {
+    return payload && typeof payload === "object" ? { ...payload } : {};
+  }
+  function cloneCell(cell) {
+    return {
+      ...cell,
+      payload: clonePayload(cell.payload),
+      entries: [...cell.entries || []]
+    };
+  }
+  function structuredCell(event) {
+    const payload = clonePayload(event.payload);
+    return {
+      id: event.activity_id,
+      kind: event.kind || "generic",
+      phase: event.phase || "completed",
+      startedAt: event.timestamp || "",
+      updatedAt: event.timestamp || "",
+      payload,
+      liveOutput: "",
+      entries: event.kind === "exploration" ? explorationEntries(payload) : [],
+      revision: 1
+    };
+  }
+  function legacyCell(item) {
+    const summary = summarize(item.text || "");
+    return {
+      id: `legacy:${item.id}`,
+      kind: "legacy",
+      phase: "completed",
+      startedAt: "",
+      updatedAt: "",
+      payload: { summary },
+      liveOutput: "",
+      entries: [],
+      revision: 1
+    };
+  }
+  function explorationEntries(payload) {
+    const entries = [];
+    const operation = payload.operation;
+    if (operation === "search") {
+      entries.push({
+        verb: "Search",
+        label: payload.query || "code",
+        detail: Number.isInteger(payload.match_count) ? `${payload.match_count} matches` : ""
+      });
+    } else if (operation === "read") {
+      for (const path of payload.paths || []) entries.push({ verb: "Read", label: path, detail: "" });
+    } else if (operation === "inspect") {
+      for (const path of payload.paths || []) entries.push({ verb: "List", label: path, detail: "" });
+      const searches = (payload.searches || []).length ? payload.searches : (payload.queries || []).map((query) => ({ query }));
+      for (const search of searches) {
+        entries.push({
+          verb: "Search",
+          label: search.query || "code",
+          detail: Number.isInteger(search.match_count) ? `${search.match_count} matches` : ""
+        });
+      }
+      for (const path of payload.files || []) entries.push({ verb: "Read", label: path, detail: "" });
+    }
+    return entries;
+  }
+  function createActivityState() {
+    return {
+      active: /* @__PURE__ */ new Map(),
+      recent: [],
+      explorationGroupId: null
+    };
+  }
+  function addRecent(state, cell, maxHistory) {
+    state.recent.unshift(cell);
+    if (state.recent.length > maxHistory) state.recent = state.recent.slice(0, maxHistory);
+    return cell;
+  }
+  function breakExplorationGroup(state) {
+    state.explorationGroupId = null;
+  }
+  function reduceCommand(state, event, maxHistory) {
+    const existing = state.active.get(event.activity_id);
+    if (event.phase === "started") {
+      const cell2 = structuredCell(event);
+      state.active.set(cell2.id, cell2);
+      return cell2;
+    }
+    if (event.phase === "updated") {
+      const cell2 = existing ? cloneCell(existing) : structuredCell({ ...event, phase: "started" });
+      const delta = String(event.payload?.delta || "");
+      if (delta) cell2.liveOutput = `${cell2.liveOutput}${delta}`.slice(-MAX_LIVE_OUTPUT_CHARS);
+      cell2.updatedAt = event.timestamp || cell2.updatedAt;
+      cell2.revision += 1;
+      state.active.set(cell2.id, cell2);
+      return cell2;
+    }
+    const cell = existing ? cloneCell(existing) : structuredCell(event);
+    cell.phase = event.phase;
+    cell.updatedAt = event.timestamp || cell.updatedAt;
+    cell.payload = { ...cell.payload, ...clonePayload(event.payload) };
+    cell.revision += 1;
+    state.active.delete(cell.id);
+    return addRecent(state, cell, maxHistory);
+  }
+  function reduceExploration(state, event, maxHistory) {
+    const payload = clonePayload(event.payload);
+    if (event.phase === "started" || event.phase === "updated") {
+      const existing = state.active.get(event.activity_id);
+      const cell2 = existing ? cloneCell(existing) : structuredCell(event);
+      cell2.phase = event.phase;
+      cell2.payload = { ...cell2.payload, ...payload };
+      cell2.entries = explorationEntries(payload);
+      cell2.updatedAt = event.timestamp || cell2.updatedAt;
+      cell2.revision += existing ? 1 : 0;
+      state.active.set(cell2.id, cell2);
+      return cell2;
+    }
+    const activeCell = state.active.get(event.activity_id);
+    state.active.delete(event.activity_id);
+    if (event.phase === "failed") {
+      breakExplorationGroup(state);
+      const failed = activeCell ? cloneCell(activeCell) : structuredCell(event);
+      failed.phase = "failed";
+      failed.payload = { ...failed.payload, ...payload };
+      failed.entries = explorationEntries(payload);
+      failed.updatedAt = event.timestamp || failed.updatedAt;
+      failed.revision += activeCell ? 1 : 0;
+      return addRecent(state, failed, maxHistory);
+    }
+    const entries = explorationEntries(payload);
+    const groupIndex = state.explorationGroupId ? state.recent.findIndex((cell2) => cell2.id === state.explorationGroupId) : -1;
+    if (groupIndex >= 0) {
+      const grouped = cloneCell(state.recent[groupIndex]);
+      grouped.entries.push(...entries);
+      grouped.updatedAt = event.timestamp || grouped.updatedAt;
+      grouped.payload.truncated = Boolean(grouped.payload.truncated || payload.truncated);
+      grouped.revision += 1;
+      state.recent[groupIndex] = grouped;
+      return grouped;
+    }
+    const cell = activeCell ? cloneCell(activeCell) : structuredCell(event);
+    cell.id = event.activity_id;
+    cell.phase = "completed";
+    cell.payload = { ...cell.payload, ...payload };
+    cell.entries = entries;
+    cell.updatedAt = event.timestamp || cell.updatedAt;
+    cell.revision += activeCell ? 1 : 0;
+    addRecent(state, cell, maxHistory);
+    state.explorationGroupId = cell.id;
+    return cell;
+  }
+  function reduceGeneric(state, event, maxHistory) {
+    const existing = state.active.get(event.activity_id);
+    if (event.phase === "started" || event.phase === "updated") {
+      const cell2 = existing ? cloneCell(existing) : structuredCell(event);
+      cell2.phase = event.phase;
+      cell2.payload = { ...cell2.payload, ...clonePayload(event.payload) };
+      cell2.updatedAt = event.timestamp || cell2.updatedAt;
+      cell2.revision += existing ? 1 : 0;
+      state.active.set(cell2.id, cell2);
+      return cell2;
+    }
+    const cell = existing ? cloneCell(existing) : structuredCell(event);
+    cell.phase = event.phase;
+    cell.payload = { ...cell.payload, ...clonePayload(event.payload) };
+    cell.updatedAt = event.timestamp || cell.updatedAt;
+    cell.revision += existing ? 1 : 0;
+    state.active.delete(cell.id);
+    return addRecent(state, cell, maxHistory);
+  }
+  function reduceActivityItem(previousState, item, { maxHistory = 100 } = {}) {
+    const state = {
+      active: new Map(previousState.active),
+      recent: [...previousState.recent],
+      explorationGroupId: previousState.explorationGroupId
+    };
+    if (!item?.event) {
+      breakExplorationGroup(state);
+      return { state, latest: addRecent(state, legacyCell(item || {}), maxHistory) };
+    }
+    const event = item.event;
+    if (!event || typeof event !== "object" || !event.activity_id) {
+      return { state, latest: null };
+    }
+    if (event.kind !== "exploration") breakExplorationGroup(state);
+    let latest;
+    if (event.kind === "command") latest = reduceCommand(state, event, maxHistory);
+    else if (event.kind === "exploration") latest = reduceExploration(state, event, maxHistory);
+    else latest = reduceGeneric(state, event, maxHistory);
+    return { state, latest };
+  }
+
+  // src/activity/activity-store.js
+  var MAX_SEEN_EVENTS = 2e3;
+  function eventKey(item) {
+    if (!Number.isInteger(item?.id)) return null;
+    const event = item.event;
+    if (event) {
+      return `${item.id}:${event.timestamp || ""}:${event.activity_id || ""}:${event.phase || ""}`;
+    }
+    return `${item.id}:${item.text || ""}`;
+  }
+  function createActivityStore() {
+    let state = createActivityState();
+    const listeners = /* @__PURE__ */ new Set();
+    const seen = /* @__PURE__ */ new Set();
+    const seenOrder = [];
+    function snapshot() {
+      const active = [...state.active.values()].sort((left, right) => {
+        const leftTime = left.updatedAt || left.startedAt || "";
+        const rightTime = right.updatedAt || right.startedAt || "";
+        return rightTime.localeCompare(leftTime);
+      });
+      return {
+        active,
+        recent: [...state.recent]
+      };
+    }
+    function notify() {
+      const value = snapshot();
+      for (const listener of listeners) listener(value);
+    }
+    function rememberEvent(item) {
+      const key = eventKey(item);
+      if (key === null) return true;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      seenOrder.push(key);
+      while (seenOrder.length > MAX_SEEN_EVENTS) seen.delete(seenOrder.shift());
+      return true;
+    }
+    function ingest(items) {
+      let latest = null;
+      let changed = false;
+      for (const item of items || []) {
+        if (!rememberEvent(item)) continue;
+        const reduced = reduceActivityItem(state, item, { maxHistory: MAX_HISTORY });
+        state = reduced.state;
+        if (reduced.latest) {
+          latest = reduced.latest;
+          changed = true;
+        }
+      }
+      if (changed) notify();
+      return latest;
+    }
+    function clear() {
+      state = createActivityState();
+      seen.clear();
+      seenOrder.length = 0;
+      notify();
+    }
+    function subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
+    return { ingest, snapshot, clear, subscribe };
+  }
+
+  // src/activity/presentation.js
+  var PREVIEW_LINES = 3;
+  var JSON_DIAGNOSTIC_LIMIT = 100;
+  var jsonDiagnostics = /* @__PURE__ */ new Set();
+  function rememberJsonDiagnostic(key) {
+    if (jsonDiagnostics.has(key)) return false;
+    jsonDiagnostics.add(key);
+    if (jsonDiagnostics.size > JSON_DIAGNOSTIC_LIMIT) {
+      const oldest = jsonDiagnostics.values().next().value;
+      jsonDiagnostics.delete(oldest);
+    }
+    return true;
+  }
+  function reportJsonDiagnostic(cell, raw, outcome, formatted = "") {
+    const rawPreview = String(raw || "").slice(0, 800);
+    const key = `${cell.id}:${cell.revision}:${outcome}:${rawPreview}`;
+    if (!rememberJsonDiagnostic(key)) return;
+    console.debug("[GPT Action Monitor][Activity JSON]", {
+      activityId: cell.id,
+      phase: cell.phase,
+      command: cell.payload?.command || "",
+      outcome,
+      raw: rawPreview,
+      formatted: String(formatted || "").slice(0, 800)
+    });
+  }
+  function scalarText(value) {
+    if (value === null) return "null";
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (Array.isArray(value)) return `${value.length} items`;
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value);
+      if (entries.length === 1) return scalarText(entries[0][1]);
+      return `${entries.length} fields`;
+    }
+    return String(value ?? "");
+  }
+  function summarizeJson(value) {
+    if (Array.isArray(value)) return `${value.length} items`;
+    if (!value || typeof value !== "object") return scalarText(value);
+    const entries = Object.entries(value);
+    const priority = [
+      "state",
+      "number",
+      "title",
+      "nameWithOwner",
+      "defaultBranchRef",
+      "baseRefName",
+      "headRefName",
+      "url"
+    ];
+    entries.sort(([left], [right]) => {
+      const leftRank = priority.indexOf(left);
+      const rightRank = priority.indexOf(right);
+      if (leftRank < 0 && rightRank < 0) return 0;
+      if (leftRank < 0) return 1;
+      if (rightRank < 0) return -1;
+      return leftRank - rightRank;
+    });
+    const parts = entries.slice(0, 3).map(([key, nested]) => `${key}: ${scalarText(nested)}`);
+    if (entries.length > 3) parts.push("\u2026");
+    return parts.join(" \xB7 ");
+  }
+  function readableOutputLine(cell, line) {
+    const trimmed = String(line || "").trim();
+    if (!trimmed) return "";
+    if (/^[\[\]{}],?$/.test(trimmed)) {
+      reportJsonDiagnostic(cell, trimmed, "json-syntax-hidden");
+      return "";
+    }
+    const looksLikeJsonContainer = trimmed.startsWith("{") || /^\[\s*(?:[\]{"\d\-tfn])/.test(trimmed);
+    if (looksLikeJsonContainer) {
+      try {
+        const formatted = summarizeJson(JSON.parse(trimmed));
+        reportJsonDiagnostic(cell, trimmed, "json-parsed", formatted);
+        return formatted;
+      } catch {
+        reportJsonDiagnostic(cell, trimmed, "json-parse-failed");
+      }
+    }
+    const fragment = trimmed.match(/^"([^"\\]+)"\s*:\s*(.+?),?$/);
+    if (fragment) {
+      let value = fragment[2].trim();
+      try {
+        value = scalarText(JSON.parse(value.replace(/,$/, "")));
+      } catch {
+        value = value.replace(/,$/, "").replace(/^"|"$/g, "");
+      }
+      const formatted = `${fragment[1]}: ${value}`;
+      reportJsonDiagnostic(cell, trimmed, "json-fragment", formatted);
+      return formatted;
+    }
+    return trimmed;
+  }
+  function readableOutputLines(cell, lines) {
+    return compactLines((lines || []).map((line) => readableOutputLine(cell, line)).filter(Boolean));
+  }
+  function compactLines(lines) {
+    return (lines || []).map((line) => String(line || "").trimEnd()).filter((line) => line.trim()).slice(-PREVIEW_LINES);
+  }
+  function leadingLines(lines) {
+    return (lines || []).map((line) => String(line || "").trimEnd()).filter((line) => line.trim()).slice(0, PREVIEW_LINES);
+  }
+  function outputLines(cell) {
+    if (cell.phase === "started" || cell.phase === "updated") {
+      return readableOutputLines(cell, String(cell.liveOutput || "").split(/\r?\n/));
+    }
+    const payload = cell.payload || {};
+    const preferred = cell.phase === "failed" ? [...payload.stdout_preview || [], ...payload.stderr_preview || []] : [...payload.stderr_preview || [], ...payload.stdout_preview || []];
+    return readableOutputLines(cell, preferred);
+  }
+  function commandPresentation(cell) {
+    const payload = cell.payload || {};
+    const command = payload.command || "command";
+    if (cell.phase === "started" || cell.phase === "updated") {
+      return {
+        status: "active",
+        title: `Running ${command}`,
+        lines: outputLines(cell),
+        detail: outputLines(cell).at(-1) || command
+      };
+    }
+    if (cell.phase === "failed") {
+      const terminalTitles = {
+        canceled: "Canceled",
+        timed_out: "Timed out",
+        interrupted: "Interrupted"
+      };
+      const terminalTitle = terminalTitles[payload.state];
+      const exit = Number.isInteger(payload.exit_code) ? ` (exit ${payload.exit_code})` : "";
+      const lines2 = outputLines(cell);
+      if (!lines2.length && payload.error_message) lines2.push(payload.error_message);
+      return {
+        status: "failed",
+        title: terminalTitle ? `${terminalTitle} ${command}` : `Failed${exit} ${command}`,
+        lines: compactLines(lines2),
+        detail: compactLines(lines2).at(-1) || command
+      };
+    }
+    const lines = outputLines(cell);
+    if (!lines.length) lines.push("(no output)");
+    return {
+      status: "completed",
+      title: `Ran ${command}`,
+      lines,
+      detail: lines.at(-1) || command
+    };
+  }
+  function explorationPresentation(cell) {
+    if (cell.phase === "failed") {
+      const payload = cell.payload || {};
+      return {
+        status: "failed",
+        title: "Failed to explore",
+        lines: compactLines([payload.diagnostic || payload.error_code || "Exploration failed"]),
+        detail: payload.diagnostic || payload.error_code || "Exploration failed"
+      };
+    }
+    const lines = (cell.entries || []).map((entry) => {
+      const detail = entry.detail ? ` \xB7 ${entry.detail}` : "";
+      return `${entry.verb} ${entry.label}${detail}`;
+    });
+    return {
+      status: cell.phase === "started" || cell.phase === "updated" ? "active" : "completed",
+      title: cell.phase === "started" || cell.phase === "updated" ? "Exploring" : "Explored",
+      lines: compactLines(lines),
+      detail: lines.at(-1) || "Explored workspace"
+    };
+  }
+  function fileStat(change) {
+    const additions = Number(change?.additions || 0);
+    const deletions = Number(change?.deletions || 0);
+    return `(+${additions} -${deletions})`;
+  }
+  function patchPresentation(cell) {
+    const payload = cell.payload || {};
+    if (cell.phase === "started" || cell.phase === "updated") {
+      return {
+        status: "active",
+        title: payload.dry_run ? "Checking patch" : "Applying patch",
+        lines: [],
+        detail: payload.dry_run ? "Checking patch" : "Applying patch"
+      };
+    }
+    if (cell.phase === "failed") {
+      return {
+        status: "failed",
+        marker: "\u2718",
+        title: "Failed to apply patch",
+        lines: compactLines([payload.diagnostic || payload.error_code || "Patch failed"]),
+        detail: payload.diagnostic || payload.error_code || "Patch failed"
+      };
+    }
+    const changes = payload.changed_files || [];
+    const additions = changes.reduce((sum, item) => sum + Number(item.additions || 0), 0);
+    const deletions = changes.reduce((sum, item) => sum + Number(item.deletions || 0), 0);
+    let title = `${payload.dry_run ? "Checked" : "Edited"} ${changes.length} files (+${additions} -${deletions})`;
+    if (changes.length === 1) {
+      const change = changes[0];
+      const verb = payload.dry_run ? "Checked" : change.operation === "added" ? "Added" : change.operation === "deleted" ? "Deleted" : "Edited";
+      title = `${verb} ${change.path} ${fileStat(change)}`;
+    }
+    return {
+      status: "completed",
+      title,
+      lines: leadingLines(changes.map((change) => `${change.path} ${fileStat(change)}`)),
+      detail: payload.diff_stat || title
+    };
+  }
+  function writePresentation(cell) {
+    const payload = cell.payload || {};
+    if (cell.phase === "started" || cell.phase === "updated") {
+      const title = `${payload.dry_run ? "Checking" : "Writing"} ${payload.path || "file"}`;
+      return { status: "active", title, lines: [], detail: payload.path || "file" };
+    }
+    if (cell.phase === "failed") {
+      return {
+        status: "failed",
+        title: `Failed to write ${payload.path || "file"}`,
+        lines: compactLines([payload.diagnostic || payload.error_code || "Write failed"]),
+        detail: payload.diagnostic || payload.error_code || "Write failed"
+      };
+    }
+    const verb = payload.dry_run || payload.operation === "unchanged" ? "Checked" : payload.operation === "added" ? "Created" : "Wrote";
+    const changes = payload.changed_files || [];
+    return {
+      status: "completed",
+      title: `${verb} ${payload.path || "file"}`,
+      lines: compactLines(changes.map((change) => `${change.path} ${fileStat(change)}`)),
+      detail: payload.diff_stat || payload.path || "file"
+    };
+  }
+  function skillPresentation(cell) {
+    const payload = cell.payload || {};
+    const active = cell.phase === "started" || cell.phase === "updated";
+    if (payload.operation === "read") {
+      const label2 = [payload.skill_id, payload.path].filter(Boolean).join(" / ");
+      return {
+        status: cell.phase === "failed" ? "failed" : active ? "active" : "completed",
+        title: cell.phase === "failed" ? `Failed to read skill ${label2}` : active ? `Reading skill ${label2}` : `Read skill ${label2}`,
+        lines: compactLines([cell.phase === "failed" ? payload.diagnostic : payload.returned_lines]),
+        detail: label2
+      };
+    }
+    const ids = payload.skill_ids || [];
+    const label = ids.join(", ") || "skill";
+    return {
+      status: cell.phase === "failed" ? "failed" : active ? "active" : "completed",
+      title: cell.phase === "failed" ? `Failed to load skill ${label}` : active ? `Loading skill ${label}` : `Loaded skill ${label}`,
+      lines: compactLines([cell.phase === "failed" ? payload.diagnostic : ""]),
+      detail: label
+    };
+  }
+  function legacyPresentation(cell) {
+    const summary = cell.payload?.summary || {};
+    const action = summary.action;
+    const detail = summary.detail || "";
+    const titles = {
+      prepareWorkspace: "Prepared workspace",
+      workspaceCommand: "Ran command",
+      workspaceInspect: "Explored",
+      workspaceSearch: "Explored",
+      workspaceReadFiles: "Explored",
+      workspaceApplyPatch: "Edited files",
+      workspaceWriteFile: "Wrote file",
+      loadSkills: "Loaded skill",
+      readSkillContent: "Read skill"
+    };
+    return {
+      status: "completed",
+      title: titles[action] || "Completed action",
+      lines: compactLines([detail]),
+      detail: detail || titles[action] || "Completed action"
+    };
+  }
+  function genericPresentation(cell) {
+    const payload = cell.payload || {};
+    if (payload.operation === "prepare_workspace") {
+      const title = cell.phase === "failed" ? "Failed to prepare workspace" : "Prepared workspace";
+      return {
+        status: cell.phase === "failed" ? "failed" : "completed",
+        title,
+        lines: compactLines([payload.diagnostic || payload.workspace_id]),
+        detail: payload.workspace_id || title
+      };
+    }
+    return {
+      status: cell.phase === "failed" ? "failed" : "completed",
+      title: cell.phase === "failed" ? "Failed action" : "Completed action",
+      lines: compactLines([payload.diagnostic || ""]),
+      detail: payload.diagnostic || "Action completed"
+    };
+  }
+  function presentActivity(cell) {
+    if (!cell) return { status: "completed", marker: "\u2022", title: "GPT Actions", lines: [], detail: "" };
+    if (cell.kind === "command") return commandPresentation(cell);
+    if (cell.kind === "exploration") return explorationPresentation(cell);
+    if (cell.kind === "patch") return patchPresentation(cell);
+    if (cell.kind === "write") return writePresentation(cell);
+    if (cell.kind === "skill") return skillPresentation(cell);
+    if (cell.kind === "legacy") return legacyPresentation(cell);
+    return genericPresentation(cell);
+  }
+  function compactActivity(cell) {
+    const presentation = presentActivity(cell);
+    return {
+      action: presentation.title,
+      detail: presentation.detail || presentation.lines.at(-1) || "",
+      status: presentation.status
+    };
+  }
 
   // src/api/action-log-client.js
-  function createActionLogClient({ getProfile, onItems, onHint, onStatus, onAttention }) {
-    let lastId = 0;
-    let needsCursorPrime = true;
+  function createActionLogClient({
+    getProfile,
+    onItems,
+    onHint,
+    onStatus,
+    onAttention,
+    initialCursor = null,
+    onCursor
+  }) {
+    let lastId = Number.isInteger(initialCursor) ? initialCursor : 0;
+    let needsCursorPrime = !Number.isInteger(initialCursor);
     let stopped = false;
     let requestHandle = null;
     let requestGeneration = 0;
@@ -127,7 +707,6 @@
     }
     function start() {
       stopped = false;
-      needsCursorPrime = true;
       schedulePoll(0);
     }
     function scheduleRetry(message) {
@@ -167,7 +746,10 @@
           }
           try {
             const body = JSON.parse(response.responseText);
-            if (Number.isInteger(body.last_id)) lastId = body.last_id;
+            if (Number.isInteger(body.last_id)) {
+              lastId = body.last_id;
+              onCursor?.(lastId);
+            }
             if (priming) {
               needsCursorPrime = false;
               onStatus?.("idle");
@@ -197,7 +779,10 @@
         }
       });
     }
-    return { start, stop, suspend, resume, poll };
+    function getCursor() {
+      return needsCursorPrime ? null : lastId;
+    }
+    return { start, stop, suspend, resume, poll, getCursor };
   }
 
   // src/api/skill-catalog-client.js
@@ -209,10 +794,6 @@
       return `${profile.id || ""}\0${profile.backend}`;
     }
     function requestCatalog(profile, key) {
-      console.debug("[GPT Action Monitor][Skills] network request start", {
-        backend: profile.backend,
-        key
-      });
       const headers = {};
       if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
       return new Promise((resolve, reject) => {
@@ -240,9 +821,6 @@
               }));
               cache.set(key, normalized);
               GM_setValue(`${storagePrefix}${key}`, normalized);
-              console.debug("[GPT Action Monitor][Skills] network request success", {
-                count: normalized.length
-              });
               resolve(normalized);
             } catch (error) {
               reject(new Error(`Skill \u5217\u8868\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`));
@@ -262,25 +840,18 @@
       if (!profile) throw new Error("\u6CA1\u6709\u6D3B\u52A8\u7684\u540E\u7AEF\u914D\u7F6E\u3002");
       const key = profileKey(profile);
       if (!refresh && cache.has(key)) {
-        console.debug("[GPT Action Monitor][Skills] memory cache hit", { key });
         return cache.get(key);
       }
       if (!refresh) {
         const stored = GM_getValue(`${storagePrefix}${key}`, null);
         if (Array.isArray(stored)) {
-          console.debug("[GPT Action Monitor][Skills] GM storage cache hit", {
-            key,
-            count: stored.length
-          });
           cache.set(key, stored);
           return stored;
         }
       }
       if (pending.has(key)) {
-        console.debug("[GPT Action Monitor][Skills] pending request reuse", { key });
         return pending.get(key);
       }
-      console.debug("[GPT Action Monitor][Skills] cache miss", { key, refresh });
       const request = requestCatalog(profile, key).finally(() => {
         if (pending.get(key) === request) pending.delete(key);
       });
@@ -460,29 +1031,6 @@
     return `loadSkills(${JSON.stringify([skillId])})`;
   }
 
-  // src/store/event-store.js
-  function createEventStore() {
-    let history = [];
-    function trim() {
-      if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
-    }
-    function add(summary) {
-      history.push({ kind: "event", summary });
-      trim();
-    }
-    function addHint(message) {
-      history.push({ kind: "hint", message });
-      trim();
-    }
-    function all() {
-      return [...history];
-    }
-    function clear() {
-      history = [];
-    }
-    return { add, addHint, all, clear };
-  }
-
   // src/profile/profile-store.js
   function createProfileId() {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -630,17 +1178,22 @@
     #gpt-action-monitor.gam-dragging .gam-header { cursor: grabbing; }
     #gpt-action-monitor .gam-expanded { display: none; }
     #gpt-action-monitor.gam-open {
-      width: min(320px, calc(100vw - 16px));
-      height: min(300px, 54vh);
+      width: auto;
+      height: auto;
     }
     #gpt-action-monitor.gam-open .gam-compact { display: none; }
     #gpt-action-monitor.gam-open .gam-expanded {
       position: relative;
-      width: 100%;
-      height: 100%;
+      width: min(380px, calc(100vw - 16px));
+      height: min(420px, 62vh);
+      min-width: min(280px, calc(100vw - 16px));
+      min-height: min(220px, calc(100vh - 16px));
+      max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 16px);
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      resize: both;
       box-sizing: border-box;
       border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
       border-radius: 12px;
@@ -705,43 +1258,103 @@
       line-height: 1;
     }
     #gpt-action-monitor .gam-close:hover { background: color-mix(in srgb, CanvasText 7%, transparent); }
-    #gpt-action-monitor .gam-log {
+    #gpt-action-monitor .gam-activity-root {
       flex: 1;
-      overflow-y: auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       padding: 6px 8px 8px;
+    }
+    #gpt-action-monitor .gam-monitor-hint {
+      margin: 4px 2px 8px;
+      padding: 7px 9px;
+      border-radius: 8px;
+      background: color-mix(in srgb, #d84a4a 9%, transparent);
+      color: color-mix(in srgb, CanvasText 76%, transparent);
+      font-size: 11px;
+    }
+    #gpt-action-monitor .gam-monitor-hint[hidden],
+    #gpt-action-monitor .gam-activity-section[hidden] { display: none; }
+    #gpt-action-monitor .gam-activity-section + .gam-activity-section {
+      margin-top: 9px;
+      padding-top: 8px;
+      border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+    }
+    #gpt-action-monitor .gam-now-section {
+      flex: 0 1 auto;
+      max-height: 45%;
+      overflow-y: auto;
       scrollbar-width: thin;
     }
-    #gpt-action-monitor .gam-entry {
-      padding: 7px 8px;
+    #gpt-action-monitor .gam-recent-section {
+      min-height: 0;
+      flex: 1 1 auto;
+      overflow-y: auto;
+      scrollbar-width: thin;
+    }
+    #gpt-action-monitor .gam-activity-section-label {
+      padding: 2px 8px 5px;
+      color: color-mix(in srgb, CanvasText 44%, transparent);
+      font: 600 10px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: .08em;
+    }
+    #gpt-action-monitor .gam-activity-cell {
+      padding: 7px 8px 8px;
       border-radius: 8px;
     }
-    #gpt-action-monitor .gam-entry:hover { background: color-mix(in srgb, CanvasText 5%, transparent); }
-    #gpt-action-monitor .gam-entry-top {
+    #gpt-action-monitor .gam-activity-cell:hover {
+      background: color-mix(in srgb, CanvasText 4%, transparent);
+    }
+    #gpt-action-monitor .gam-activity-title {
       display: flex;
-      gap: 8px;
-      align-items: baseline;
+      align-items: flex-start;
+      gap: 7px;
       min-width: 0;
     }
-    #gpt-action-monitor .gam-time {
-      flex: 0 0 auto;
-      opacity: .48;
-      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    #gpt-action-monitor .gam-action {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-weight: 600;
-    }
-    #gpt-action-monitor .gam-detail {
-      margin: 2px 0 0 42px;
+    #gpt-action-monitor .gam-activity-marker {
+      width: 12px;
+      flex: 0 0 12px;
+      text-align: center;
       opacity: .62;
+      font-weight: 700;
+    }
+    #gpt-action-monitor .gam-activity-cell[data-status="active"] .gam-activity-marker {
+      color: #22a35a;
+      opacity: 1;
+    }
+    #gpt-action-monitor .gam-activity-cell[data-status="failed"] .gam-activity-marker {
+      color: #d84a4a;
+      opacity: 1;
+    }
+    #gpt-action-monitor .gam-activity-cell[data-kind="patch"][data-status="failed"] .gam-activity-marker {
+      color: #a855c7;
+    }
+    #gpt-action-monitor .gam-activity-label {
+      min-width: 0;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 3;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      font-weight: 590;
+    }
+    #gpt-action-monitor .gam-activity-details {
+      margin: 3px 0 0 19px;
+      color: color-mix(in srgb, CanvasText 62%, transparent);
+      font: 11px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #gpt-action-monitor .gam-activity-detail-line {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    #gpt-action-monitor .gam-hint { opacity: .58; }
+    #gpt-action-monitor .gam-activity-detail-line::before {
+      content: "  ";
+      opacity: .48;
+    }
+    #gpt-action-monitor .gam-activity-detail-line:first-child::before { content: "\u2514 "; }
     #gpt-action-monitor .gam-skills-picker {
       position: absolute;
       top: 34px;
@@ -978,67 +1591,108 @@
       }
     `;
 
-  // src/ui/history-panel.js
-  function createHistoryPanel({ logBox, eventStore }) {
-    function trimToStore() {
-      const maxNodes = eventStore.all().length;
-      while (logBox.childElementCount > maxNodes && logBox.firstElementChild) {
-        logBox.firstElementChild.remove();
-      }
-    }
-    function createEventNode(summary) {
-      const node = document.createElement("div");
-      node.className = "gam-entry";
-      node.title = summary.raw;
-      const top = document.createElement("div");
-      top.className = "gam-entry-top";
-      const time = document.createElement("span");
-      time.className = "gam-time";
-      time.textContent = summary.time || "--:--";
-      const action = document.createElement("span");
-      action.className = "gam-action";
-      action.textContent = summary.action;
+  // src/ui/activity-panel.js
+  function createCellNode() {
+    const node = document.createElement("div");
+    node.className = "gam-activity-cell";
+    const title = document.createElement("div");
+    title.className = "gam-activity-title";
+    const marker = document.createElement("span");
+    marker.className = "gam-activity-marker";
+    const label = document.createElement("span");
+    label.className = "gam-activity-label";
+    title.append(marker, label);
+    const details = document.createElement("div");
+    details.className = "gam-activity-details";
+    node.append(title, details);
+    node._gam = { marker, label, details, signature: "" };
+    return node;
+  }
+  function updateCellNode(node, cell) {
+    const presentation = presentActivity(cell);
+    const signature = JSON.stringify([
+      cell.revision,
+      cell.phase,
+      presentation.status,
+      presentation.marker,
+      presentation.title,
+      presentation.lines
+    ]);
+    if (node._gam.signature === signature) return;
+    node._gam.signature = signature;
+    node.dataset.status = presentation.status;
+    node.dataset.kind = cell.kind;
+    node._gam.marker.textContent = presentation.marker || "\u2022";
+    node._gam.label.textContent = presentation.title;
+    node.title = presentation.title;
+    node._gam.details.replaceChildren();
+    for (const line of presentation.lines) {
       const detail = document.createElement("div");
-      detail.className = "gam-detail";
-      detail.textContent = summary.detail;
-      top.append(time, action);
-      node.append(top, detail);
-      return node;
+      detail.className = "gam-activity-detail-line";
+      detail.textContent = line;
+      node._gam.details.appendChild(detail);
     }
-    function createHintNode(message) {
-      const node = document.createElement("div");
-      node.className = "gam-entry gam-hint";
-      node.textContent = message;
-      return node;
-    }
-    function appendEvent(summary) {
-      logBox.appendChild(createEventNode(summary));
-      trimToStore();
-      logBox.scrollTop = logBox.scrollHeight;
-    }
-    function appendHint(message) {
-      logBox.appendChild(createHintNode(message));
-      trimToStore();
-      logBox.scrollTop = logBox.scrollHeight;
-    }
-    function render() {
-      const fragment = document.createDocumentFragment();
-      for (const item of eventStore.all()) {
-        fragment.appendChild(
-          item.kind === "event" ? createEventNode(item.summary) : createHintNode(item.message)
-        );
+  }
+  function syncList(container, cells, nodes) {
+    const liveIds = new Set(cells.map((cell) => cell.id));
+    for (const [id, node] of nodes) {
+      if (!liveIds.has(id)) {
+        node.remove();
+        nodes.delete(id);
       }
-      logBox.replaceChildren(fragment);
-      logBox.scrollTop = logBox.scrollHeight;
+    }
+    for (const cell of cells) {
+      let node = nodes.get(cell.id);
+      if (!node) {
+        node = createCellNode();
+        nodes.set(cell.id, node);
+      }
+      updateCellNode(node, cell);
+      container.appendChild(node);
+    }
+  }
+  function createActivityPanel({ root }) {
+    root.innerHTML = `
+    <div class="gam-monitor-hint" hidden></div>
+    <section class="gam-activity-section gam-now-section">
+      <div class="gam-activity-section-label">NOW</div>
+      <div class="gam-now-list"></div>
+    </section>
+    <section class="gam-activity-section gam-recent-section">
+      <div class="gam-activity-section-label">RECENT</div>
+      <div class="gam-recent-list"></div>
+    </section>
+  `;
+    const hint = root.querySelector(".gam-monitor-hint");
+    const nowSection = root.querySelector(".gam-now-section");
+    const recentSection = root.querySelector(".gam-recent-section");
+    const nowList = root.querySelector(".gam-now-list");
+    const recentList = root.querySelector(".gam-recent-list");
+    const nowNodes = /* @__PURE__ */ new Map();
+    const recentNodes = /* @__PURE__ */ new Map();
+    function render(snapshot) {
+      syncList(nowList, snapshot.active || [], nowNodes);
+      syncList(recentList, snapshot.recent || [], recentNodes);
+      nowSection.hidden = !(snapshot.active || []).length;
+      recentSection.hidden = !(snapshot.recent || []).length;
+    }
+    function setHint(message) {
+      hint.textContent = message || "";
+      hint.hidden = !message;
     }
     function clear() {
-      logBox.replaceChildren();
+      nowNodes.clear();
+      recentNodes.clear();
+      nowList.replaceChildren();
+      recentList.replaceChildren();
+      nowSection.hidden = true;
+      recentSection.hidden = true;
     }
-    return { appendEvent, appendHint, render, clear };
+    return { render, setHint, clear };
   }
 
   // src/ui/monitor-panel.js
-  function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) {
+  function createMonitorPanel({ activityStore, isActive, skillsMenu = null }) {
     const panel = document.createElement("div");
     panel.id = "gpt-action-monitor";
     panel.dataset.status = "idle";
@@ -1048,19 +1702,19 @@
         <strong class="gam-current-action">GPT Actions</strong>
         <span class="gam-current-detail">\u7B49\u5F85 Action</span>
       </div>
-      <button class="gam-handle" type="button" title="\u62D6\u52A8\u79FB\u52A8 \xB7 \u70B9\u51FB\u5C55\u5F00" aria-label="\u5C55\u5F00 GPT Action \u5386\u53F2">
+      <button class="gam-handle" type="button" title="\u62D6\u52A8\u79FB\u52A8 \xB7 \u70B9\u51FB\u5C55\u5F00" aria-label="\u5C55\u5F00 GPT Activity">
         <span class="gam-dot"></span>
       </button>
     </div>
-    <section class="gam-expanded" aria-label="GPT Action \u5386\u53F2">
+    <section class="gam-expanded" aria-label="GPT Activity">
       <div class="gam-header">
         <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
         <div class="gam-header-controls">
           <button class="gam-skills-button" type="button" aria-haspopup="menu" aria-label="\u6253\u5F00 Skills">Skills \u203A</button>
-          <button class="gam-close" type="button" title="\u6536\u8D77" aria-label="\u6536\u8D77 Action \u5386\u53F2">\u2212</button>
+          <button class="gam-close" type="button" title="\u6536\u8D77" aria-label="\u6536\u8D77 GPT Activity">\u2212</button>
         </div>
       </div>
-      <div class="gam-log" role="log" aria-label="Action \u5386\u53F2"></div>
+      <div class="gam-activity-root" role="log" aria-label="Agent activity"></div>
     </section>
   `;
     const style = document.createElement("style");
@@ -1069,10 +1723,11 @@
     const close = panel.querySelector(".gam-close");
     const skillsButton = panel.querySelector(".gam-skills-button");
     const header = panel.querySelector(".gam-header");
-    const logBox = panel.querySelector(".gam-log");
+    const expanded = panel.querySelector(".gam-expanded");
+    const activityRoot = panel.querySelector(".gam-activity-root");
     const currentAction = panel.querySelector(".gam-current-action");
     const currentDetail = panel.querySelector(".gam-current-detail");
-    const historyPanel = createHistoryPanel({ logBox, eventStore });
+    const activityPanel = createActivityPanel({ root: activityRoot });
     if (skillsMenu?.element) panel.querySelector(".gam-expanded").appendChild(skillsMenu.element);
     skillsMenu?.bindTrigger?.(skillsButton);
     let manualOpen = false;
@@ -1080,6 +1735,10 @@
     let activityTimer = null;
     let uiTimer = null;
     let pendingLatest = null;
+    let lastHint = "";
+    activityStore.subscribe((snapshot) => {
+      if (manualOpen) activityPanel.render(snapshot);
+    });
     function setStatus(state) {
       panel.dataset.status = state;
     }
@@ -1193,7 +1852,7 @@
         panel.style.left = `${Math.round(rightEdge - width)}px`;
       }
       keepInViewport();
-      historyPanel.render();
+      activityPanel.render(activityStore.snapshot());
     }
     function closeHistory() {
       const openRect = panel.getBoundingClientRect();
@@ -1204,7 +1863,7 @@
       if (panel.classList.contains("gam-detached")) {
         panel.style.left = `${Math.round(rightEdge - COMPACT_WIDTH)}px`;
       }
-      historyPanel.clear();
+      activityPanel.clear();
       keepInViewport();
       savePosition();
       handle.focus();
@@ -1220,10 +1879,13 @@
       pendingLatest = null;
       currentAction.textContent = summary.action;
       currentDetail.textContent = summary.detail;
-      setStatus("active");
+      setStatus(summary.status === "failed" ? "error" : "active");
       if (!manualOpen) panel.classList.add("gam-chip-visible");
       window.clearTimeout(activityTimer);
-      activityTimer = window.setTimeout(hideActivity, ACTIVITY_VISIBLE_MS);
+      activityTimer = null;
+      if (summary.status !== "active") {
+        activityTimer = window.setTimeout(hideActivity, ACTIVITY_VISIBLE_MS);
+      }
     }
     function queueActivity(summary) {
       pendingLatest = summary;
@@ -1257,15 +1919,14 @@
         activityTimer = null;
       }
     }
-    function recordEvent(summary) {
-      eventStore.add(summary);
-      if (manualOpen) historyPanel.appendEvent(summary);
-    }
     function recordHint(message) {
-      const previous = eventStore.all().at(-1);
-      if (previous?.kind === "hint" && previous.message === message) return;
-      eventStore.addHint(message);
-      if (manualOpen) historyPanel.appendHint(message);
+      if (!message || message === lastHint) return;
+      lastHint = message;
+      activityPanel.setHint(message);
+    }
+    function clearHint() {
+      lastHint = "";
+      activityPanel.setHint("");
     }
     function suspendActivity() {
       if (uiTimer !== null) {
@@ -1293,7 +1954,7 @@
       panel.classList.remove("gam-open", "gam-chip-visible", "gam-dragging");
       manualOpen = false;
       skillsMenu?.close();
-      historyPanel.clear();
+      activityPanel.clear();
       panel.remove();
       style.remove();
     }
@@ -1305,14 +1966,19 @@
     });
     skillsButton.addEventListener("click", () => skillsMenu?.toggle());
     close.addEventListener("click", closeHistory);
+    expanded.addEventListener("pointerup", () => {
+      if (!manualOpen) return;
+      keepInViewport();
+      savePosition();
+    });
     return {
       mount,
       unmount,
       keepInViewport,
       setStatus,
       getStatus,
-      recordEvent,
       recordHint,
+      clearHint,
       queueActivity,
       showAttention,
       clearAttention,
@@ -1633,15 +2299,10 @@
     }
     async function refresh({ force = false } = {}) {
       const generation = ++requestGeneration;
-      console.debug("[GPT Action Monitor][Skills UI] open/refresh", { force });
       if (force) setState("\u5237\u65B0\u4E2D\u2026");
       else if (!hasRendered) setState("\u52A0\u8F7D Skills\u2026");
       try {
         const skills = await loadSkills({ refresh: force });
-        console.debug("[GPT Action Monitor][Skills UI] render", {
-          count: skills.length,
-          force
-        });
         if (!open || generation !== requestGeneration) return;
         render(skills);
       } catch (error) {
@@ -1693,11 +2354,13 @@
     let activeProfile = null;
     let actionLogClient = null;
     let chatAdapter = null;
+    let activitySessionKey = null;
+    let activitySessionCursor = null;
     const composerAdapter = createComposerAdapter();
     const skillCatalogClient = createSkillCatalogClient({
       getProfile: () => activeProfile
     });
-    const eventStore = createEventStore();
+    const activityStore = createActivityStore();
     let monitorUi = null;
     const skillsMenu = createSkillsMenu({
       loadSkills: (options) => skillCatalogClient.list(options),
@@ -1711,18 +2374,19 @@
       }
     });
     monitorUi = createMonitorPanel({
-      eventStore,
+      activityStore,
       isActive: () => monitorActive,
       skillsMenu
     });
     function deactivateMonitor() {
       if (!monitorActive) return;
+      const cursor = actionLogClient?.getCursor?.();
+      if (Number.isInteger(cursor)) activitySessionCursor = cursor;
       monitorActive = false;
       activeProfile = null;
       actionLogClient?.stop();
       actionLogClient = null;
       skillsMenu.close();
-      eventStore.clear();
       monitorUi.unmount();
     }
     function applyProfiles(nextProfiles) {
@@ -1742,19 +2406,26 @@
       if (monitorActive) deactivateMonitor();
       monitorActive = true;
       activeProfile = profile;
-      eventStore.clear();
+      const nextSessionKey = `${profile.id}\0${profile.backend}`;
+      if (activitySessionKey !== nextSessionKey) {
+        activityStore.clear();
+        activitySessionKey = nextSessionKey;
+        activitySessionCursor = null;
+      }
       monitorUi.mount();
       monitorUi.setStatus("idle");
       actionLogClient = createActionLogClient({
         getProfile: () => activeProfile,
+        initialCursor: activitySessionCursor,
+        onCursor: (cursor) => {
+          activitySessionCursor = cursor;
+        },
         onItems(items) {
-          let newest = null;
-          for (const item of items) {
-            newest = summarize(item.text);
-            monitorUi.recordEvent(newest);
-          }
-          if (newest) monitorUi.queueActivity(newest);
-          else if (monitorUi.getStatus() === "error") monitorUi.clearAttention();
+          const newest = activityStore.ingest(items);
+          if (newest) {
+            monitorUi.clearHint();
+            monitorUi.queueActivity(compactActivity(newest));
+          } else if (monitorUi.getStatus() === "error") monitorUi.clearAttention();
         },
         onHint: (message) => monitorUi.recordHint(message),
         onAttention: (action, detail) => monitorUi.showAttention(action, detail),
@@ -1776,6 +2447,8 @@
     function resume() {
       if (!monitorActive) return;
       monitorUi.resumeActivity();
+      const active = activityStore.snapshot().active.at(0);
+      if (active) monitorUi.queueActivity(compactActivity(active));
       actionLogClient?.resume();
     }
     GM_registerMenuCommand("\u2699 \u76D1\u63A7\u914D\u7F6E...", settingsPanel.open);

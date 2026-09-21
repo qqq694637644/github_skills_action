@@ -8,11 +8,6 @@ export function createSkillCatalogClient({ getProfile }) {
   }
 
   function requestCatalog(profile, key) {
-    console.debug('[GPT Action Monitor][Skills] network request start', {
-      backend: profile.backend,
-      key,
-    });
-
     const headers = {};
     if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
 
@@ -43,9 +38,6 @@ export function createSkillCatalogClient({ getProfile }) {
               }));
             cache.set(key, normalized);
             GM_setValue(`${storagePrefix}${key}`, normalized);
-            console.debug('[GPT Action Monitor][Skills] network request success', {
-              count: normalized.length,
-            });
             resolve(normalized);
           } catch (error) {
             reject(new Error(`Skill 列表解析失败：${String(error)}`));
@@ -67,25 +59,18 @@ export function createSkillCatalogClient({ getProfile }) {
     const key = profileKey(profile);
 
     if (!refresh && cache.has(key)) {
-      console.debug('[GPT Action Monitor][Skills] memory cache hit', { key });
       return cache.get(key);
     }
     if (!refresh) {
       const stored = GM_getValue(`${storagePrefix}${key}`, null);
       if (Array.isArray(stored)) {
-        console.debug('[GPT Action Monitor][Skills] GM storage cache hit', {
-          key,
-          count: stored.length,
-        });
         cache.set(key, stored);
         return stored;
       }
     }
     if (pending.has(key)) {
-      console.debug('[GPT Action Monitor][Skills] pending request reuse', { key });
       return pending.get(key);
     }
-    console.debug('[GPT Action Monitor][Skills] cache miss', { key, refresh });
 
     const request = requestCatalog(profile, key).finally(() => {
       if (pending.get(key) === request) pending.delete(key);

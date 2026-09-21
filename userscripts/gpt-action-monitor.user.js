@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.6.0
+// @version      0.6.1
 // @description  Show github_skills_action activity as a calm, energy-conscious status indicator on ChatGPT.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -202,10 +202,12 @@
 
   // src/api/skill-catalog-client.js
   function createSkillCatalogClient({ getProfile }) {
-    let cachedSkills = null;
-    function requestCatalog() {
-      const profile = getProfile();
-      if (!profile) return Promise.reject(new Error("\u6CA1\u6709\u6D3B\u52A8\u7684\u540E\u7AEF\u914D\u7F6E\u3002"));
+    const cache = /* @__PURE__ */ new Map();
+    const pending = /* @__PURE__ */ new Map();
+    function profileKey(profile) {
+      return `${profile.id || ""}\0${profile.backend}`;
+    }
+    function requestCatalog(profile, key) {
       const headers = {};
       if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
       return new Promise((resolve, reject) => {
@@ -226,12 +228,13 @@
             try {
               const body = JSON.parse(response.responseText);
               const skills = Array.isArray(body.skills) ? body.skills : [];
-              cachedSkills = skills.filter((skill) => skill && typeof skill.skill_id === "string").map((skill) => ({
+              const normalized = skills.filter((skill) => skill && typeof skill.skill_id === "string").map((skill) => ({
                 skill_id: skill.skill_id,
                 name: typeof skill.name === "string" ? skill.name : skill.skill_id,
                 description: typeof skill.description === "string" ? skill.description : ""
               }));
-              resolve(cachedSkills);
+              cache.set(key, normalized);
+              resolve(normalized);
             } catch (error) {
               reject(new Error(`Skill \u5217\u8868\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`));
             }
@@ -246,13 +249,18 @@
       });
     }
     async function list({ refresh = false } = {}) {
-      if (!refresh && cachedSkills !== null) return cachedSkills;
-      return requestCatalog();
+      const profile = getProfile();
+      if (!profile) throw new Error("\u6CA1\u6709\u6D3B\u52A8\u7684\u540E\u7AEF\u914D\u7F6E\u3002");
+      const key = profileKey(profile);
+      if (!refresh && cache.has(key)) return cache.get(key);
+      if (pending.has(key)) return pending.get(key);
+      const request = requestCatalog(profile, key).finally(() => {
+        if (pending.get(key) === request) pending.delete(key);
+      });
+      pending.set(key, request);
+      return request;
     }
-    function clear() {
-      cachedSkills = null;
-    }
-    return { list, clear };
+    return { list };
   }
 
   // src/adapters/chatgpt.js
@@ -1697,7 +1705,6 @@
       activeProfile = null;
       actionLogClient?.stop();
       actionLogClient = null;
-      skillCatalogClient.clear();
       skillsMenu.close();
       eventStore.clear();
       monitorUi.unmount();
@@ -1719,7 +1726,6 @@
       if (monitorActive) deactivateMonitor();
       monitorActive = true;
       activeProfile = profile;
-      skillCatalogClient.clear();
       eventStore.clear();
       monitorUi.mount();
       monitorUi.setStatus("idle");

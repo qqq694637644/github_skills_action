@@ -41,15 +41,19 @@ for (let index = 0; index < 101; index += 1) {
 // new backend read so the server can rescan its on-disk Skill catalog.
 {
   installDomFixture();
+  let profile = { id: 'alpha-profile', backend: 'https://alpha.example.com', token: '' };
   let requests = 0;
-  globalThis.GM_xmlhttpRequest = ({ onload }) => {
+  globalThis.GM_xmlhttpRequest = ({ url, onload }) => {
     requests += 1;
+    const skillId = url.startsWith('https://beta.example.com')
+      ? 'beta'
+      : requests === 3 ? 'alpha-refreshed' : 'alpha';
     onload({
       status: 200,
       responseText: JSON.stringify({
         skills: [{
-          skill_id: requests === 1 ? 'alpha' : 'beta',
-          name: requests === 1 ? 'alpha' : 'beta',
+          skill_id: skillId,
+          name: skillId,
           description: 'Demo skill.',
         }],
       }),
@@ -57,13 +61,45 @@ for (let index = 0; index < 101; index += 1) {
     return { abort() {} };
   };
   const catalog = createSkillCatalogClient({
-    getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
+    getProfile: () => profile,
   });
   assert.equal((await catalog.list())[0].skill_id, 'alpha');
   assert.equal((await catalog.list())[0].skill_id, 'alpha');
   assert.equal(requests, 1);
-  assert.equal((await catalog.list({ refresh: true }))[0].skill_id, 'beta');
+
+  profile = { id: 'beta-profile', backend: 'https://beta.example.com', token: '' };
+  assert.equal((await catalog.list())[0].skill_id, 'beta');
   assert.equal(requests, 2);
+
+  profile = { id: 'alpha-profile', backend: 'https://alpha.example.com', token: '' };
+  assert.equal((await catalog.list())[0].skill_id, 'alpha');
+  assert.equal(requests, 2);
+  assert.equal((await catalog.list({ refresh: true }))[0].skill_id, 'alpha-refreshed');
+  assert.equal(requests, 3);
+}
+
+// Reopening/refreshing while the first catalog request is still in flight must
+// reuse that request rather than issuing duplicate backend reads.
+{
+  installDomFixture();
+  let requests = 0;
+  let completeRequest = null;
+  globalThis.GM_xmlhttpRequest = ({ onload }) => {
+    requests += 1;
+    completeRequest = () => onload({
+      status: 200,
+      responseText: JSON.stringify({ skills: [] }),
+    });
+    return { abort() {} };
+  };
+  const catalog = createSkillCatalogClient({
+    getProfile: () => ({ id: 'alpha', backend: 'https://skills.example.com', token: '' }),
+  });
+  const first = catalog.list();
+  const refresh = catalog.list({ refresh: true });
+  assert.equal(requests, 1);
+  completeRequest();
+  await Promise.all([first, refresh]);
 }
 
 // Composer selection is captured only when the Skills menu is opened and is

@@ -25,4 +25,4 @@ npm run check
 
 `npm run build` rewrites `../gpt-action-monitor.user.js`. The generated file is committed so users can install it directly from GitHub, while maintenance stays in small, responsibility-focused source files.
 
-The expanded monitor includes a `Skills` menu. Opening it fetches the active backend catalog on demand; `↻` explicitly refreshes the backend catalog, and clicking a Skill inserts `loadSkills(["<skill-id>"])` at the ChatGPT composer caret without sending the message.
+The expanded monitor includes a `Skills` menu. Each backend profile catalog is fetched once on demand and kept in memory for the page session, including across monitor deactivate/reactivate cycles. Only `↻` explicitly refreshes that profile catalog. Clicking a Skill inserts `loadSkills(["<skill-id>"])` at the ChatGPT composer caret without sending the message.

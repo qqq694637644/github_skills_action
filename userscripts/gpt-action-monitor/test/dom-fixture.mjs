@@ -53,6 +53,7 @@ export class FakeElement {
         '.gam-close',
         '.gam-header',
         '.gam-expanded',
+        '.gam-resize-handle',
         '.gam-activity-root',
         '.gam-current-action',
         '.gam-current-detail',

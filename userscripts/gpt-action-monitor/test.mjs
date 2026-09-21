@@ -34,6 +34,7 @@ assert.deepEqual(validateBackend('https://skills.example.com/'), {
 assert.equal(validateBackend('ftp://skills.example.com').ok, false);
 assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintenance"])');
 assert.match(MONITOR_CSS, /resize:\s*both/);
+assert.match(MONITOR_CSS, /\.gam-resize-handle\s*\{[\s\S]*?left:\s*0;[\s\S]*?bottom:\s*0;[\s\S]*?cursor:\s*nesw-resize/);
 assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/);
 
 // Skill catalog reads are cached in-page, while explicit refresh performs a

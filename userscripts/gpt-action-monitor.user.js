@@ -1230,6 +1230,47 @@
     #gpt-action-monitor.gam-dragging .gam-chip { opacity: 0; }
     #gpt-action-monitor.gam-dragging .gam-handle,
     #gpt-action-monitor.gam-dragging .gam-header { cursor: grabbing; }
+    #gpt-action-monitor .gam-resize-handle {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      width: 22px;
+      height: 22px;
+      z-index: 2;
+      padding: 0;
+      border: 0;
+      border-radius: 0 8px 0 10px;
+      background: transparent;
+      color: color-mix(in srgb, CanvasText 44%, transparent);
+      cursor: nesw-resize;
+      touch-action: none;
+    }
+    #gpt-action-monitor .gam-resize-handle::before {
+      content: "";
+      position: absolute;
+      left: 5px;
+      bottom: 5px;
+      width: 10px;
+      height: 10px;
+      background: repeating-linear-gradient(
+        45deg,
+        transparent 0 3px,
+        currentColor 3px 4px
+      );
+      clip-path: polygon(0 0, 0 100%, 100% 100%);
+      opacity: .72;
+      pointer-events: none;
+    }
+    #gpt-action-monitor .gam-resize-handle:hover,
+    #gpt-action-monitor .gam-resize-handle:focus-visible {
+      color: color-mix(in srgb, CanvasText 72%, transparent);
+      background: color-mix(in srgb, CanvasText 5%, transparent);
+      outline: none;
+    }
+    #gpt-action-monitor .gam-resize-handle:focus-visible {
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, CanvasText 30%, transparent);
+    }
+    #gpt-action-monitor.gam-resizing .gam-resize-handle { cursor: nesw-resize; }
     #gpt-action-monitor .gam-expanded { display: none; }
     #gpt-action-monitor.gam-open {
       width: auto;
@@ -1769,6 +1810,7 @@
         </div>
       </div>
       <div class="gam-activity-root" role="log" aria-label="Agent activity"></div>
+      <button class="gam-resize-handle" type="button" title="\u62D6\u52A8\u6216\u4F7F\u7528\u65B9\u5411\u952E\u8C03\u6574\u5927\u5C0F" aria-label="\u4ECE\u5DE6\u4E0B\u89D2\u8C03\u6574 GPT Activity \u5927\u5C0F"></button>
     </section>
   `;
     const style = document.createElement("style");
@@ -1778,6 +1820,7 @@
     const skillsButton = panel.querySelector(".gam-skills-button");
     const header = panel.querySelector(".gam-header");
     const expanded = panel.querySelector(".gam-expanded");
+    const resizeHandle = panel.querySelector(".gam-resize-handle");
     const activityRoot = panel.querySelector(".gam-activity-root");
     const currentAction = panel.querySelector(".gam-current-action");
     const currentDetail = panel.querySelector(".gam-current-detail");
@@ -1889,6 +1932,63 @@
         dragHandle.addEventListener("pointermove", onMove);
         dragHandle.addEventListener("pointerup", onEnd);
         dragHandle.addEventListener("pointercancel", onEnd);
+      });
+    }
+    function makeResizableFromBottomLeft(resizeTarget) {
+      const applyResize = (startRect, dx, dy) => {
+        const minWidth = Math.min(280, Math.max(1, window.innerWidth - 16));
+        const minHeight = Math.min(220, Math.max(1, window.innerHeight - 16));
+        const maxViewportWidth = Math.max(minWidth, window.innerWidth - 16);
+        const maxWidth = panel.classList.contains("gam-detached") ? Math.max(minWidth, Math.min(maxViewportWidth, startRect.right - 8)) : maxViewportWidth;
+        const maxHeight = Math.max(
+          minHeight,
+          Math.min(window.innerHeight - 16, window.innerHeight - startRect.top - 8)
+        );
+        const width = Math.min(Math.max(startRect.width - dx, minWidth), maxWidth);
+        const height = Math.min(Math.max(startRect.height + dy, minHeight), maxHeight);
+        expanded.style.width = `${Math.round(width)}px`;
+        expanded.style.height = `${Math.round(height)}px`;
+        if (panel.classList.contains("gam-detached")) {
+          panel.style.left = `${Math.round(startRect.right - width)}px`;
+          panel.style.right = "auto";
+        }
+      };
+      resizeTarget.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        const startRect = expanded.getBoundingClientRect();
+        const startX = event.clientX;
+        const startY = event.clientY;
+        panel.classList.add("gam-resizing");
+        resizeTarget.setPointerCapture(event.pointerId);
+        const onMove = (moveEvent) => {
+          applyResize(startRect, moveEvent.clientX - startX, moveEvent.clientY - startY);
+        };
+        const onEnd = () => {
+          resizeTarget.removeEventListener("pointermove", onMove);
+          resizeTarget.removeEventListener("pointerup", onEnd);
+          resizeTarget.removeEventListener("pointercancel", onEnd);
+          panel.classList.remove("gam-resizing");
+          keepInViewport();
+          savePosition();
+        };
+        resizeTarget.addEventListener("pointermove", onMove);
+        resizeTarget.addEventListener("pointerup", onEnd);
+        resizeTarget.addEventListener("pointercancel", onEnd);
+      });
+      resizeTarget.addEventListener("keydown", (event) => {
+        const step = event.shiftKey ? 24 : 8;
+        const delta = {
+          ArrowLeft: [-step, 0],
+          ArrowRight: [step, 0],
+          ArrowUp: [0, -step],
+          ArrowDown: [0, step]
+        }[event.key];
+        if (!delta) return;
+        event.preventDefault();
+        applyResize(expanded.getBoundingClientRect(), delta[0], delta[1]);
+        keepInViewport();
+        savePosition();
       });
     }
     function openHistory() {
@@ -2014,6 +2114,7 @@
     }
     makeDraggable(handle, { suppressClick: true });
     makeDraggable(header);
+    makeResizableFromBottomLeft(resizeHandle);
     handle.addEventListener("click", openHistory);
     skillsButton.addEventListener("pointerdown", (event) => {
       if (event.button === 0) event.preventDefault();

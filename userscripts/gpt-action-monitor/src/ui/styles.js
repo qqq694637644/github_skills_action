@@ -101,6 +101,47 @@ export const MONITOR_CSS = `
     #gpt-action-monitor.gam-dragging .gam-chip { opacity: 0; }
     #gpt-action-monitor.gam-dragging .gam-handle,
     #gpt-action-monitor.gam-dragging .gam-header { cursor: grabbing; }
+    #gpt-action-monitor .gam-resize-handle {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      width: 22px;
+      height: 22px;
+      z-index: 2;
+      padding: 0;
+      border: 0;
+      border-radius: 0 8px 0 10px;
+      background: transparent;
+      color: color-mix(in srgb, CanvasText 44%, transparent);
+      cursor: nesw-resize;
+      touch-action: none;
+    }
+    #gpt-action-monitor .gam-resize-handle::before {
+      content: "";
+      position: absolute;
+      left: 5px;
+      bottom: 5px;
+      width: 10px;
+      height: 10px;
+      background: repeating-linear-gradient(
+        45deg,
+        transparent 0 3px,
+        currentColor 3px 4px
+      );
+      clip-path: polygon(0 0, 0 100%, 100% 100%);
+      opacity: .72;
+      pointer-events: none;
+    }
+    #gpt-action-monitor .gam-resize-handle:hover,
+    #gpt-action-monitor .gam-resize-handle:focus-visible {
+      color: color-mix(in srgb, CanvasText 72%, transparent);
+      background: color-mix(in srgb, CanvasText 5%, transparent);
+      outline: none;
+    }
+    #gpt-action-monitor .gam-resize-handle:focus-visible {
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, CanvasText 30%, transparent);
+    }
+    #gpt-action-monitor.gam-resizing .gam-resize-handle { cursor: nesw-resize; }
     #gpt-action-monitor .gam-expanded { display: none; }
     #gpt-action-monitor.gam-open {
       width: auto;

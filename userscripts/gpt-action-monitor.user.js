@@ -714,16 +714,16 @@
     #gpt-action-monitor .gam-hint { opacity: .58; }
     #gpt-action-monitor .gam-skills-picker {
       position: absolute;
-      top: 38px;
+      top: 34px;
       right: 8px;
-      width: 260px;
+      width: 220px;
       z-index: 3;
-      max-height: 320px;
+      max-height: 240px;
       overflow-y: auto;
       background: color-mix(in srgb, Canvas 98%, CanvasText 2%);
       border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
       border-radius: 10px;
-      box-shadow: 0 10px 30px color-mix(in srgb, CanvasText 15%, transparent);
+      box-shadow: 0 8px 24px color-mix(in srgb, CanvasText 12%, transparent);
     }
     #gpt-action-monitor .gam-skills-picker[hidden] { display: none; }
     #gpt-action-monitor .gam-skills-picker-header {
@@ -742,6 +742,7 @@
       padding: 0;
       font-size: 16px;
       line-height: 1;
+      opacity: .55;
     }
     #gpt-action-monitor .gam-skills-list {
       min-height: 0;
@@ -754,7 +755,7 @@
       min-height: 32px;
       display: grid;
       align-items: center;
-      padding: 5px 7px;
+      padding: 8px 9px;
       border: 0;
       border-radius: 7px;
       background: transparent;
@@ -773,20 +774,6 @@
       text-overflow: ellipsis;
       white-space: nowrap;
       font-weight: 600;
-    }
-    #gpt-action-monitor .gam-skill-content {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-      min-width: 0;
-    }
-    #gpt-action-monitor .gam-skill-description {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      opacity: .6;
-      font-size: 11px;
-      font-weight: 400;
     }
     #gpt-action-monitor .gam-skills-state {
       padding: 12px 10px;
@@ -1604,14 +1591,8 @@
         item.type = "button";
         item.className = "gam-skill-item";
         item.setAttribute("role", "menuitem");
-        item.innerHTML = `
-        <span class="gam-skill-content">
-          <strong class="gam-skill-id"></strong>
-          <span class="gam-skill-description"></span>
-        </span>
-      `;
-        item.querySelector(".gam-skill-id").textContent = skill.skill_id;
-        item.querySelector(".gam-skill-description").textContent = skill.description || "";
+        item.textContent = skill.skill_id;
+        item.title = skill.description || skill.skill_id;
         item.addEventListener("pointerdown", preserveFocus);
         item.addEventListener("click", () => {
           if (onSelect(skill) !== false) close();

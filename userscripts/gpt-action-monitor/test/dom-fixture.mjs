@@ -211,7 +211,7 @@ export function installDomFixture() {
     addEventListener() {},
   };
 
-  globalThis.Node = { ELEMENT_NODE: 1 };
+  globalThis.Node = { ELEMENT_NODE: 1, TEXT_NODE: 3 };
   globalThis.document = document;
   globalThis.window = window;
   globalThis.MutationObserver = FakeMutationObserver;

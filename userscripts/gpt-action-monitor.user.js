@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.6.1
+// @version      0.6.2
 // @description  Show github_skills_action activity as a calm, energy-conscious status indicator on ChatGPT.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -296,7 +296,10 @@
     let activeTitleElement = null;
     let activeProfileId = null;
     function titleName(element) {
-      return (element?.textContent || "").replace(/\s+/g, " ").trim();
+      if (!element) return "";
+      const directText = [...element.childNodes || []].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent || "").join(" ").replace(/\s+/g, " ").trim();
+      if (directText) return directText;
+      return (element.textContent || "").replace(/\s+/g, " ").trim();
     }
     function matchingProfile(element) {
       if (!element || element.nodeType !== Node.ELEMENT_NODE || !element.matches(GPT_TITLE_SELECTOR)) return null;

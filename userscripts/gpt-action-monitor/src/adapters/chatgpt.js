@@ -6,7 +6,15 @@ export function createChatGPTAdapter({ getProfiles, onActivate, onDeactivate }) 
   let activeProfileId = null;
 
   function titleName(element) {
-    return (element?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!element) return '';
+    const directText = [...(element.childNodes || [])]
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent || '')
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (directText) return directText;
+    return (element.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
   function matchingProfile(element) {

@@ -704,23 +704,21 @@
       white-space: nowrap;
     }
     #gpt-action-monitor .gam-hint { opacity: .58; }
-    #gpt-action-monitor .gam-skills-menu {
+    #gpt-action-monitor .gam-skills-picker {
       position: absolute;
-      inset: 38px 0 0;
+      top: 38px;
+      right: 8px;
+      width: 260px;
       z-index: 3;
-      display: grid;
-      grid-template-columns: minmax(135px, .9fr) minmax(0, 1.1fr);
-      min-height: 0;
+      max-height: 320px;
+      overflow-y: auto;
       background: color-mix(in srgb, Canvas 98%, CanvasText 2%);
+      border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+      border-radius: 10px;
+      box-shadow: 0 10px 30px color-mix(in srgb, CanvasText 15%, transparent);
     }
-    #gpt-action-monitor .gam-skills-menu[hidden] { display: none; }
-    #gpt-action-monitor .gam-skills-primary {
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      border-right: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
-    }
-    #gpt-action-monitor .gam-skills-menu-header {
+    #gpt-action-monitor .gam-skills-picker[hidden] { display: none; }
+    #gpt-action-monitor .gam-skills-picker-header {
       height: 34px;
       flex: 0 0 34px;
       display: flex;
@@ -747,9 +745,7 @@
       width: 100%;
       min-height: 32px;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
-      gap: 6px;
       padding: 5px 7px;
       border: 0;
       border-radius: 7px;
@@ -770,24 +766,24 @@
       white-space: nowrap;
       font-weight: 600;
     }
-    #gpt-action-monitor .gam-skill-chevron { opacity: .45; font-size: 15px; }
+    #gpt-action-monitor .gam-skill-content {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    #gpt-action-monitor .gam-skill-description {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      opacity: .6;
+      font-size: 11px;
+      font-weight: 400;
+    }
     #gpt-action-monitor .gam-skills-state {
       padding: 12px 10px;
       color: color-mix(in srgb, CanvasText 58%, transparent);
       font-size: 11px;
-    }
-    #gpt-action-monitor .gam-skills-detail {
-      min-width: 0;
-      overflow-y: auto;
-      padding: 12px;
-      scrollbar-width: thin;
-    }
-    #gpt-action-monitor .gam-skills-detail[hidden] { display: none; }
-    #gpt-action-monitor .gam-skills-detail-description {
-      color: color-mix(in srgb, CanvasText 68%, transparent);
-      font-size: 11px;
-      line-height: 1.5;
-      overflow-wrap: anywhere;
     }
     @media (prefers-reduced-motion: reduce) {
       #gpt-action-monitor .gam-chip { transition: none; }
@@ -1560,132 +1556,109 @@
   // src/ui/skills-menu.js
   function createSkillsMenu({ loadSkills, onBeforeOpen, onSelect }) {
     const root = document.createElement("div");
-    root.className = "gam-skills-menu";
+    root.className = "gam-skills-picker";
     root.hidden = true;
     root.innerHTML = `
-    <div class="gam-skills-primary">
-      <div class="gam-skills-menu-header">
-        <strong>Skills</strong>
-        <button class="gam-skills-refresh" type="button" title="\u5237\u65B0 Skill \u5217\u8868" aria-label="\u5237\u65B0 Skill \u5217\u8868">\u21BB</button>
-      </div>
-      <div class="gam-skills-list" role="menu" aria-label="Skills"></div>
-      <div class="gam-skills-state" hidden></div>
+    <div class="gam-skills-picker-header">
+      <strong>Skills</strong>
+      <button class="gam-skills-refresh" type="button" title="\u5237\u65B0 Skill \u5217\u8868" aria-label="\u5237\u65B0 Skill \u5217\u8868">\u21BB</button>
     </div>
-    <aside class="gam-skills-detail" hidden>
-      <div class="gam-skills-detail-description"></div>
-    </aside>
+    <div class="gam-skills-state" hidden></div>
+    <div class="gam-skills-list" role="menu" aria-label="Skills"></div>
   `;
     const refreshButton = root.querySelector(".gam-skills-refresh");
-    const list = root.querySelector(".gam-skills-list");
     const state = root.querySelector(".gam-skills-state");
-    const detail = root.querySelector(".gam-skills-detail");
-    const detailDescription = root.querySelector(".gam-skills-detail-description");
+    const list = root.querySelector(".gam-skills-list");
     let open = false;
-    let requestGeneration = 0;
     let hasRendered = false;
+    let requestGeneration = 0;
     let triggerElement = null;
-    function preserveComposerFocus(event) {
+    function preserveFocus(event) {
       if (event.button === 0) event.preventDefault();
     }
-    function hideDetail() {
-      detail.hidden = true;
-      detailDescription.textContent = "";
-    }
-    function showDetail(skill) {
-      detailDescription.textContent = skill.description || "\u65E0 description";
-      detail.hidden = false;
-    }
-    function showState(message) {
-      list.replaceChildren();
+    function setState(message) {
       state.textContent = message;
       state.hidden = false;
-      hideDetail();
+    }
+    function clearState() {
+      state.hidden = true;
+      state.textContent = "";
     }
     function render(skills) {
       list.replaceChildren();
-      state.hidden = true;
-      hideDetail();
+      clearState();
       if (!skills.length) {
-        showState("\u540E\u7AEF\u6CA1\u6709\u53EF\u7528 Skill\u3002");
-        hasRendered = true;
+        setState("\u6CA1\u6709\u53EF\u7528 Skill\u3002");
         return;
       }
       for (const skill of skills) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "gam-skill-item";
-        button.setAttribute("role", "menuitem");
-        button.innerHTML = '<span class="gam-skill-id"></span><span class="gam-skill-chevron">\u203A</span>';
-        button.querySelector(".gam-skill-id").textContent = skill.skill_id;
-        button.addEventListener("pointerdown", preserveComposerFocus);
-        button.addEventListener("pointerenter", () => showDetail(skill));
-        button.addEventListener("focus", () => showDetail(skill));
-        button.addEventListener("click", () => {
-          const accepted = onSelect(skill);
-          if (accepted !== false) closeMenu();
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "gam-skill-item";
+        item.setAttribute("role", "menuitem");
+        item.innerHTML = `
+        <span class="gam-skill-content">
+          <strong class="gam-skill-id"></strong>
+          <span class="gam-skill-description"></span>
+        </span>
+      `;
+        item.querySelector(".gam-skill-id").textContent = skill.skill_id;
+        item.querySelector(".gam-skill-description").textContent = skill.description || "";
+        item.addEventListener("pointerdown", preserveFocus);
+        item.addEventListener("click", () => {
+          if (onSelect(skill) !== false) close();
         });
-        list.appendChild(button);
+        list.appendChild(item);
       }
       hasRendered = true;
     }
     async function refresh({ force = false } = {}) {
       const generation = ++requestGeneration;
-      if (hasRendered) {
-        state.textContent = force ? "\u6B63\u5728\u5237\u65B0\u2026" : "\u6B63\u5728\u8BFB\u53D6 Skills\u2026";
-        state.hidden = false;
-      } else {
-        showState("\u6B63\u5728\u8BFB\u53D6 Skills\u2026");
-      }
+      if (hasRendered) setState(force ? "\u5237\u65B0\u4E2D\u2026" : "\u52A0\u8F7D\u4E2D\u2026");
+      else setState("\u52A0\u8F7D Skills\u2026");
       try {
         const skills = await loadSkills({ refresh: force });
         if (!open || generation !== requestGeneration) return;
         render(skills);
       } catch (error) {
         if (!open || generation !== requestGeneration) return;
-        const message = error instanceof Error ? error.message : String(error);
-        if (hasRendered) {
-          state.textContent = message;
-          state.hidden = false;
-        } else {
-          showState(message);
-        }
+        setState(error instanceof Error ? error.message : String(error));
       }
     }
-    function onDocumentPointerDown(event) {
-      if (root.contains(event.target) || triggerElement?.contains?.(event.target)) return;
-      closeMenu();
+    function close() {
+      if (!open) return;
+      open = false;
+      requestGeneration += 1;
+      root.hidden = true;
+      document.removeEventListener("pointerdown", outsidePointer, true);
+      document.removeEventListener("keydown", escapeKey, true);
     }
-    function onDocumentKeyDown(event) {
-      if (event.key === "Escape") closeMenu();
+    function outsidePointer(event) {
+      if (root.contains(event.target) || triggerElement?.contains?.(event.target)) return;
+      close();
+    }
+    function escapeKey(event) {
+      if (event.key === "Escape") close();
     }
     function openMenu() {
       if (open) return;
       onBeforeOpen?.();
       open = true;
       root.hidden = false;
-      document.addEventListener("pointerdown", onDocumentPointerDown, true);
-      document.addEventListener("keydown", onDocumentKeyDown, true);
+      document.addEventListener("pointerdown", outsidePointer, true);
+      document.addEventListener("keydown", escapeKey, true);
       refresh();
     }
-    function closeMenu() {
-      if (!open) return;
-      open = false;
-      requestGeneration += 1;
-      root.hidden = true;
-      hideDetail();
-      document.removeEventListener("pointerdown", onDocumentPointerDown, true);
-      document.removeEventListener("keydown", onDocumentKeyDown, true);
-    }
     function toggle() {
-      if (open) closeMenu();
+      if (open) close();
       else openMenu();
     }
     function bindTrigger(element) {
       triggerElement = element;
     }
-    refreshButton.addEventListener("pointerdown", preserveComposerFocus);
+    refreshButton.addEventListener("pointerdown", preserveFocus);
     refreshButton.addEventListener("click", () => refresh({ force: true }));
-    return { element: root, open: openMenu, close: closeMenu, toggle, bindTrigger };
+    return { element: root, open: openMenu, close, toggle, bindTrigger };
   }
 
   // src/main.js

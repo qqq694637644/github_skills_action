@@ -1,6 +1,7 @@
 export function createSkillCatalogClient({ getProfile }) {
   const cache = new Map();
   const pending = new Map();
+  const storagePrefix = 'gptActionMonitorSkillCatalog:';
 
   function profileKey(profile) {
     return `${profile.id || ''}\u0000${profile.backend}`;
@@ -37,6 +38,7 @@ export function createSkillCatalogClient({ getProfile }) {
                 description: typeof skill.description === 'string' ? skill.description : '',
               }));
             cache.set(key, normalized);
+            GM_setValue(`${storagePrefix}${key}`, normalized);
             resolve(normalized);
           } catch (error) {
             reject(new Error(`Skill 列表解析失败：${String(error)}`));
@@ -58,6 +60,13 @@ export function createSkillCatalogClient({ getProfile }) {
     const key = profileKey(profile);
 
     if (!refresh && cache.has(key)) return cache.get(key);
+    if (!refresh) {
+      const stored = GM_getValue(`${storagePrefix}${key}`, null);
+      if (Array.isArray(stored)) {
+        cache.set(key, stored);
+        return stored;
+      }
+    }
     if (pending.has(key)) return pending.get(key);
 
     const request = requestCatalog(profile, key).finally(() => {

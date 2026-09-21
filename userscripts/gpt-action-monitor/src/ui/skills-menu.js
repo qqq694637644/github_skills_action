@@ -60,8 +60,8 @@ export function createSkillsMenu({ loadSkills, onBeforeOpen, onSelect }) {
 
   async function refresh({ force = false } = {}) {
     const generation = ++requestGeneration;
-    if (hasRendered) setState(force ? '刷新中…' : '加载中…');
-    else setState('加载 Skills…');
+    if (force) setState('刷新中…');
+    else if (!hasRendered) setState('加载 Skills…');
 
     try {
       const skills = await loadSkills({ refresh: force });

@@ -47,14 +47,8 @@ export function createSkillsMenu({ loadSkills, onBeforeOpen, onSelect }) {
       item.type = 'button';
       item.className = 'gam-skill-item';
       item.setAttribute('role', 'menuitem');
-      item.innerHTML = `
-        <span class="gam-skill-content">
-          <strong class="gam-skill-id"></strong>
-          <span class="gam-skill-description"></span>
-        </span>
-      `;
-      item.querySelector('.gam-skill-id').textContent = skill.skill_id;
-      item.querySelector('.gam-skill-description').textContent = skill.description || '';
+      item.textContent = skill.skill_id;
+      item.title = skill.description || skill.skill_id;
       item.addEventListener('pointerdown', preserveFocus);
       item.addEventListener('click', () => {
         if (onSelect(skill) !== false) close();

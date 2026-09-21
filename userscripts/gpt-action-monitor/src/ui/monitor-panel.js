@@ -2,7 +2,7 @@ import { ACTIVITY_VISIBLE_MS, COMPACT_WIDTH, POSITION_KEY, UI_COALESCE_MS } from
 import { MONITOR_CSS } from './styles.js';
 import { createHistoryPanel } from './history-panel.js';
 
-export function createMonitorPanel({ eventStore, isActive }) {
+export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) {
   const panel = document.createElement('div');
   panel.id = 'gpt-action-monitor';
   panel.dataset.status = 'idle';
@@ -19,7 +19,10 @@ export function createMonitorPanel({ eventStore, isActive }) {
     <section class="gam-expanded" aria-label="GPT Action 历史">
       <div class="gam-header">
         <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
-        <button class="gam-close" type="button" title="收起" aria-label="收起 Action 历史">−</button>
+        <div class="gam-header-controls">
+          <button class="gam-skills-button" type="button" aria-haspopup="menu" aria-label="打开 Skills">Skills ›</button>
+          <button class="gam-close" type="button" title="收起" aria-label="收起 Action 历史">−</button>
+        </div>
       </div>
       <div class="gam-log" role="log" aria-label="Action 历史"></div>
     </section>
@@ -30,11 +33,14 @@ export function createMonitorPanel({ eventStore, isActive }) {
 
   const handle = panel.querySelector('.gam-handle');
   const close = panel.querySelector('.gam-close');
+  const skillsButton = panel.querySelector('.gam-skills-button');
   const header = panel.querySelector('.gam-header');
   const logBox = panel.querySelector('.gam-log');
   const currentAction = panel.querySelector('.gam-current-action');
   const currentDetail = panel.querySelector('.gam-current-detail');
   const historyPanel = createHistoryPanel({ logBox, eventStore });
+  if (skillsMenu?.element) panel.querySelector('.gam-expanded').appendChild(skillsMenu.element);
+  skillsMenu?.bindTrigger?.(skillsButton);
 
   let manualOpen = false;
   let suppressHandleClick = false;
@@ -100,7 +106,10 @@ export function createMonitorPanel({ eventStore, isActive }) {
 
   function makeDraggable(dragHandle, { suppressClick = false } = {}) {
     dragHandle.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0 || event.target.closest('.gam-close')) return;
+      if (
+        event.button !== 0
+        || event.target.closest('.gam-close, .gam-skills-button, .gam-skills-menu')
+      ) return;
       const startRect = panel.getBoundingClientRect();
       const startX = event.clientX;
       const startY = event.clientY;
@@ -172,6 +181,7 @@ export function createMonitorPanel({ eventStore, isActive }) {
     const openRect = panel.getBoundingClientRect();
     const rightEdge = openRect.right;
     manualOpen = false;
+    skillsMenu?.close();
     panel.classList.remove('gam-open');
     if (panel.classList.contains('gam-detached')) {
       panel.style.left = `${Math.round(rightEdge - COMPACT_WIDTH)}px`;
@@ -276,6 +286,7 @@ export function createMonitorPanel({ eventStore, isActive }) {
     if (panel.dataset.status === 'active') setStatus('idle');
     panel.classList.remove('gam-open', 'gam-chip-visible', 'gam-dragging');
     manualOpen = false;
+    skillsMenu?.close();
     historyPanel.clear();
     panel.remove();
     style.remove();
@@ -284,6 +295,10 @@ export function createMonitorPanel({ eventStore, isActive }) {
   makeDraggable(handle, { suppressClick: true });
   makeDraggable(header);
   handle.addEventListener('click', openHistory);
+  skillsButton.addEventListener('pointerdown', (event) => {
+    if (event.button === 0) event.preventDefault();
+  });
+  skillsButton.addEventListener('click', () => skillsMenu?.toggle());
   close.addEventListener('click', closeHistory);
 
   return {

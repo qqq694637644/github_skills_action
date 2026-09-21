@@ -48,8 +48,10 @@ export class FakeElement {
     if (!value.includes('gam-handle')) return;
     for (const selector of [
       '.gam-handle',
+      '.gam-skills-button',
       '.gam-close',
       '.gam-header',
+      '.gam-expanded',
       '.gam-log',
       '.gam-current-action',
       '.gam-current-detail',

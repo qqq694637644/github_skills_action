@@ -175,6 +175,7 @@ class SkillRuntime:
         return skills
 
     def list_skills(self) -> dict[str, Any]:
+        self._skills = self._load_skills()
         return {
             "skills_dir": str(self.skills_dir),
             "skills": [

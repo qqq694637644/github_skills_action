@@ -108,6 +108,7 @@ export const MONITOR_CSS = `
     }
     #gpt-action-monitor.gam-open .gam-compact { display: none; }
     #gpt-action-monitor.gam-open .gam-expanded {
+      position: relative;
       width: 100%;
       height: 100%;
       display: flex;
@@ -139,6 +140,31 @@ export const MONITOR_CSS = `
       display: flex;
       align-items: center;
       gap: 7px;
+    }
+    #gpt-action-monitor .gam-header-controls {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+    }
+    #gpt-action-monitor .gam-skills-button,
+    #gpt-action-monitor .gam-skills-refresh {
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+    }
+    #gpt-action-monitor .gam-skills-button {
+      height: 28px;
+      padding: 0 7px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    #gpt-action-monitor .gam-skills-button:hover,
+    #gpt-action-monitor .gam-skills-button:focus-visible,
+    #gpt-action-monitor .gam-skills-refresh:hover,
+    #gpt-action-monitor .gam-skills-refresh:focus-visible {
+      background: color-mix(in srgb, CanvasText 7%, transparent);
     }
     #gpt-action-monitor .gam-close {
       width: 28px;
@@ -189,6 +215,91 @@ export const MONITOR_CSS = `
       white-space: nowrap;
     }
     #gpt-action-monitor .gam-hint { opacity: .58; }
+    #gpt-action-monitor .gam-skills-menu {
+      position: absolute;
+      inset: 38px 0 0;
+      z-index: 3;
+      display: grid;
+      grid-template-columns: minmax(135px, .9fr) minmax(0, 1.1fr);
+      min-height: 0;
+      background: color-mix(in srgb, Canvas 98%, CanvasText 2%);
+    }
+    #gpt-action-monitor .gam-skills-menu[hidden] { display: none; }
+    #gpt-action-monitor .gam-skills-primary {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+    }
+    #gpt-action-monitor .gam-skills-menu-header {
+      height: 34px;
+      flex: 0 0 34px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 7px 0 10px;
+      border-bottom: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+      font-size: 11px;
+    }
+    #gpt-action-monitor .gam-skills-refresh {
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      font-size: 16px;
+      line-height: 1;
+    }
+    #gpt-action-monitor .gam-skills-list {
+      min-height: 0;
+      overflow-y: auto;
+      padding: 5px;
+      scrollbar-width: thin;
+    }
+    #gpt-action-monitor .gam-skill-item {
+      width: 100%;
+      min-height: 32px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 7px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      text-align: left;
+    }
+    #gpt-action-monitor .gam-skill-item:hover,
+    #gpt-action-monitor .gam-skill-item:focus-visible {
+      background: color-mix(in srgb, CanvasText 7%, transparent);
+      outline: none;
+    }
+    #gpt-action-monitor .gam-skill-id {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    #gpt-action-monitor .gam-skill-chevron { opacity: .45; font-size: 15px; }
+    #gpt-action-monitor .gam-skills-state {
+      padding: 12px 10px;
+      color: color-mix(in srgb, CanvasText 58%, transparent);
+      font-size: 11px;
+    }
+    #gpt-action-monitor .gam-skills-detail {
+      min-width: 0;
+      overflow-y: auto;
+      padding: 12px;
+      scrollbar-width: thin;
+    }
+    #gpt-action-monitor .gam-skills-detail[hidden] { display: none; }
+    #gpt-action-monitor .gam-skills-detail-description {
+      color: color-mix(in srgb, CanvasText 68%, transparent);
+      font-size: 11px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
     @media (prefers-reduced-motion: reduce) {
       #gpt-action-monitor .gam-chip { transition: none; }
     }

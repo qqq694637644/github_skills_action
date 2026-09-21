@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.5.0
+// @version      0.6.0
 // @description  Show github_skills_action activity as a calm, energy-conscious status indicator on ChatGPT.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -200,6 +200,61 @@
     return { start, stop, suspend, resume, poll };
   }
 
+  // src/api/skill-catalog-client.js
+  function createSkillCatalogClient({ getProfile }) {
+    let cachedSkills = null;
+    function requestCatalog() {
+      const profile = getProfile();
+      if (!profile) return Promise.reject(new Error("\u6CA1\u6709\u6D3B\u52A8\u7684\u540E\u7AEF\u914D\u7F6E\u3002"));
+      const headers = {};
+      if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: "GET",
+          url: `${profile.backend}/v1/skills`,
+          headers,
+          timeout: 7e3,
+          onload(response) {
+            if (response.status === 401) {
+              reject(new Error("\u8BA4\u8BC1\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5 Bearer Token\u3002"));
+              return;
+            }
+            if (response.status < 200 || response.status >= 300) {
+              reject(new Error(`\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\u3002`));
+              return;
+            }
+            try {
+              const body = JSON.parse(response.responseText);
+              const skills = Array.isArray(body.skills) ? body.skills : [];
+              cachedSkills = skills.filter((skill) => skill && typeof skill.skill_id === "string").map((skill) => ({
+                skill_id: skill.skill_id,
+                name: typeof skill.name === "string" ? skill.name : skill.skill_id,
+                description: typeof skill.description === "string" ? skill.description : ""
+              }));
+              resolve(cachedSkills);
+            } catch (error) {
+              reject(new Error(`Skill \u5217\u8868\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`));
+            }
+          },
+          onerror() {
+            reject(new Error("\u65E0\u6CD5\u8FDE\u63A5\u540E\u7AEF\u3002"));
+          },
+          ontimeout() {
+            reject(new Error("\u8BFB\u53D6 Skill \u5217\u8868\u8D85\u65F6\u3002"));
+          }
+        });
+      });
+    }
+    async function list({ refresh = false } = {}) {
+      if (!refresh && cachedSkills !== null) return cachedSkills;
+      return requestCatalog();
+    }
+    function clear() {
+      cachedSkills = null;
+    }
+    return { list, clear };
+  }
+
   // src/adapters/chatgpt.js
   function createChatGPTAdapter({ getProfiles, onActivate, onDeactivate }) {
     let observer = null;
@@ -275,6 +330,96 @@
       observer = null;
     }
     return { start, stop, evaluateActivation };
+  }
+
+  // src/adapters/composer.js
+  var CONTENTEDITABLE_SELECTOR = '[data-composer-body] #prompt-textarea[contenteditable="true"], #prompt-textarea[contenteditable="true"]';
+  var TEXTAREA_SELECTOR = '[data-composer-body] textarea[name="prompt-textarea"], textarea[name="prompt-textarea"]';
+  function containsNode(root, node) {
+    if (!root || !node) return false;
+    if (root === node) return true;
+    return typeof root.contains === "function" ? root.contains(node) : false;
+  }
+  function createComposerAdapter() {
+    let savedRange = null;
+    let savedTextareaSelection = null;
+    function findContenteditable() {
+      return document.querySelector(CONTENTEDITABLE_SELECTOR);
+    }
+    function findTextarea() {
+      const textarea = document.querySelector(TEXTAREA_SELECTOR);
+      return textarea && textarea.offsetParent !== null ? textarea : null;
+    }
+    function captureSelection() {
+      savedRange = null;
+      savedTextareaSelection = null;
+      const textarea = findTextarea();
+      if (textarea && document.activeElement === textarea) {
+        savedTextareaSelection = {
+          element: textarea,
+          start: textarea.selectionStart,
+          end: textarea.selectionEnd
+        };
+        return true;
+      }
+      const editor = findContenteditable();
+      const selection = window.getSelection?.();
+      if (!editor || !selection || selection.rangeCount === 0) return false;
+      const range = selection.getRangeAt(0);
+      if (!containsNode(editor, range.commonAncestorContainer)) return false;
+      savedRange = range.cloneRange();
+      return true;
+    }
+    function placeCaretAtEnd(editor) {
+      const selection = window.getSelection?.();
+      if (!selection || typeof document.createRange !== "function") return false;
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return true;
+    }
+    function restoreRange(editor) {
+      if (!savedRange || !containsNode(editor, savedRange.commonAncestorContainer)) {
+        return placeCaretAtEnd(editor);
+      }
+      const selection = window.getSelection?.();
+      if (!selection) return false;
+      selection.removeAllRanges();
+      selection.addRange(savedRange);
+      return true;
+    }
+    function insertIntoTextarea(textarea, text) {
+      const saved = savedTextareaSelection?.element === textarea ? savedTextareaSelection : null;
+      const start = saved?.start ?? textarea.selectionStart ?? textarea.value.length;
+      const end = saved?.end ?? textarea.selectionEnd ?? start;
+      textarea.focus({ preventScroll: true });
+      textarea.setRangeText(text, start, end, "end");
+      textarea.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+      return true;
+    }
+    function insertText(text) {
+      const textarea = findTextarea();
+      if (textarea) {
+        const inserted2 = insertIntoTextarea(textarea, text);
+        savedTextareaSelection = null;
+        savedRange = null;
+        return inserted2;
+      }
+      const editor = findContenteditable();
+      if (!editor) return false;
+      editor.focus({ preventScroll: true });
+      restoreRange(editor);
+      const inserted = typeof document.execCommand === "function" ? document.execCommand("insertText", false, text) : false;
+      savedRange = null;
+      savedTextareaSelection = null;
+      return Boolean(inserted);
+    }
+    return { captureSelection, insertText };
+  }
+  function loadSkillsCall(skillId) {
+    return `loadSkills(${JSON.stringify([skillId])})`;
   }
 
   // src/store/event-store.js
@@ -452,6 +597,7 @@
     }
     #gpt-action-monitor.gam-open .gam-compact { display: none; }
     #gpt-action-monitor.gam-open .gam-expanded {
+      position: relative;
       width: 100%;
       height: 100%;
       display: flex;
@@ -483,6 +629,31 @@
       display: flex;
       align-items: center;
       gap: 7px;
+    }
+    #gpt-action-monitor .gam-header-controls {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+    }
+    #gpt-action-monitor .gam-skills-button,
+    #gpt-action-monitor .gam-skills-refresh {
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+    }
+    #gpt-action-monitor .gam-skills-button {
+      height: 28px;
+      padding: 0 7px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    #gpt-action-monitor .gam-skills-button:hover,
+    #gpt-action-monitor .gam-skills-button:focus-visible,
+    #gpt-action-monitor .gam-skills-refresh:hover,
+    #gpt-action-monitor .gam-skills-refresh:focus-visible {
+      background: color-mix(in srgb, CanvasText 7%, transparent);
     }
     #gpt-action-monitor .gam-close {
       width: 28px;
@@ -533,6 +704,91 @@
       white-space: nowrap;
     }
     #gpt-action-monitor .gam-hint { opacity: .58; }
+    #gpt-action-monitor .gam-skills-menu {
+      position: absolute;
+      inset: 38px 0 0;
+      z-index: 3;
+      display: grid;
+      grid-template-columns: minmax(135px, .9fr) minmax(0, 1.1fr);
+      min-height: 0;
+      background: color-mix(in srgb, Canvas 98%, CanvasText 2%);
+    }
+    #gpt-action-monitor .gam-skills-menu[hidden] { display: none; }
+    #gpt-action-monitor .gam-skills-primary {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+    }
+    #gpt-action-monitor .gam-skills-menu-header {
+      height: 34px;
+      flex: 0 0 34px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 7px 0 10px;
+      border-bottom: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+      font-size: 11px;
+    }
+    #gpt-action-monitor .gam-skills-refresh {
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      font-size: 16px;
+      line-height: 1;
+    }
+    #gpt-action-monitor .gam-skills-list {
+      min-height: 0;
+      overflow-y: auto;
+      padding: 5px;
+      scrollbar-width: thin;
+    }
+    #gpt-action-monitor .gam-skill-item {
+      width: 100%;
+      min-height: 32px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 7px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      text-align: left;
+    }
+    #gpt-action-monitor .gam-skill-item:hover,
+    #gpt-action-monitor .gam-skill-item:focus-visible {
+      background: color-mix(in srgb, CanvasText 7%, transparent);
+      outline: none;
+    }
+    #gpt-action-monitor .gam-skill-id {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    #gpt-action-monitor .gam-skill-chevron { opacity: .45; font-size: 15px; }
+    #gpt-action-monitor .gam-skills-state {
+      padding: 12px 10px;
+      color: color-mix(in srgb, CanvasText 58%, transparent);
+      font-size: 11px;
+    }
+    #gpt-action-monitor .gam-skills-detail {
+      min-width: 0;
+      overflow-y: auto;
+      padding: 12px;
+      scrollbar-width: thin;
+    }
+    #gpt-action-monitor .gam-skills-detail[hidden] { display: none; }
+    #gpt-action-monitor .gam-skills-detail-description {
+      color: color-mix(in srgb, CanvasText 68%, transparent);
+      font-size: 11px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
     @media (prefers-reduced-motion: reduce) {
       #gpt-action-monitor .gam-chip { transition: none; }
     }
@@ -761,7 +1017,7 @@
   }
 
   // src/ui/monitor-panel.js
-  function createMonitorPanel({ eventStore, isActive }) {
+  function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) {
     const panel = document.createElement("div");
     panel.id = "gpt-action-monitor";
     panel.dataset.status = "idle";
@@ -778,7 +1034,10 @@
     <section class="gam-expanded" aria-label="GPT Action \u5386\u53F2">
       <div class="gam-header">
         <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
-        <button class="gam-close" type="button" title="\u6536\u8D77" aria-label="\u6536\u8D77 Action \u5386\u53F2">\u2212</button>
+        <div class="gam-header-controls">
+          <button class="gam-skills-button" type="button" aria-haspopup="menu" aria-label="\u6253\u5F00 Skills">Skills \u203A</button>
+          <button class="gam-close" type="button" title="\u6536\u8D77" aria-label="\u6536\u8D77 Action \u5386\u53F2">\u2212</button>
+        </div>
       </div>
       <div class="gam-log" role="log" aria-label="Action \u5386\u53F2"></div>
     </section>
@@ -787,11 +1046,14 @@
     style.textContent = MONITOR_CSS;
     const handle = panel.querySelector(".gam-handle");
     const close = panel.querySelector(".gam-close");
+    const skillsButton = panel.querySelector(".gam-skills-button");
     const header = panel.querySelector(".gam-header");
     const logBox = panel.querySelector(".gam-log");
     const currentAction = panel.querySelector(".gam-current-action");
     const currentDetail = panel.querySelector(".gam-current-detail");
     const historyPanel = createHistoryPanel({ logBox, eventStore });
+    if (skillsMenu?.element) panel.querySelector(".gam-expanded").appendChild(skillsMenu.element);
+    skillsMenu?.bindTrigger?.(skillsButton);
     let manualOpen = false;
     let suppressHandleClick = false;
     let activityTimer = null;
@@ -849,7 +1111,7 @@
     }
     function makeDraggable(dragHandle, { suppressClick = false } = {}) {
       dragHandle.addEventListener("pointerdown", (event) => {
-        if (event.button !== 0 || event.target.closest(".gam-close")) return;
+        if (event.button !== 0 || event.target.closest(".gam-close, .gam-skills-button, .gam-skills-menu")) return;
         const startRect = panel.getBoundingClientRect();
         const startX = event.clientX;
         const startY = event.clientY;
@@ -916,6 +1178,7 @@
       const openRect = panel.getBoundingClientRect();
       const rightEdge = openRect.right;
       manualOpen = false;
+      skillsMenu?.close();
       panel.classList.remove("gam-open");
       if (panel.classList.contains("gam-detached")) {
         panel.style.left = `${Math.round(rightEdge - COMPACT_WIDTH)}px`;
@@ -1008,6 +1271,7 @@
       if (panel.dataset.status === "active") setStatus("idle");
       panel.classList.remove("gam-open", "gam-chip-visible", "gam-dragging");
       manualOpen = false;
+      skillsMenu?.close();
       historyPanel.clear();
       panel.remove();
       style.remove();
@@ -1015,6 +1279,10 @@
     makeDraggable(handle, { suppressClick: true });
     makeDraggable(header);
     handle.addEventListener("click", openHistory);
+    skillsButton.addEventListener("pointerdown", (event) => {
+      if (event.button === 0) event.preventDefault();
+    });
+    skillsButton.addEventListener("click", () => skillsMenu?.toggle());
     close.addEventListener("click", closeHistory);
     return {
       mount,
@@ -1289,6 +1557,137 @@
     return { open, close };
   }
 
+  // src/ui/skills-menu.js
+  function createSkillsMenu({ loadSkills, onBeforeOpen, onSelect }) {
+    const root = document.createElement("div");
+    root.className = "gam-skills-menu";
+    root.hidden = true;
+    root.innerHTML = `
+    <div class="gam-skills-primary">
+      <div class="gam-skills-menu-header">
+        <strong>Skills</strong>
+        <button class="gam-skills-refresh" type="button" title="\u5237\u65B0 Skill \u5217\u8868" aria-label="\u5237\u65B0 Skill \u5217\u8868">\u21BB</button>
+      </div>
+      <div class="gam-skills-list" role="menu" aria-label="Skills"></div>
+      <div class="gam-skills-state" hidden></div>
+    </div>
+    <aside class="gam-skills-detail" hidden>
+      <div class="gam-skills-detail-description"></div>
+    </aside>
+  `;
+    const refreshButton = root.querySelector(".gam-skills-refresh");
+    const list = root.querySelector(".gam-skills-list");
+    const state = root.querySelector(".gam-skills-state");
+    const detail = root.querySelector(".gam-skills-detail");
+    const detailDescription = root.querySelector(".gam-skills-detail-description");
+    let open = false;
+    let requestGeneration = 0;
+    let hasRendered = false;
+    let triggerElement = null;
+    function preserveComposerFocus(event) {
+      if (event.button === 0) event.preventDefault();
+    }
+    function hideDetail() {
+      detail.hidden = true;
+      detailDescription.textContent = "";
+    }
+    function showDetail(skill) {
+      detailDescription.textContent = skill.description || "\u65E0 description";
+      detail.hidden = false;
+    }
+    function showState(message) {
+      list.replaceChildren();
+      state.textContent = message;
+      state.hidden = false;
+      hideDetail();
+    }
+    function render(skills) {
+      list.replaceChildren();
+      state.hidden = true;
+      hideDetail();
+      if (!skills.length) {
+        showState("\u540E\u7AEF\u6CA1\u6709\u53EF\u7528 Skill\u3002");
+        hasRendered = true;
+        return;
+      }
+      for (const skill of skills) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "gam-skill-item";
+        button.setAttribute("role", "menuitem");
+        button.innerHTML = '<span class="gam-skill-id"></span><span class="gam-skill-chevron">\u203A</span>';
+        button.querySelector(".gam-skill-id").textContent = skill.skill_id;
+        button.addEventListener("pointerdown", preserveComposerFocus);
+        button.addEventListener("pointerenter", () => showDetail(skill));
+        button.addEventListener("focus", () => showDetail(skill));
+        button.addEventListener("click", () => {
+          const accepted = onSelect(skill);
+          if (accepted !== false) closeMenu();
+        });
+        list.appendChild(button);
+      }
+      hasRendered = true;
+    }
+    async function refresh({ force = false } = {}) {
+      const generation = ++requestGeneration;
+      if (hasRendered) {
+        state.textContent = force ? "\u6B63\u5728\u5237\u65B0\u2026" : "\u6B63\u5728\u8BFB\u53D6 Skills\u2026";
+        state.hidden = false;
+      } else {
+        showState("\u6B63\u5728\u8BFB\u53D6 Skills\u2026");
+      }
+      try {
+        const skills = await loadSkills({ refresh: force });
+        if (!open || generation !== requestGeneration) return;
+        render(skills);
+      } catch (error) {
+        if (!open || generation !== requestGeneration) return;
+        const message = error instanceof Error ? error.message : String(error);
+        if (hasRendered) {
+          state.textContent = message;
+          state.hidden = false;
+        } else {
+          showState(message);
+        }
+      }
+    }
+    function onDocumentPointerDown(event) {
+      if (root.contains(event.target) || triggerElement?.contains?.(event.target)) return;
+      closeMenu();
+    }
+    function onDocumentKeyDown(event) {
+      if (event.key === "Escape") closeMenu();
+    }
+    function openMenu() {
+      if (open) return;
+      onBeforeOpen?.();
+      open = true;
+      root.hidden = false;
+      document.addEventListener("pointerdown", onDocumentPointerDown, true);
+      document.addEventListener("keydown", onDocumentKeyDown, true);
+      refresh();
+    }
+    function closeMenu() {
+      if (!open) return;
+      open = false;
+      requestGeneration += 1;
+      root.hidden = true;
+      hideDetail();
+      document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+      document.removeEventListener("keydown", onDocumentKeyDown, true);
+    }
+    function toggle() {
+      if (open) closeMenu();
+      else openMenu();
+    }
+    function bindTrigger(element) {
+      triggerElement = element;
+    }
+    refreshButton.addEventListener("pointerdown", preserveComposerFocus);
+    refreshButton.addEventListener("click", () => refresh({ force: true }));
+    return { element: root, open: openMenu, close: closeMenu, toggle, bindTrigger };
+  }
+
   // src/main.js
   (function() {
     "use strict";
@@ -1297,10 +1696,27 @@
     let activeProfile = null;
     let actionLogClient = null;
     let chatAdapter = null;
+    const composerAdapter = createComposerAdapter();
+    const skillCatalogClient = createSkillCatalogClient({
+      getProfile: () => activeProfile
+    });
     const eventStore = createEventStore();
-    const monitorUi = createMonitorPanel({
+    let monitorUi = null;
+    const skillsMenu = createSkillsMenu({
+      loadSkills: (options) => skillCatalogClient.list(options),
+      onBeforeOpen: () => composerAdapter.captureSelection(),
+      onSelect(skill) {
+        const inserted = composerAdapter.insertText(loadSkillsCall(skill.skill_id));
+        if (!inserted) {
+          monitorUi?.showAttention("\u63D2\u5165\u5931\u8D25", "\u672A\u627E\u5230 ChatGPT \u8F93\u5165\u6846");
+        }
+        return inserted;
+      }
+    });
+    monitorUi = createMonitorPanel({
       eventStore,
-      isActive: () => monitorActive
+      isActive: () => monitorActive,
+      skillsMenu
     });
     function deactivateMonitor() {
       if (!monitorActive) return;
@@ -1308,6 +1724,8 @@
       activeProfile = null;
       actionLogClient?.stop();
       actionLogClient = null;
+      skillCatalogClient.clear();
+      skillsMenu.close();
       eventStore.clear();
       monitorUi.unmount();
     }
@@ -1328,6 +1746,7 @@
       if (monitorActive) deactivateMonitor();
       monitorActive = true;
       activeProfile = profile;
+      skillCatalogClient.clear();
       eventStore.clear();
       monitorUi.mount();
       monitorUi.setStatus("idle");

@@ -6,7 +6,8 @@ The installable Tampermonkey script is `userscripts/gpt-action-monitor.user.js`.
 
 - `src/main.js` — lifecycle/bootstrap only.
 - `src/api/` — action-log transport and polling.
-- `src/adapters/` — ChatGPT page integration.
+- `src/api/skill-catalog-client.js` — on-demand Skill catalog reads with in-page caching and explicit refresh.
+- `src/adapters/` — ChatGPT page integration and composer insertion.
 - `src/formatter/` — backend log parsing and display summaries.
 - `src/profile/` — profile persistence and validation.
 - `src/store/` — bounded event history.
@@ -23,3 +24,5 @@ npm run check
 ```
 
 `npm run build` rewrites `../gpt-action-monitor.user.js`. The generated file is committed so users can install it directly from GitHub, while maintenance stays in small, responsibility-focused source files.
+
+The expanded monitor includes a `Skills` menu. Opening it fetches the active backend catalog on demand; `↻` explicitly refreshes the backend catalog, and clicking a Skill inserts `loadSkills(["<skill-id>"])` at the ChatGPT composer caret without sending the message.

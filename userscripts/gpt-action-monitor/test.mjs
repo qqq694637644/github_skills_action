@@ -223,6 +223,83 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.deepEqual(presentation.lines, ['AssertionError: expected value', '1 failed, 48 passed']);
 }
 
+// Target-specific GPT Action endpoints can publish generic structured events;
+// render their operation payloads as human activity instead of "Completed action".
+{
+  const cases = [
+    {
+      payload: {
+        operation: 'get_section_locator',
+        section_id: '2.6.5',
+        title: 'Spatial Operations',
+        printed_page_start: '105',
+        printed_page_end: '105',
+      },
+      title: 'Got section locator 2.6.5',
+      lines: ['Spatial Operations', 'Page 105'],
+    },
+    {
+      payload: {
+        operation: 'get_exercise_locator',
+        exercise_id: '2.14',
+        printed_page_start: '141',
+        printed_page_end: '141',
+        reference_count: 1,
+      },
+      title: 'Got exercise locator 2.14',
+      lines: ['Page 141', '1 reference'],
+    },
+    {
+      payload: {
+        operation: 'list_chapter_exercises',
+        chapter_id: '2',
+        exercise_count: 2,
+        first_exercise: '2.14',
+        last_exercise: '2.15',
+      },
+      title: 'Listed chapter 2 exercises',
+      lines: ['2 exercises', '2.14–2.15'],
+    },
+  ];
+  for (const [index, testCase] of cases.entries()) {
+    const presentation = presentActivity({
+      id: `locator:${index}`,
+      kind: 'generic',
+      phase: 'completed',
+      payload: testCase.payload,
+      revision: 1,
+    });
+    assert.equal(presentation.title, testCase.title);
+    assert.deepEqual(presentation.lines, testCase.lines);
+  }
+
+  const running = presentActivity({
+    id: 'locator:running',
+    kind: 'generic',
+    phase: 'started',
+    payload: { operation: 'get_section_locator', section_id: '3.1.5' },
+    revision: 1,
+  });
+  assert.equal(running.status, 'active');
+  assert.equal(running.title, 'Getting section locator 3.1.5');
+
+  const failedLocator = presentActivity({
+    id: 'locator:failed',
+    kind: 'generic',
+    phase: 'failed',
+    payload: {
+      operation: 'get_section_locator',
+      section_id: '2.6.99',
+      error_code: 'SECTION_NOT_FOUND',
+      diagnostic: 'Section not found',
+    },
+    revision: 1,
+  });
+  assert.equal(failedLocator.status, 'failed');
+  assert.equal(failedLocator.title, 'Failed to get section locator 2.6.99');
+  assert.deepEqual(failedLocator.lines, ['Section not found']);
+}
+
 // Consecutive inspect/search/read activity is coalesced into one Codex-style
 // Explored history cell; a non-exploration cell breaks the group.
 {

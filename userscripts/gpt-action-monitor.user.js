@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.7.2
+// @version      0.7.3
 // @description  Show Codex-style github_skills_action activity on ChatGPT without changing the page layout.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -608,7 +608,10 @@
       workspaceApplyPatch: "Edited files",
       workspaceWriteFile: "Wrote file",
       loadSkills: "Loaded skill",
-      readSkillContent: "Read skill"
+      readSkillContent: "Read skill",
+      gptGetSectionLocator: "Got section locator",
+      gptGetExerciseLocator: "Got exercise locator",
+      gptListChapterExercises: "Listed chapter exercises"
     };
     return {
       status: "completed",
@@ -617,8 +620,59 @@
       detail: detail || titles[action] || "Completed action"
     };
   }
+  function locatorPresentation(cell) {
+    const payload = cell.payload || {};
+    const active = cell.phase === "started" || cell.phase === "updated";
+    const status = cell.phase === "failed" ? "failed" : active ? "active" : "completed";
+    const pageLabel = payload.printed_page_start && payload.printed_page_end ? payload.printed_page_start === payload.printed_page_end ? `Page ${payload.printed_page_start}` : `Pages ${payload.printed_page_start}\u2013${payload.printed_page_end}` : "";
+    const referenceLabel = Number.isInteger(payload.reference_count) ? `${payload.reference_count} ${payload.reference_count === 1 ? "reference" : "references"}` : "";
+    const definitions = {
+      get_section_locator: {
+        active: `Getting section locator ${payload.section_id || ""}`.trim(),
+        completed: `Got section locator ${payload.section_id || ""}`.trim(),
+        failed: `Failed to get section locator ${payload.section_id || ""}`.trim(),
+        lines: [
+          payload.title,
+          pageLabel
+        ],
+        detail: payload.section_id || "section locator"
+      },
+      get_exercise_locator: {
+        active: `Getting exercise locator ${payload.exercise_id || ""}`.trim(),
+        completed: `Got exercise locator ${payload.exercise_id || ""}`.trim(),
+        failed: `Failed to get exercise locator ${payload.exercise_id || ""}`.trim(),
+        lines: [
+          pageLabel,
+          referenceLabel
+        ],
+        detail: payload.exercise_id || "exercise locator"
+      },
+      list_chapter_exercises: {
+        active: `Listing chapter ${payload.chapter_id || ""} exercises`.trim(),
+        completed: `Listed chapter ${payload.chapter_id || ""} exercises`.trim(),
+        failed: `Failed to list chapter ${payload.chapter_id || ""} exercises`.trim(),
+        lines: [
+          Number.isInteger(payload.exercise_count) ? `${payload.exercise_count} exercises` : "",
+          payload.first_exercise && payload.last_exercise ? `${payload.first_exercise}\u2013${payload.last_exercise}` : ""
+        ],
+        detail: payload.chapter_id ? `chapter ${payload.chapter_id}` : "chapter exercises"
+      }
+    };
+    const definition = definitions[payload.operation];
+    if (!definition) return null;
+    const lines = [...definition.lines];
+    if (cell.phase === "failed") lines.push(payload.diagnostic || payload.error_code || "Action failed");
+    return {
+      status,
+      title: definition[status],
+      lines: compactLines(lines),
+      detail: definition.detail
+    };
+  }
   function genericPresentation(cell) {
     const payload = cell.payload || {};
+    const locator = locatorPresentation(cell);
+    if (locator) return locator;
     if (payload.operation === "prepare_workspace") {
       const title = cell.phase === "failed" ? "Failed to prepare workspace" : "Prepared workspace";
       return {

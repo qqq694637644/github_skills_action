@@ -5,13 +5,13 @@ The installable Tampermonkey script is `userscripts/gpt-action-monitor.user.js`.
 ## Source layout
 
 - `src/main.js` — lifecycle/bootstrap only.
+- `src/activity/` — structured activity state reduction and Codex-style presentation.
 - `src/api/` — action-log transport and polling.
-- `src/api/skill-catalog-client.js` — on-demand Skill catalog reads with in-page caching and explicit refresh.
+- `src/api/skill-catalog-client.js` — on-demand Skill catalog reads with persistent per-profile caching and explicit refresh.
 - `src/adapters/` — ChatGPT page integration and composer insertion.
-- `src/formatter/` — backend log parsing and display summaries.
+- `src/formatter/` — legacy text-event parsing used only as a compatibility fallback.
 - `src/profile/` — profile persistence and validation.
-- `src/store/` — bounded event history.
-- `src/ui/` — monitor panel, history rendering, settings UI, and styles.
+- `src/ui/` — Activity Inspector, monitor shell, Skills/settings UI, and styles.
 - `metadata.txt` — Tampermonkey metadata header.
 - `build.mjs` — bundles the modular source into the installable single-file userscript.
 
@@ -25,4 +25,6 @@ npm run check
 
 `npm run build` rewrites `../gpt-action-monitor.user.js`. The generated file is committed so users can install it directly from GitHub, while maintenance stays in small, responsibility-focused source files.
 
-The expanded monitor includes a `Skills` menu. Each backend profile catalog is fetched once on demand and kept in memory for the page session, including across monitor deactivate/reactivate cycles. Only `↻` explicitly refreshes that profile catalog. Clicking a Skill inserts `loadSkills(["<skill-id>"])` at the ChatGPT composer caret without sending the message.
+The expanded monitor renders structured backend activity as `NOW` and `RECENT` cells modeled after the Codex TUI: running commands update in place, inspect/search/read activity coalesces into `Explored`, command output is limited to a compact three-line preview, and file changes use aggregate `(+additions -deletions)` summaries. Completed activity history is page-session-only and capped at 100 cells.
+
+The expanded monitor also includes a `Skills` menu. Each backend profile catalog is fetched once on demand and persisted by the userscript across ChatGPT page reloads. Only `↻` explicitly refreshes that profile catalog. Clicking a Skill inserts `loadSkills(["<skill-id>"])` at the ChatGPT composer caret without sending the message.

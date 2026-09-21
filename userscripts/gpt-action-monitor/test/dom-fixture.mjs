@@ -38,6 +38,7 @@ export class FakeElement {
     this.isConnected = false;
     this.scrollTop = 0;
     this.scrollHeight = 0;
+    this.clientHeight = 100;
     this._selectors = new Map();
     this._queryResults = new Map();
     this._matches = false;
@@ -45,20 +46,34 @@ export class FakeElement {
 
   set innerHTML(value) {
     this._innerHTML = value;
-    if (!value.includes('gam-handle')) return;
-    for (const selector of [
-      '.gam-handle',
-      '.gam-skills-button',
-      '.gam-close',
-      '.gam-header',
-      '.gam-expanded',
-      '.gam-log',
-      '.gam-current-action',
-      '.gam-current-detail',
-    ]) {
-      const element = new FakeElement(selector.slice(1));
-      element.parentElement = this;
-      this._selectors.set(selector, element);
+    if (value.includes('gam-handle')) {
+      for (const selector of [
+        '.gam-handle',
+        '.gam-skills-button',
+        '.gam-close',
+        '.gam-header',
+        '.gam-expanded',
+        '.gam-activity-root',
+        '.gam-current-action',
+        '.gam-current-detail',
+      ]) {
+        const element = new FakeElement(selector.slice(1));
+        element.parentElement = this;
+        this._selectors.set(selector, element);
+      }
+    }
+    if (value.includes('gam-activity-section')) {
+      for (const selector of [
+        '.gam-monitor-hint',
+        '.gam-now-section',
+        '.gam-recent-section',
+        '.gam-now-list',
+        '.gam-recent-list',
+      ]) {
+        const element = new FakeElement(selector.slice(1));
+        element.parentElement = this;
+        this._selectors.set(selector, element);
+      }
     }
   }
 
@@ -102,6 +117,11 @@ export class FakeElement {
     if (node?.isFragment) {
       for (const child of [...node.children]) this.appendChild(child);
       return node;
+    }
+    if (node?.parentElement) {
+      const siblings = node.parentElement.children;
+      const existingIndex = siblings.indexOf(node);
+      if (existingIndex >= 0) siblings.splice(existingIndex, 1);
     }
     node.parentElement = this;
     this.children.push(node);

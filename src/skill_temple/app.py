@@ -13,7 +13,13 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .action_logging import log_action, log_action_error, wait_for_action_events
+from .action_logging import (
+    log_action,
+    log_action_error,
+    log_activity,
+    new_activity_id,
+    wait_for_action_events,
+)
 from .runtime import (
     SkillNotFoundError,
     SkillPathError,
@@ -274,10 +280,28 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
         openapi_extra={"x-openai-isConsequential": False},
     )
     def load_skills(request: LoadSkillsRequest) -> LoadSkillsResponse:
+        activity_id = new_activity_id("skill")
+        log_activity(
+            activity_id=activity_id,
+            kind="skill",
+            phase="started",
+            payload={"operation": "load", "skill_ids": request.skill_ids},
+            legacy_action="loadSkills",
+            legacy_fields={"phase": "started", "skill_ids": request.skill_ids},
+        )
         try:
             response = LoadSkillsResponse.model_validate(load_selected(request))
             log_action(
                 "loadSkills",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "skill",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "load",
+                        "skill_ids": response.loaded_skill_ids,
+                    },
+                },
                 skill_ids=request.skill_ids,
             )
             return response
@@ -286,6 +310,17 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
                 "loadSkills",
                 skill_ids=request.skill_ids,
                 error_code="skill_not_found",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "skill",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "load",
+                        "skill_ids": request.skill_ids,
+                        "error_code": "skill_not_found",
+                        "diagnostic": str(exc),
+                    },
+                },
             )
             raise HTTPException(
                 status_code=404,
@@ -305,10 +340,39 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
         openapi_extra={"x-openai-isConsequential": False},
     )
     def read_skill_content(request: ReadSkillContentRequest) -> ReadSkillContentResponse:
+        activity_id = new_activity_id("skill")
+        log_activity(
+            activity_id=activity_id,
+            kind="skill",
+            phase="started",
+            payload={
+                "operation": "read",
+                "skill_id": request.skill_id,
+                "path": request.path,
+            },
+            legacy_action="readSkillContent",
+            legacy_fields={
+                "phase": "started",
+                "skill_id": request.skill_id,
+                "path": request.path,
+            },
+        )
         try:
             response = ReadSkillContentResponse.model_validate(read_selected(request))
             log_action(
                 "readSkillContent",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "skill",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "read",
+                        "skill_id": request.skill_id,
+                        "path": request.path,
+                        "returned_lines": f"{response.start_line}-{response.end_line}",
+                        "truncated": response.truncated,
+                    },
+                },
                 skill_id=request.skill_id,
                 path=request.path,
                 requested_start_line=request.start_line if request.start_line != 1 else None,
@@ -324,6 +388,18 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
                 skill_id=request.skill_id,
                 path=request.path,
                 error_code="skill_not_found",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "skill",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "read",
+                        "skill_id": request.skill_id,
+                        "path": request.path,
+                        "error_code": "skill_not_found",
+                        "diagnostic": str(exc),
+                    },
+                },
             )
             raise HTTPException(
                 status_code=404,
@@ -335,6 +411,18 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
                 skill_id=request.skill_id,
                 path=request.path,
                 error_code="unsafe_or_missing_path",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "skill",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "read",
+                        "skill_id": request.skill_id,
+                        "path": request.path,
+                        "error_code": "unsafe_or_missing_path",
+                        "diagnostic": str(exc),
+                    },
+                },
             )
             raise HTTPException(
                 status_code=404,

@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
+import { createActivityStore } from './src/activity/activity-store.js';
+import { presentActivity } from './src/activity/presentation.js';
 import { createActionLogClient } from './src/api/action-log-client.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
 import { createChatGPTAdapter } from './src/adapters/chatgpt.js';
 import { createComposerAdapter, loadSkillsCall } from './src/adapters/composer.js';
 import { summarize } from './src/formatter/action-formatter.js';
 import { validateBackend } from './src/profile/profile-store.js';
-import { createEventStore } from './src/store/event-store.js';
-import { createHistoryPanel } from './src/ui/history-panel.js';
+import { createActivityPanel } from './src/ui/activity-panel.js';
 import { createMonitorPanel } from './src/ui/monitor-panel.js';
 import {
   FakeElement,
@@ -31,11 +32,6 @@ assert.deepEqual(validateBackend('https://skills.example.com/'), {
 });
 assert.equal(validateBackend('ftp://skills.example.com').ok, false);
 assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintenance"])');
-
-const store = createEventStore();
-for (let index = 0; index < 101; index += 1) {
-  store.add({ action: `action-${index}`, detail: 'ok', time: '', raw: '' });
-}
 
 // Skill catalog reads are cached in-page, while explicit refresh performs a
 // new backend read so the server can rescan its on-disk Skill catalog.
@@ -136,12 +132,259 @@ for (let index = 0; index < 101; index += 1) {
   assert.equal(restoredRange, range);
   assert.equal(insertedText, 'loadSkills(["github-maintenance"])');
 }
-assert.equal(store.all().length, 100);
-assert.equal(store.all()[0].summary.action, 'action-1');
-store.addHint('retrying');
-assert.equal(store.all().at(-1).kind, 'hint');
-store.clear();
-assert.deepEqual(store.all(), []);
+
+// Structured command events update one active cell in place and move it to
+// recent history only when the command becomes terminal.
+{
+  const activityStore = createActivityStore();
+  activityStore.ingest([{
+    id: 1,
+    event: {
+      activity_id: 'command:op_1',
+      kind: 'command',
+      phase: 'started',
+      timestamp: '2026-09-21T12:00:00Z',
+      payload: { command: 'python -m pytest -q', state: 'running' },
+    },
+  }]);
+  assert.equal(activityStore.snapshot().active.length, 1);
+  assert.equal(activityStore.snapshot().recent.length, 0);
+
+  activityStore.ingest([{
+    id: 2,
+    event: {
+      activity_id: 'command:op_1',
+      kind: 'command',
+      phase: 'updated',
+      timestamp: '2026-09-21T12:00:01Z',
+      payload: { stream: 'stdout', delta: 'one\ntwo\nthree\nfour\n' },
+    },
+  }]);
+  const running = activityStore.snapshot().active[0];
+  const runningPresentation = presentActivity(running);
+  assert.equal(runningPresentation.title, 'Running python -m pytest -q');
+  assert.deepEqual(runningPresentation.lines, ['two', 'three', 'four']);
+
+  activityStore.ingest([{
+    id: 3,
+    event: {
+      activity_id: 'command:op_1',
+      kind: 'command',
+      phase: 'completed',
+      timestamp: '2026-09-21T12:00:02Z',
+      payload: {
+        command: 'python -m pytest -q',
+        state: 'succeeded',
+        exit_code: 0,
+        stdout_preview: ['49 passed in 3.8s'],
+        stderr_preview: [],
+      },
+    },
+  }]);
+  assert.equal(activityStore.snapshot().active.length, 0);
+  assert.equal(activityStore.snapshot().recent.length, 1);
+  assert.equal(presentActivity(activityStore.snapshot().recent[0]).title, 'Ran python -m pytest -q');
+
+  activityStore.ingest([{
+    id: 3,
+    event: {
+      activity_id: 'command:op_1',
+      kind: 'command',
+      phase: 'completed',
+      timestamp: '2026-09-21T12:00:02Z',
+      payload: { command: 'python -m pytest -q' },
+    },
+  }]);
+  assert.equal(activityStore.snapshot().recent.length, 1);
+}
+
+// Failed commands follow Codex naming and prioritize bounded failure output.
+{
+  const activityStore = createActivityStore();
+  activityStore.ingest([{
+    id: 10,
+    event: {
+      activity_id: 'command:op_failed',
+      kind: 'command',
+      phase: 'failed',
+      payload: {
+        command: 'pytest -q',
+        exit_code: 1,
+        stderr_preview: ['AssertionError: expected value', '1 failed, 48 passed'],
+        stdout_preview: [],
+      },
+    },
+  }]);
+  const presentation = presentActivity(activityStore.snapshot().recent[0]);
+  assert.equal(presentation.title, 'Failed (exit 1) pytest -q');
+  assert.deepEqual(presentation.lines, ['AssertionError: expected value', '1 failed, 48 passed']);
+}
+
+// Consecutive inspect/search/read activity is coalesced into one Codex-style
+// Explored history cell; a non-exploration cell breaks the group.
+{
+  const activityStore = createActivityStore();
+  activityStore.ingest([{
+    id: 19,
+    event: {
+      activity_id: 'search:active',
+      kind: 'exploration',
+      phase: 'started',
+      payload: { operation: 'search', query: 'workspaceCommand', paths: ['src'] },
+    },
+  }]);
+  assert.equal(activityStore.snapshot().active.length, 1);
+  assert.equal(presentActivity(activityStore.snapshot().active[0]).title, 'Exploring');
+  activityStore.ingest([{
+    id: 20,
+    event: {
+      activity_id: 'search:active',
+      kind: 'exploration',
+      phase: 'completed',
+      payload: { operation: 'search', query: 'workspaceCommand', match_count: 11 },
+    },
+  }]);
+  assert.equal(activityStore.snapshot().active.length, 0);
+  assert.equal(activityStore.snapshot().recent.length, 1);
+
+  activityStore.ingest([
+    {
+      id: 21,
+      event: {
+        activity_id: 'search:1',
+        kind: 'exploration',
+        phase: 'completed',
+        payload: { operation: 'search', query: 'workspaceCommand', match_count: 11 },
+      },
+    },
+    {
+      id: 22,
+      event: {
+        activity_id: 'read:1',
+        kind: 'exploration',
+        phase: 'completed',
+        payload: { operation: 'read', paths: ['workspace_actions.py', 'runtime.py'] },
+      },
+    },
+  ]);
+  assert.equal(activityStore.snapshot().recent.length, 1);
+  assert.equal(activityStore.snapshot().recent[0].entries.length, 4);
+  assert.equal(presentActivity(activityStore.snapshot().recent[0]).title, 'Explored');
+
+  activityStore.ingest([{
+    id: 23,
+    event: {
+      activity_id: 'skill:1',
+      kind: 'skill',
+      phase: 'completed',
+      payload: { operation: 'load', skill_ids: ['github-maintenance'] },
+    },
+  }]);
+  activityStore.ingest([{
+    id: 24,
+    event: {
+      activity_id: 'search:2',
+      kind: 'exploration',
+      phase: 'completed',
+      payload: { operation: 'search', query: 'activity_id', match_count: 4 },
+    },
+  }]);
+  assert.equal(activityStore.snapshot().recent.length, 3);
+}
+
+// Patch summaries match the Codex-style aggregate and keep only the first
+// three file detail lines in the compact view.
+{
+  const activityStore = createActivityStore();
+  activityStore.ingest([{
+    id: 30,
+    event: {
+      activity_id: 'patch:1',
+      kind: 'patch',
+      phase: 'completed',
+      payload: {
+        changed_files: [
+          { path: 'a.py', operation: 'modified', additions: 4, deletions: 1 },
+          { path: 'b.py', operation: 'modified', additions: 2, deletions: 0 },
+          { path: 'c.py', operation: 'added', additions: 5, deletions: 0 },
+          { path: 'd.py', operation: 'deleted', additions: 0, deletions: 3 },
+        ],
+      },
+    },
+  }]);
+  const presentation = presentActivity(activityStore.snapshot().recent[0]);
+  assert.equal(presentation.title, 'Edited 4 files (+11 -4)');
+  assert.deepEqual(presentation.lines, ['a.py (+4 -1)', 'b.py (+2 -0)', 'c.py (+5 -0)']);
+}
+
+// Completed activity history is bounded to 100 cells and dedicated renderers
+// do not expose raw Action API names.
+{
+  const activityStore = createActivityStore();
+  const items = [];
+  for (let index = 0; index < 101; index += 1) {
+    items.push({
+      id: 100 + index,
+      event: {
+        activity_id: `skill:${index}`,
+        kind: 'skill',
+        phase: 'completed',
+        payload: { operation: 'load', skill_ids: [`skill-${index}`] },
+      },
+    });
+  }
+  activityStore.ingest(items);
+  assert.equal(activityStore.snapshot().recent.length, 100);
+  assert.equal(presentActivity(activityStore.snapshot().recent[0]).title, 'Loaded skill skill-1');
+
+  const legacy = createActivityStore();
+  legacy.ingest([{
+    id: 500,
+    text: '[2026-09-21 12:00] ACTION workspaceCommand action="start" command="git status" state="succeeded"',
+  }]);
+  const title = presentActivity(legacy.snapshot().recent[0]).title;
+  assert.equal(title, 'Ran command');
+  assert.equal(title.includes('workspaceCommand'), false);
+}
+
+// NOW cells update in place and terminal cells move into RECENT without
+// duplicating DOM nodes.
+{
+  installDomFixture();
+  const root = new FakeElement('div');
+  const panel = createActivityPanel({ root });
+  const running = {
+    id: 'command:dom',
+    kind: 'command',
+    phase: 'started',
+    payload: { command: 'pytest -q' },
+    liveOutput: '',
+    entries: [],
+    revision: 1,
+  };
+  panel.render({ active: [running], recent: [] });
+  const nowList = root.querySelector('.gam-now-list');
+  const recentList = root.querySelector('.gam-recent-list');
+  assert.equal(nowList.childElementCount, 1);
+  assert.equal(recentList.childElementCount, 0);
+  assert.equal(nowList.children[0].children[0].children[1].textContent, 'Running pytest -q');
+
+  const updated = { ...running, liveOutput: 'collecting...\n', revision: 2 };
+  panel.render({ active: [updated], recent: [] });
+  assert.equal(nowList.childElementCount, 1);
+  assert.equal(nowList.children[0].children[1].children[0].textContent, 'collecting...');
+
+  const completed = {
+    ...updated,
+    phase: 'completed',
+    payload: { command: 'pytest -q', stdout_preview: ['50 passed'], stderr_preview: [] },
+    revision: 3,
+  };
+  panel.render({ active: [], recent: [completed] });
+  assert.equal(nowList.childElementCount, 0);
+  assert.equal(recentList.childElementCount, 1);
+  assert.equal(recentList.children[0].children[0].children[1].textContent, 'Ran pytest -q');
+}
 
 // Keep the currently active GPT title/profile pinned while its original title
 // element remains connected and still matches that profile.
@@ -216,7 +459,7 @@ assert.deepEqual(store.all(), []);
   const { document, timers } = installDomFixture();
   document.visibilityState = 'hidden';
   const panel = createMonitorPanel({
-    eventStore: createEventStore(),
+    activityStore: createActivityStore(),
     isActive: () => true,
   });
   panel.queueActivity({ action: 'profile-a', detail: 'old', time: '', raw: '' });
@@ -260,18 +503,30 @@ assert.deepEqual(store.all(), []);
   client.stop();
 }
 
-// The expanded DOM history must stay bounded with the event store while new
-// entries are appended, not only after close/reopen re-rendering.
+// Recreating the poll client for the same page-session/profile can resume from
+// its last cursor, so temporary ChatGPT title DOM churn does not discard
+// activity events that arrive while the monitor is briefly deactivated.
 {
-  installDomFixture();
-  const eventStore = createEventStore();
-  const logBox = new FakeElement('div');
-  const historyPanel = createHistoryPanel({ logBox, eventStore });
-  for (let index = 0; index < 101; index += 1) {
-    const summary = { action: `action-${index}`, detail: 'ok', time: '', raw: '' };
-    eventStore.add(summary);
-    historyPanel.appendEvent(summary);
-  }
-  assert.equal(eventStore.all().length, 100);
-  assert.equal(logBox.childElementCount, 100);
+  const { timers } = installDomFixture();
+  const requestedUrls = [];
+  globalThis.GM_xmlhttpRequest = ({ url, onload }) => {
+    requestedUrls.push(url);
+    onload({ status: 200, responseText: JSON.stringify({ items: [], last_id: 41 }) });
+    return { abort() {} };
+  };
+  const client = createActionLogClient({
+    getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
+    onItems: () => {},
+    onHint: () => {},
+    initialCursor: 40,
+  });
+  client.start();
+  const [timerId, runPoll] = timers.entries().next().value;
+  timers.delete(timerId);
+  runPoll();
+  assert.equal(requestedUrls.length, 1);
+  assert.equal(requestedUrls[0].includes('after=40'), true);
+  assert.equal(requestedUrls[0].includes('wait=55'), true);
+  assert.equal(client.getCursor(), 41);
+  client.stop();
 }

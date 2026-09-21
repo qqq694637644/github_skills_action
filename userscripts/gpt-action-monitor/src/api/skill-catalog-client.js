@@ -1,9 +1,12 @@
 export function createSkillCatalogClient({ getProfile }) {
-  let cachedSkills = null;
+  const cache = new Map();
+  const pending = new Map();
 
-  function requestCatalog() {
-    const profile = getProfile();
-    if (!profile) return Promise.reject(new Error('没有活动的后端配置。'));
+  function profileKey(profile) {
+    return `${profile.id || ''}\u0000${profile.backend}`;
+  }
+
+  function requestCatalog(profile, key) {
 
     const headers = {};
     if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
@@ -26,14 +29,15 @@ export function createSkillCatalogClient({ getProfile }) {
           try {
             const body = JSON.parse(response.responseText);
             const skills = Array.isArray(body.skills) ? body.skills : [];
-            cachedSkills = skills
+            const normalized = skills
               .filter((skill) => skill && typeof skill.skill_id === 'string')
               .map((skill) => ({
                 skill_id: skill.skill_id,
                 name: typeof skill.name === 'string' ? skill.name : skill.skill_id,
                 description: typeof skill.description === 'string' ? skill.description : '',
               }));
-            resolve(cachedSkills);
+            cache.set(key, normalized);
+            resolve(normalized);
           } catch (error) {
             reject(new Error(`Skill 列表解析失败：${String(error)}`));
           }
@@ -49,13 +53,19 @@ export function createSkillCatalogClient({ getProfile }) {
   }
 
   async function list({ refresh = false } = {}) {
-    if (!refresh && cachedSkills !== null) return cachedSkills;
-    return requestCatalog();
+    const profile = getProfile();
+    if (!profile) throw new Error('没有活动的后端配置。');
+    const key = profileKey(profile);
+
+    if (!refresh && cache.has(key)) return cache.get(key);
+    if (pending.has(key)) return pending.get(key);
+
+    const request = requestCatalog(profile, key).finally(() => {
+      if (pending.get(key) === request) pending.delete(key);
+    });
+    pending.set(key, request);
+    return request;
   }
 
-  function clear() {
-    cachedSkills = null;
-  }
-
-  return { list, clear };
+  return { list };
 }

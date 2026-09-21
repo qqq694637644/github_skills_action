@@ -47,7 +47,6 @@ import { createSkillsMenu } from './ui/skills-menu.js';
     activeProfile = null;
     actionLogClient?.stop();
     actionLogClient = null;
-    skillCatalogClient.clear();
     skillsMenu.close();
     eventStore.clear();
     monitorUi.unmount();
@@ -73,7 +72,6 @@ import { createSkillsMenu } from './ui/skills-menu.js';
 
     monitorActive = true;
     activeProfile = profile;
-    skillCatalogClient.clear();
     eventStore.clear();
     monitorUi.mount();
     monitorUi.setStatus('idle');

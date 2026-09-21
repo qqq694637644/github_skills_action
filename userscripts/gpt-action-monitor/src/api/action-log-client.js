@@ -1,8 +1,16 @@
 import { POLL_WAIT_SECONDS, RETRY_MS } from '../constants.js';
 
-export function createActionLogClient({ getProfile, onItems, onHint, onStatus, onAttention }) {
-  let lastId = 0;
-  let needsCursorPrime = true;
+export function createActionLogClient({
+  getProfile,
+  onItems,
+  onHint,
+  onStatus,
+  onAttention,
+  initialCursor = null,
+  onCursor,
+}) {
+  let lastId = Number.isInteger(initialCursor) ? initialCursor : 0;
+  let needsCursorPrime = !Number.isInteger(initialCursor);
   let stopped = false;
   let requestHandle = null;
   let requestGeneration = 0;
@@ -48,7 +56,6 @@ export function createActionLogClient({ getProfile, onItems, onHint, onStatus, o
 
   function start() {
     stopped = false;
-    needsCursorPrime = true;
     schedulePoll(0);
   }
 
@@ -92,7 +99,10 @@ export function createActionLogClient({ getProfile, onItems, onHint, onStatus, o
         }
         try {
           const body = JSON.parse(response.responseText);
-          if (Number.isInteger(body.last_id)) lastId = body.last_id;
+          if (Number.isInteger(body.last_id)) {
+            lastId = body.last_id;
+            onCursor?.(lastId);
+          }
           if (priming) {
             needsCursorPrime = false;
             onStatus?.('idle');
@@ -123,5 +133,9 @@ export function createActionLogClient({ getProfile, onItems, onHint, onStatus, o
     });
   }
 
-  return { start, stop, suspend, resume, poll };
+  function getCursor() {
+    return needsCursorPrime ? null : lastId;
+  }
+
+  return { start, stop, suspend, resume, poll, getCursor };
 }

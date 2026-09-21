@@ -1,8 +1,8 @@
 import { ACTIVITY_VISIBLE_MS, COMPACT_WIDTH, POSITION_KEY, UI_COALESCE_MS } from '../constants.js';
 import { MONITOR_CSS } from './styles.js';
-import { createHistoryPanel } from './history-panel.js';
+import { createActivityPanel } from './activity-panel.js';
 
-export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) {
+export function createMonitorPanel({ activityStore, isActive, skillsMenu = null }) {
   const panel = document.createElement('div');
   panel.id = 'gpt-action-monitor';
   panel.dataset.status = 'idle';
@@ -12,19 +12,19 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
         <strong class="gam-current-action">GPT Actions</strong>
         <span class="gam-current-detail">等待 Action</span>
       </div>
-      <button class="gam-handle" type="button" title="拖动移动 · 点击展开" aria-label="展开 GPT Action 历史">
+      <button class="gam-handle" type="button" title="拖动移动 · 点击展开" aria-label="展开 GPT Activity">
         <span class="gam-dot"></span>
       </button>
     </div>
-    <section class="gam-expanded" aria-label="GPT Action 历史">
+    <section class="gam-expanded" aria-label="GPT Activity">
       <div class="gam-header">
         <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
         <div class="gam-header-controls">
           <button class="gam-skills-button" type="button" aria-haspopup="menu" aria-label="打开 Skills">Skills ›</button>
-          <button class="gam-close" type="button" title="收起" aria-label="收起 Action 历史">−</button>
+          <button class="gam-close" type="button" title="收起" aria-label="收起 GPT Activity">−</button>
         </div>
       </div>
-      <div class="gam-log" role="log" aria-label="Action 历史"></div>
+      <div class="gam-activity-root" role="log" aria-label="Agent activity"></div>
     </section>
   `;
 
@@ -35,10 +35,11 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
   const close = panel.querySelector('.gam-close');
   const skillsButton = panel.querySelector('.gam-skills-button');
   const header = panel.querySelector('.gam-header');
-  const logBox = panel.querySelector('.gam-log');
+  const expanded = panel.querySelector('.gam-expanded');
+  const activityRoot = panel.querySelector('.gam-activity-root');
   const currentAction = panel.querySelector('.gam-current-action');
   const currentDetail = panel.querySelector('.gam-current-detail');
-  const historyPanel = createHistoryPanel({ logBox, eventStore });
+  const activityPanel = createActivityPanel({ root: activityRoot });
   if (skillsMenu?.element) panel.querySelector('.gam-expanded').appendChild(skillsMenu.element);
   skillsMenu?.bindTrigger?.(skillsButton);
 
@@ -47,6 +48,11 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
   let activityTimer = null;
   let uiTimer = null;
   let pendingLatest = null;
+  let lastHint = '';
+
+  activityStore.subscribe((snapshot) => {
+    if (manualOpen) activityPanel.render(snapshot);
+  });
 
   function setStatus(state) {
     panel.dataset.status = state;
@@ -174,7 +180,7 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
       panel.style.left = `${Math.round(rightEdge - width)}px`;
     }
     keepInViewport();
-    historyPanel.render();
+    activityPanel.render(activityStore.snapshot());
   }
 
   function closeHistory() {
@@ -186,7 +192,7 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
     if (panel.classList.contains('gam-detached')) {
       panel.style.left = `${Math.round(rightEdge - COMPACT_WIDTH)}px`;
     }
-    historyPanel.clear();
+    activityPanel.clear();
     keepInViewport();
     savePosition();
     handle.focus();
@@ -204,10 +210,13 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
     pendingLatest = null;
     currentAction.textContent = summary.action;
     currentDetail.textContent = summary.detail;
-    setStatus('active');
+    setStatus(summary.status === 'failed' ? 'error' : 'active');
     if (!manualOpen) panel.classList.add('gam-chip-visible');
     window.clearTimeout(activityTimer);
-    activityTimer = window.setTimeout(hideActivity, ACTIVITY_VISIBLE_MS);
+    activityTimer = null;
+    if (summary.status !== 'active') {
+      activityTimer = window.setTimeout(hideActivity, ACTIVITY_VISIBLE_MS);
+    }
   }
 
   function queueActivity(summary) {
@@ -246,16 +255,15 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
     }
   }
 
-  function recordEvent(summary) {
-    eventStore.add(summary);
-    if (manualOpen) historyPanel.appendEvent(summary);
+  function recordHint(message) {
+    if (!message || message === lastHint) return;
+    lastHint = message;
+    activityPanel.setHint(message);
   }
 
-  function recordHint(message) {
-    const previous = eventStore.all().at(-1);
-    if (previous?.kind === 'hint' && previous.message === message) return;
-    eventStore.addHint(message);
-    if (manualOpen) historyPanel.appendHint(message);
+  function clearHint() {
+    lastHint = '';
+    activityPanel.setHint('');
   }
 
   function suspendActivity() {
@@ -287,7 +295,7 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
     panel.classList.remove('gam-open', 'gam-chip-visible', 'gam-dragging');
     manualOpen = false;
     skillsMenu?.close();
-    historyPanel.clear();
+    activityPanel.clear();
     panel.remove();
     style.remove();
   }
@@ -300,6 +308,11 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
   });
   skillsButton.addEventListener('click', () => skillsMenu?.toggle());
   close.addEventListener('click', closeHistory);
+  expanded.addEventListener('pointerup', () => {
+    if (!manualOpen) return;
+    keepInViewport();
+    savePosition();
+  });
 
   return {
     mount,
@@ -307,8 +320,8 @@ export function createMonitorPanel({ eventStore, isActive, skillsMenu = null }) 
     keepInViewport,
     setStatus,
     getStatus,
-    recordEvent,
     recordHint,
+    clearHint,
     queueActivity,
     showAttention,
     clearAttention,

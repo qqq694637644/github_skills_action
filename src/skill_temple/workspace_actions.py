@@ -7,7 +7,13 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .action_logging import command_for_log, log_action, log_action_error
+from .action_logging import (
+    command_for_log,
+    log_action,
+    log_action_error,
+    log_activity,
+    new_activity_id,
+)
 from .workspace_files import LocalWorkspaceService
 from .workspace_patch import WorkspaceToolError
 
@@ -338,6 +344,16 @@ def register_workspace_actions(app: FastAPI) -> None:
             )
             log_action(
                 "prepareWorkspace",
+                activity={
+                    "kind": "generic",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "prepare_workspace",
+                        "workspace_id": response.workspace_id,
+                        "created": response.created,
+                        "empty": response.empty,
+                    },
+                },
                 requested_workspace_id=request.workspace_id,
                 workspace_id=response.workspace_id,
                 created=response.created,
@@ -349,6 +365,16 @@ def register_workspace_actions(app: FastAPI) -> None:
                 "prepareWorkspace",
                 workspace_id=request.workspace_id,
                 error_code=exc.code,
+                activity={
+                    "kind": "generic",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "prepare_workspace",
+                        "workspace_id": request.workspace_id,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
             )
             _raise_http(exc)
 
@@ -384,6 +410,7 @@ def register_workspace_actions(app: FastAPI) -> None:
                 )
                 log_action(
                     "workspaceCommand",
+                    publish=False,
                     action="start",
                     workspace_id=request.workspace_id,
                     command=command_for_log(request.script),
@@ -413,6 +440,7 @@ def register_workspace_actions(app: FastAPI) -> None:
                 if operation.state != "running":
                     log_action(
                         "workspaceCommand",
+                        publish=False,
                         action="get",
                         operation_id=request.operation_id,
                         state=operation.state,
@@ -430,6 +458,7 @@ def register_workspace_actions(app: FastAPI) -> None:
                 )
                 log_action(
                     "workspaceCommand",
+                    publish=False,
                     action="cancel",
                     operation_id=request.operation_id,
                     state=operation.state,
@@ -442,6 +471,7 @@ def register_workspace_actions(app: FastAPI) -> None:
                 ]
                 log_action(
                     "workspaceCommand",
+                    publish=False,
                     action="list",
                     state_filter=request.state,
                     count=len(operations),
@@ -456,6 +486,7 @@ def register_workspace_actions(app: FastAPI) -> None:
             )
             log_action(
                 "workspaceCommand",
+                publish=False,
                 action="logs",
                 operation_id=request.operation_id,
                 stdout_offset=request.stdout_offset if request.stdout_offset else None,
@@ -468,8 +499,29 @@ def register_workspace_actions(app: FastAPI) -> None:
             )
             return WorkspaceCommandResponse(action="logs", **logs)
         except WorkspaceToolError as exc:
+            activity = None
+            publish = False
+            if request.action == "start" and request.script:
+                activity = {
+                    "activity_id": new_activity_id("command"),
+                    "kind": "command",
+                    "phase": "failed",
+                    "payload": {
+                        "command": command_for_log(request.script),
+                        "workspace_id": request.workspace_id,
+                        "state": "failed",
+                        "exit_code": None,
+                        "error_code": exc.code,
+                        "error_message": exc.message,
+                        "stdout_preview": [],
+                        "stderr_preview": [],
+                    },
+                }
+                publish = True
             log_action_error(
                 "workspaceCommand",
+                activity=activity,
+                publish=publish,
                 action=request.action,
                 workspace_id=request.workspace_id,
                 operation_id=request.operation_id,
@@ -489,12 +541,42 @@ def register_workspace_actions(app: FastAPI) -> None:
         openapi_extra={"x-openai-isConsequential": False},
     )
     async def workspace_inspect(request: WorkspaceInspectRequest) -> WorkspaceInspectResponse:
+        activity_id = new_activity_id("exploration")
+        log_activity(
+            activity_id=activity_id,
+            kind="exploration",
+            phase="started",
+            payload={
+                "operation": "inspect",
+                "paths": request.paths,
+                "queries": request.queries,
+            },
+            legacy_action="workspaceInspect",
+            legacy_fields={"phase": "started", "paths": request.paths, "queries": request.queries},
+        )
         try:
             response = WorkspaceInspectResponse.model_validate(
                 await service.inspect(**request.model_dump())
             )
             log_action(
                 "workspaceInspect",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "inspect",
+                        "paths": request.paths,
+                        "queries": request.queries,
+                        "tree_entries": len(response.tree),
+                        "searches": [
+                            {"query": item.query, "match_count": item.match_count}
+                            for item in response.searches
+                        ],
+                        "files": [item.path for item in response.files],
+                        "truncated": response.truncated,
+                    },
+                },
                 workspace_id=request.workspace_id,
                 paths=request.paths,
                 queries=request.queries,
@@ -512,6 +594,18 @@ def register_workspace_actions(app: FastAPI) -> None:
                 paths=request.paths,
                 queries=request.queries,
                 error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "inspect",
+                        "paths": request.paths,
+                        "queries": request.queries,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
             )
             _raise_http(exc)
 
@@ -527,12 +621,37 @@ def register_workspace_actions(app: FastAPI) -> None:
         openapi_extra={"x-openai-isConsequential": False},
     )
     async def workspace_search(request: WorkspaceSearchRequest) -> WorkspaceSearchResponse:
+        activity_id = new_activity_id("exploration")
+        log_activity(
+            activity_id=activity_id,
+            kind="exploration",
+            phase="started",
+            payload={
+                "operation": "search",
+                "query": request.query,
+                "paths": request.paths,
+            },
+            legacy_action="workspaceSearch",
+            legacy_fields={"phase": "started", "query": request.query, "paths": request.paths},
+        )
         try:
             response = WorkspaceSearchResponse.model_validate(
                 await service.search(**request.model_dump())
             )
             log_action(
                 "workspaceSearch",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "search",
+                        "query": request.query,
+                        "paths": request.paths,
+                        "match_count": response.match_count,
+                        "truncated": response.truncated,
+                    },
+                },
                 workspace_id=request.workspace_id,
                 query=request.query,
                 regex=True if request.regex else None,
@@ -551,6 +670,18 @@ def register_workspace_actions(app: FastAPI) -> None:
                 query=request.query,
                 paths=request.paths,
                 error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "search",
+                        "query": request.query,
+                        "paths": request.paths,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
             )
             _raise_http(exc)
 
@@ -568,12 +699,31 @@ def register_workspace_actions(app: FastAPI) -> None:
     async def workspace_read_files(
         request: WorkspaceReadFilesRequest,
     ) -> WorkspaceReadFilesResponse:
+        activity_id = new_activity_id("exploration")
+        log_activity(
+            activity_id=activity_id,
+            kind="exploration",
+            phase="started",
+            payload={"operation": "read", "paths": request.paths},
+            legacy_action="workspaceReadFiles",
+            legacy_fields={"phase": "started", "paths": request.paths},
+        )
         try:
             response = WorkspaceReadFilesResponse.model_validate(
                 await service.read_files(**request.model_dump())
             )
             log_action(
                 "workspaceReadFiles",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "read",
+                        "paths": [item.path for item in response.files],
+                        "truncated": response.truncated,
+                    },
+                },
                 workspace_id=request.workspace_id,
                 paths=request.paths,
                 start_line=request.start_line if request.start_line != 1 else None,
@@ -588,6 +738,17 @@ def register_workspace_actions(app: FastAPI) -> None:
                 workspace_id=request.workspace_id,
                 paths=request.paths,
                 error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "read",
+                        "paths": request.paths,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
             )
             _raise_http(exc)
 
@@ -605,6 +766,15 @@ def register_workspace_actions(app: FastAPI) -> None:
     async def workspace_write_file(
         request: WorkspaceWriteFileRequest,
     ) -> WorkspaceWriteFileResponse:
+        activity_id = new_activity_id("write")
+        log_activity(
+            activity_id=activity_id,
+            kind="write",
+            phase="started",
+            payload={"path": request.path, "mode": request.mode, "dry_run": request.dry_run},
+            legacy_action="workspaceWriteFile",
+            legacy_fields={"phase": "started", "path": request.path, "mode": request.mode},
+        )
         try:
             payload = request.model_dump(exclude={"encoding"})
             response = WorkspaceWriteFileResponse.model_validate(
@@ -612,6 +782,19 @@ def register_workspace_actions(app: FastAPI) -> None:
             )
             log_action(
                 "workspaceWriteFile",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "write",
+                    "phase": "completed",
+                    "payload": {
+                        "path": response.path,
+                        "operation": response.operation,
+                        "written": response.written,
+                        "dry_run": response.dry_run,
+                        "changed_files": [item.model_dump() for item in response.changed_files],
+                        "diff_stat": response.diff_stat,
+                    },
+                },
                 workspace_id=request.workspace_id,
                 path=request.path,
                 mode=request.mode,
@@ -633,6 +816,17 @@ def register_workspace_actions(app: FastAPI) -> None:
                 mode=request.mode,
                 dry_run=request.dry_run,
                 error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "write",
+                    "phase": "failed",
+                    "payload": {
+                        "path": request.path,
+                        "mode": request.mode,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
             )
             _raise_http(exc)
 
@@ -650,12 +844,39 @@ def register_workspace_actions(app: FastAPI) -> None:
     async def workspace_apply_patch(
         request: WorkspaceApplyPatchRequest,
     ) -> WorkspaceApplyPatchResponse:
+        activity_id = new_activity_id("patch")
+        log_activity(
+            activity_id=activity_id,
+            kind="patch",
+            phase="started",
+            payload={
+                "dry_run": request.dry_run,
+                "allow_delete": request.allow_delete,
+                "patch_bytes": len(request.patch.encode("utf-8")),
+            },
+            legacy_action="workspaceApplyPatch",
+            legacy_fields={
+                "phase": "started",
+                "patch_bytes": len(request.patch.encode("utf-8")),
+                "dry_run": request.dry_run,
+            },
+        )
         try:
             response = WorkspaceApplyPatchResponse.model_validate(
                 await service.apply_patch(**request.model_dump())
             )
             log_action(
                 "workspaceApplyPatch",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "patch",
+                    "phase": "completed",
+                    "payload": {
+                        "dry_run": response.dry_run,
+                        "changed_files": [item.model_dump() for item in response.changed_files],
+                        "diff_stat": response.diff_stat,
+                    },
+                },
                 workspace_id=request.workspace_id,
                 patch_bytes=len(request.patch.encode("utf-8")),
                 dry_run=True if request.dry_run else None,
@@ -673,5 +894,15 @@ def register_workspace_actions(app: FastAPI) -> None:
                 dry_run=request.dry_run,
                 allow_delete=request.allow_delete,
                 error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "patch",
+                    "phase": "failed",
+                    "payload": {
+                        "dry_run": request.dry_run,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
             )
             _raise_http(exc)

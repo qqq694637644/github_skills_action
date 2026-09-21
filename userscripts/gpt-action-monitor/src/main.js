@@ -1,9 +1,9 @@
-import { summarize } from './formatter/action-formatter.js';
+import { createActivityStore } from './activity/activity-store.js';
+import { compactActivity } from './activity/presentation.js';
 import { createActionLogClient } from './api/action-log-client.js';
 import { createSkillCatalogClient } from './api/skill-catalog-client.js';
 import { createChatGPTAdapter } from './adapters/chatgpt.js';
 import { createComposerAdapter, loadSkillsCall } from './adapters/composer.js';
-import { createEventStore } from './store/event-store.js';
 import { loadProfiles, saveProfiles } from './profile/profile-store.js';
 import { createMonitorPanel } from './ui/monitor-panel.js';
 import { createSettingsPanel } from './ui/settings-panel.js';
@@ -17,12 +17,14 @@ import { createSkillsMenu } from './ui/skills-menu.js';
   let activeProfile = null;
   let actionLogClient = null;
   let chatAdapter = null;
+  let activitySessionKey = null;
+  let activitySessionCursor = null;
   const composerAdapter = createComposerAdapter();
   const skillCatalogClient = createSkillCatalogClient({
     getProfile: () => activeProfile,
   });
 
-  const eventStore = createEventStore();
+  const activityStore = createActivityStore();
   let monitorUi = null;
   const skillsMenu = createSkillsMenu({
     loadSkills: (options) => skillCatalogClient.list(options),
@@ -36,19 +38,20 @@ import { createSkillsMenu } from './ui/skills-menu.js';
     },
   });
   monitorUi = createMonitorPanel({
-    eventStore,
+    activityStore,
     isActive: () => monitorActive,
     skillsMenu,
   });
 
   function deactivateMonitor() {
     if (!monitorActive) return;
+    const cursor = actionLogClient?.getCursor?.();
+    if (Number.isInteger(cursor)) activitySessionCursor = cursor;
     monitorActive = false;
     activeProfile = null;
     actionLogClient?.stop();
     actionLogClient = null;
     skillsMenu.close();
-    eventStore.clear();
     monitorUi.unmount();
   }
 
@@ -72,19 +75,25 @@ import { createSkillsMenu } from './ui/skills-menu.js';
 
     monitorActive = true;
     activeProfile = profile;
-    eventStore.clear();
+    const nextSessionKey = `${profile.id}\u0000${profile.backend}`;
+    if (activitySessionKey !== nextSessionKey) {
+      activityStore.clear();
+      activitySessionKey = nextSessionKey;
+      activitySessionCursor = null;
+    }
     monitorUi.mount();
     monitorUi.setStatus('idle');
 
     actionLogClient = createActionLogClient({
       getProfile: () => activeProfile,
+      initialCursor: activitySessionCursor,
+      onCursor: (cursor) => { activitySessionCursor = cursor; },
       onItems(items) {
-        let newest = null;
-        for (const item of items) {
-          newest = summarize(item.text);
-          monitorUi.recordEvent(newest);
+        const newest = activityStore.ingest(items);
+        if (newest) {
+          monitorUi.clearHint();
+          monitorUi.queueActivity(compactActivity(newest));
         }
-        if (newest) monitorUi.queueActivity(newest);
         else if (monitorUi.getStatus() === 'error') monitorUi.clearAttention();
       },
       onHint: (message) => monitorUi.recordHint(message),
@@ -111,6 +120,8 @@ import { createSkillsMenu } from './ui/skills-menu.js';
   function resume() {
     if (!monitorActive) return;
     monitorUi.resumeActivity();
+    const active = activityStore.snapshot().active.at(0);
+    if (active) monitorUi.queueActivity(compactActivity(active));
     actionLogClient?.resume();
   }
 

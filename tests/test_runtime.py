@@ -11,7 +11,13 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from skill_temple.action_logging import clear_action_events, command_for_log
+from skill_temple.action_logging import (
+    ACTION_EVENT_LIMIT,
+    clear_action_events,
+    command_for_log,
+    log_action,
+    wait_for_action_events,
+)
 from skill_temple.app import create_app, main
 from skill_temple.evals import evaluate_file
 from skill_temple.openapi_builder import build_openapi
@@ -378,8 +384,21 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(loaded.status_code, 200)
         self.assertEqual(first.status_code, 200)
         first_body = first.json()
-        self.assertEqual(len(first_body["items"]), 1)
-        self.assertIn("ACTION loadSkills", first_body["items"][0]["text"])
+        self.assertEqual(len(first_body["items"]), 2)
+        self.assertTrue(
+            all("ACTION loadSkills" in item["text"] for item in first_body["items"])
+        )
+        self.assertEqual(first_body["items"][0]["event"]["kind"], "skill")
+        self.assertEqual(first_body["items"][0]["event"]["phase"], "started")
+        self.assertEqual(first_body["items"][1]["event"]["phase"], "completed")
+        self.assertEqual(
+            first_body["items"][0]["event"]["activity_id"],
+            first_body["items"][1]["event"]["activity_id"],
+        )
+        self.assertEqual(
+            first_body["items"][1]["event"]["payload"]["skill_ids"],
+            ["github-maintenance"],
+        )
         self.assertGreater(first_body["last_id"], 0)
 
         second = client.get(
@@ -405,6 +424,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("--token <redacted>", rendered)
         self.assertNotIn("super-secret", rendered)
         self.assertNotIn("another-secret", rendered)
+
+    def test_action_event_buffer_keeps_only_the_newest_bounded_events(self) -> None:
+        clear_action_events()
+        with patch("skill_temple.action_logging.LOGGER.info"):
+            for index in range(ACTION_EVENT_LIMIT + 5):
+                log_action("bufferTest", index=index)
+
+        result = wait_for_action_events(
+            after=0,
+            timeout=0,
+            limit=ACTION_EVENT_LIMIT + 10,
+        )
+
+        self.assertEqual(len(result["items"]), ACTION_EVENT_LIMIT)
+        self.assertEqual(result["items"][0]["id"], 6)
+        self.assertEqual(result["last_id"], ACTION_EVENT_LIMIT + 5)
 
     def test_cli_disables_uvicorn_access_log_by_default(self) -> None:
         with (

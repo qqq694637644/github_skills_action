@@ -16,6 +16,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
+from .action_logging import (
+    command_for_log,
+    log_activity,
+    redact_text,
+    sensitive_environment_values,
+)
 from .workspace_patch import WorkspaceToolError
 
 OperationState = Literal[
@@ -29,6 +35,10 @@ OperationState = Literal[
 T = TypeVar("T")
 _TERMINAL_STATES = {"succeeded", "failed", "timed_out", "canceled", "interrupted"}
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ACTIVITY_OUTPUT_FLUSH_SECONDS = 0.2
+_ACTIVITY_OUTPUT_CHARS = 8_000
+_ACTIVITY_PREVIEW_CHARS = 16_384
+_ACTIVITY_PREVIEW_LINES = 3
 
 @dataclass(frozen=True)
 class OperationSettings:
@@ -57,6 +67,15 @@ class OperationRuntime:
     process: asyncio.subprocess.Process | None = None
     job: WindowsJob | None = None
     stored_bytes: int = 0
+    activity_command: str = ""
+    activity_secrets: tuple[str, ...] = ()
+    activity_output: dict[str, str] = field(
+        default_factory=lambda: {"stdout": "", "stderr": ""}
+    )
+    activity_preview: dict[str, str] = field(
+        default_factory=lambda: {"stdout": "", "stderr": ""}
+    )
+    activity_flush_task: asyncio.Task[None] | None = None
 
 
 class OperationDeadlineExceededError(Exception):
@@ -286,10 +305,15 @@ class WorkspaceOperationManager:
                 "plain_output": plain_output,
                 "max_output_bytes": output_limit,
             }
+            activity_secrets = sensitive_environment_values(os.environ)
             runtime = OperationRuntime(
                 record=record,
                 started_monotonic=started_monotonic,
                 deadline_monotonic=started_monotonic + timeout,
+                activity_command=redact_text(
+                    command_for_log(script), extra_secrets=activity_secrets
+                ),
+                activity_secrets=activity_secrets,
             )
             self._records[operation_id] = record
             self._runtimes[operation_id] = runtime
@@ -301,6 +325,25 @@ class WorkspaceOperationManager:
                 self._runtimes.pop(operation_id, None)
                 self._idempotency.pop(idempotency_index, None)
                 raise
+            log_activity(
+                activity_id=f"command:{operation_id}",
+                kind="command",
+                phase="started",
+                payload={
+                    "command": runtime.activity_command,
+                    "workspace_id": workspace_id,
+                    "operation_id": operation_id,
+                    "state": "running",
+                },
+                legacy_action="workspaceCommand",
+                legacy_fields={
+                    "action": "start",
+                    "workspace_id": workspace_id,
+                    "command": runtime.activity_command,
+                    "operation_id": operation_id,
+                    "state": "running",
+                },
+            )
             runtime.task = asyncio.create_task(
                 self._run(
                     runtime,
@@ -569,6 +612,7 @@ class WorkspaceOperationManager:
         preexec_fn = getattr(os, "setsid", None) if os.name != "nt" else None
         process_env = os.environ.copy()
         process_env["GATEWAY_JOB_READY_FILE"] = str(ready_path)
+        runtime.activity_secrets = sensitive_environment_values(process_env)
         try:
             job = await self._create_job_before_deadline(runtime)
             runtime.job = job
@@ -761,8 +805,67 @@ class WorkspaceOperationManager:
                         runtime.stored_bytes += len(accepted)
                     if len(accepted) < len(chunk):
                         runtime.record[truncated_field] = True
+                self._queue_activity_output(runtime, stream_name, chunk)
         finally:
             handle.close()
+
+    def _queue_activity_output(
+        self,
+        runtime: OperationRuntime,
+        stream_name: Literal["stdout", "stderr"],
+        chunk: bytes,
+    ) -> None:
+        text = chunk.decode("utf-8", errors="replace")
+        text = _ANSI_ESCAPE_RE.sub("", text)
+        text = redact_text(text, extra_secrets=runtime.activity_secrets)
+        if not text:
+            return
+        current = runtime.activity_output.get(stream_name, "") + text
+        if len(current) > _ACTIVITY_OUTPUT_CHARS:
+            current = current[-_ACTIVITY_OUTPUT_CHARS:]
+        runtime.activity_output[stream_name] = current
+        preview = runtime.activity_preview.get(stream_name, "") + text
+        if len(preview) > _ACTIVITY_PREVIEW_CHARS:
+            preview = preview[-_ACTIVITY_PREVIEW_CHARS:]
+        runtime.activity_preview[stream_name] = preview
+        if runtime.activity_flush_task is None or runtime.activity_flush_task.done():
+            runtime.activity_flush_task = asyncio.create_task(
+                self._flush_activity_output_after(runtime),
+                name=f"workspace-command-activity-{runtime.record['operation_id']}",
+            )
+
+    async def _flush_activity_output_after(self, runtime: OperationRuntime) -> None:
+        await asyncio.sleep(_ACTIVITY_OUTPUT_FLUSH_SECONDS)
+        self._flush_activity_output(runtime)
+
+    def _flush_activity_output(self, runtime: OperationRuntime) -> None:
+        operation_id = str(runtime.record["operation_id"])
+        buffered = runtime.activity_output
+        runtime.activity_output = {"stdout": "", "stderr": ""}
+        runtime.activity_flush_task = None
+        for stream_name in ("stdout", "stderr"):
+            delta = buffered.get(stream_name, "")
+            if not delta:
+                continue
+            log_activity(
+                activity_id=f"command:{operation_id}",
+                kind="command",
+                phase="updated",
+                payload={
+                    "command": runtime.activity_command,
+                    "workspace_id": runtime.record.get("workspace_id"),
+                    "operation_id": operation_id,
+                    "stream": stream_name,
+                    "delta": delta,
+                },
+                legacy_action="workspaceCommand",
+                legacy_fields={
+                    "action": "output",
+                    "operation_id": operation_id,
+                    "stream": stream_name,
+                    "chars": len(delta),
+                },
+            )
 
     async def _finish(
         self,
@@ -773,6 +876,10 @@ class WorkspaceOperationManager:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> None:
+        flush_task = runtime.activity_flush_task
+        if flush_task is not None and not flush_task.done():
+            flush_task.cancel()
+        self._flush_activity_output(runtime)
         async with runtime.lock:
             if runtime.record.get("state") in _TERMINAL_STATES:
                 return
@@ -785,6 +892,33 @@ class WorkspaceOperationManager:
             runtime.record["error_code"] = error_code
             runtime.record["error_message"] = error_message
             self._write_record(runtime.record)
+            payload = {
+                "command": runtime.activity_command,
+                "workspace_id": runtime.record.get("workspace_id"),
+                "operation_id": runtime.record.get("operation_id"),
+                "state": state,
+                "exit_code": exit_code,
+                "duration_ms": runtime.record["duration_ms"],
+                "error_code": error_code,
+                "error_message": error_message,
+                "stdout_preview": _tail_text_preview(runtime.activity_preview.get("stdout", "")),
+                "stderr_preview": _tail_text_preview(runtime.activity_preview.get("stderr", "")),
+            }
+        log_activity(
+            activity_id=f"command:{runtime.record['operation_id']}",
+            kind="command",
+            phase="completed" if state == "succeeded" else "failed",
+            payload=payload,
+            legacy_action="workspaceCommand",
+            legacy_fields={
+                "action": "complete",
+                "operation_id": runtime.record["operation_id"],
+                "state": state,
+                "exit_code": exit_code,
+                "duration_ms": runtime.record["duration_ms"],
+                "error_code": error_code,
+            },
+        )
 
     def _require_operation(self, operation_id: str) -> dict[str, Any]:
         record = self._records.get(operation_id)
@@ -909,3 +1043,8 @@ def _file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _tail_text_preview(text: str) -> list[str]:
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    return lines[-_ACTIVITY_PREVIEW_LINES:]

@@ -209,6 +209,10 @@
       return `${profile.id || ""}\0${profile.backend}`;
     }
     function requestCatalog(profile, key) {
+      console.debug("[GPT Action Monitor][Skills] network request start", {
+        backend: profile.backend,
+        key
+      });
       const headers = {};
       if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
       return new Promise((resolve, reject) => {
@@ -236,6 +240,9 @@
               }));
               cache.set(key, normalized);
               GM_setValue(`${storagePrefix}${key}`, normalized);
+              console.debug("[GPT Action Monitor][Skills] network request success", {
+                count: normalized.length
+              });
               resolve(normalized);
             } catch (error) {
               reject(new Error(`Skill \u5217\u8868\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`));
@@ -254,15 +261,26 @@
       const profile = getProfile();
       if (!profile) throw new Error("\u6CA1\u6709\u6D3B\u52A8\u7684\u540E\u7AEF\u914D\u7F6E\u3002");
       const key = profileKey(profile);
-      if (!refresh && cache.has(key)) return cache.get(key);
+      if (!refresh && cache.has(key)) {
+        console.debug("[GPT Action Monitor][Skills] memory cache hit", { key });
+        return cache.get(key);
+      }
       if (!refresh) {
         const stored = GM_getValue(`${storagePrefix}${key}`, null);
         if (Array.isArray(stored)) {
+          console.debug("[GPT Action Monitor][Skills] GM storage cache hit", {
+            key,
+            count: stored.length
+          });
           cache.set(key, stored);
           return stored;
         }
       }
-      if (pending.has(key)) return pending.get(key);
+      if (pending.has(key)) {
+        console.debug("[GPT Action Monitor][Skills] pending request reuse", { key });
+        return pending.get(key);
+      }
+      console.debug("[GPT Action Monitor][Skills] cache miss", { key, refresh });
       const request = requestCatalog(profile, key).finally(() => {
         if (pending.get(key) === request) pending.delete(key);
       });
@@ -1612,10 +1630,15 @@
     }
     async function refresh({ force = false } = {}) {
       const generation = ++requestGeneration;
+      console.debug("[GPT Action Monitor][Skills UI] open/refresh", { force });
       if (force) setState("\u5237\u65B0\u4E2D\u2026");
       else if (!hasRendered) setState("\u52A0\u8F7D Skills\u2026");
       try {
         const skills = await loadSkills({ refresh: force });
+        console.debug("[GPT Action Monitor][Skills UI] render", {
+          count: skills.length,
+          force
+        });
         if (!open || generation !== requestGeneration) return;
         render(skills);
       } catch (error) {

@@ -215,23 +215,21 @@ export const MONITOR_CSS = `
       white-space: nowrap;
     }
     #gpt-action-monitor .gam-hint { opacity: .58; }
-    #gpt-action-monitor .gam-skills-menu {
+    #gpt-action-monitor .gam-skills-picker {
       position: absolute;
-      inset: 38px 0 0;
+      top: 38px;
+      right: 8px;
+      width: 260px;
       z-index: 3;
-      display: grid;
-      grid-template-columns: minmax(135px, .9fr) minmax(0, 1.1fr);
-      min-height: 0;
+      max-height: 320px;
+      overflow-y: auto;
       background: color-mix(in srgb, Canvas 98%, CanvasText 2%);
+      border: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+      border-radius: 10px;
+      box-shadow: 0 10px 30px color-mix(in srgb, CanvasText 15%, transparent);
     }
-    #gpt-action-monitor .gam-skills-menu[hidden] { display: none; }
-    #gpt-action-monitor .gam-skills-primary {
-      min-width: 0;
-      display: flex;
-      flex-direction: column;
-      border-right: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
-    }
-    #gpt-action-monitor .gam-skills-menu-header {
+    #gpt-action-monitor .gam-skills-picker[hidden] { display: none; }
+    #gpt-action-monitor .gam-skills-picker-header {
       height: 34px;
       flex: 0 0 34px;
       display: flex;
@@ -258,9 +256,7 @@ export const MONITOR_CSS = `
       width: 100%;
       min-height: 32px;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
-      gap: 6px;
       padding: 5px 7px;
       border: 0;
       border-radius: 7px;
@@ -281,24 +277,24 @@ export const MONITOR_CSS = `
       white-space: nowrap;
       font-weight: 600;
     }
-    #gpt-action-monitor .gam-skill-chevron { opacity: .45; font-size: 15px; }
+    #gpt-action-monitor .gam-skill-content {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+    #gpt-action-monitor .gam-skill-description {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      opacity: .6;
+      font-size: 11px;
+      font-weight: 400;
+    }
     #gpt-action-monitor .gam-skills-state {
       padding: 12px 10px;
       color: color-mix(in srgb, CanvasText 58%, transparent);
       font-size: 11px;
-    }
-    #gpt-action-monitor .gam-skills-detail {
-      min-width: 0;
-      overflow-y: auto;
-      padding: 12px;
-      scrollbar-width: thin;
-    }
-    #gpt-action-monitor .gam-skills-detail[hidden] { display: none; }
-    #gpt-action-monitor .gam-skills-detail-description {
-      color: color-mix(in srgb, CanvasText 68%, transparent);
-      font-size: 11px;
-      line-height: 1.5;
-      overflow-wrap: anywhere;
     }
     @media (prefers-reduced-motion: reduce) {
       #gpt-action-monitor .gam-chip { transition: none; }

@@ -1,112 +1,100 @@
 export function createSkillsMenu({ loadSkills, onBeforeOpen, onSelect }) {
   const root = document.createElement('div');
-  root.className = 'gam-skills-menu';
+  root.className = 'gam-skills-picker';
   root.hidden = true;
   root.innerHTML = `
-    <div class="gam-skills-primary">
-      <div class="gam-skills-menu-header">
-        <strong>Skills</strong>
-        <button class="gam-skills-refresh" type="button" title="刷新 Skill 列表" aria-label="刷新 Skill 列表">↻</button>
-      </div>
-      <div class="gam-skills-list" role="menu" aria-label="Skills"></div>
-      <div class="gam-skills-state" hidden></div>
+    <div class="gam-skills-picker-header">
+      <strong>Skills</strong>
+      <button class="gam-skills-refresh" type="button" title="刷新 Skill 列表" aria-label="刷新 Skill 列表">↻</button>
     </div>
-    <aside class="gam-skills-detail" hidden>
-      <div class="gam-skills-detail-description"></div>
-    </aside>
+    <div class="gam-skills-state" hidden></div>
+    <div class="gam-skills-list" role="menu" aria-label="Skills"></div>
   `;
 
   const refreshButton = root.querySelector('.gam-skills-refresh');
-  const list = root.querySelector('.gam-skills-list');
   const state = root.querySelector('.gam-skills-state');
-  const detail = root.querySelector('.gam-skills-detail');
-  const detailDescription = root.querySelector('.gam-skills-detail-description');
+  const list = root.querySelector('.gam-skills-list');
   let open = false;
-  let requestGeneration = 0;
   let hasRendered = false;
+  let requestGeneration = 0;
   let triggerElement = null;
 
-  function preserveComposerFocus(event) {
+  function preserveFocus(event) {
     if (event.button === 0) event.preventDefault();
   }
 
-  function hideDetail() {
-    detail.hidden = true;
-    detailDescription.textContent = '';
-  }
-
-  function showDetail(skill) {
-    detailDescription.textContent = skill.description || '无 description';
-    detail.hidden = false;
-  }
-
-  function showState(message) {
-    list.replaceChildren();
+  function setState(message) {
     state.textContent = message;
     state.hidden = false;
-    hideDetail();
+  }
+
+  function clearState() {
+    state.hidden = true;
+    state.textContent = '';
   }
 
   function render(skills) {
     list.replaceChildren();
-    state.hidden = true;
-    hideDetail();
+    clearState();
+
     if (!skills.length) {
-      showState('后端没有可用 Skill。');
-      hasRendered = true;
+      setState('没有可用 Skill。');
       return;
     }
 
     for (const skill of skills) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'gam-skill-item';
-      button.setAttribute('role', 'menuitem');
-      button.innerHTML = '<span class="gam-skill-id"></span><span class="gam-skill-chevron">›</span>';
-      button.querySelector('.gam-skill-id').textContent = skill.skill_id;
-      button.addEventListener('pointerdown', preserveComposerFocus);
-      button.addEventListener('pointerenter', () => showDetail(skill));
-      button.addEventListener('focus', () => showDetail(skill));
-      button.addEventListener('click', () => {
-        const accepted = onSelect(skill);
-        if (accepted !== false) closeMenu();
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'gam-skill-item';
+      item.setAttribute('role', 'menuitem');
+      item.innerHTML = `
+        <span class="gam-skill-content">
+          <strong class="gam-skill-id"></strong>
+          <span class="gam-skill-description"></span>
+        </span>
+      `;
+      item.querySelector('.gam-skill-id').textContent = skill.skill_id;
+      item.querySelector('.gam-skill-description').textContent = skill.description || '';
+      item.addEventListener('pointerdown', preserveFocus);
+      item.addEventListener('click', () => {
+        if (onSelect(skill) !== false) close();
       });
-      list.appendChild(button);
+      list.appendChild(item);
     }
     hasRendered = true;
   }
 
   async function refresh({ force = false } = {}) {
     const generation = ++requestGeneration;
-    if (hasRendered) {
-      state.textContent = force ? '正在刷新…' : '正在读取 Skills…';
-      state.hidden = false;
-    } else {
-      showState('正在读取 Skills…');
-    }
+    if (hasRendered) setState(force ? '刷新中…' : '加载中…');
+    else setState('加载 Skills…');
+
     try {
       const skills = await loadSkills({ refresh: force });
       if (!open || generation !== requestGeneration) return;
       render(skills);
     } catch (error) {
       if (!open || generation !== requestGeneration) return;
-      const message = error instanceof Error ? error.message : String(error);
-      if (hasRendered) {
-        state.textContent = message;
-        state.hidden = false;
-      } else {
-        showState(message);
-      }
+      setState(error instanceof Error ? error.message : String(error));
     }
   }
 
-  function onDocumentPointerDown(event) {
-    if (root.contains(event.target) || triggerElement?.contains?.(event.target)) return;
-    closeMenu();
+  function close() {
+    if (!open) return;
+    open = false;
+    requestGeneration += 1;
+    root.hidden = true;
+    document.removeEventListener('pointerdown', outsidePointer, true);
+    document.removeEventListener('keydown', escapeKey, true);
   }
 
-  function onDocumentKeyDown(event) {
-    if (event.key === 'Escape') closeMenu();
+  function outsidePointer(event) {
+    if (root.contains(event.target) || triggerElement?.contains?.(event.target)) return;
+    close();
+  }
+
+  function escapeKey(event) {
+    if (event.key === 'Escape') close();
   }
 
   function openMenu() {
@@ -114,23 +102,13 @@ export function createSkillsMenu({ loadSkills, onBeforeOpen, onSelect }) {
     onBeforeOpen?.();
     open = true;
     root.hidden = false;
-    document.addEventListener('pointerdown', onDocumentPointerDown, true);
-    document.addEventListener('keydown', onDocumentKeyDown, true);
+    document.addEventListener('pointerdown', outsidePointer, true);
+    document.addEventListener('keydown', escapeKey, true);
     refresh();
   }
 
-  function closeMenu() {
-    if (!open) return;
-    open = false;
-    requestGeneration += 1;
-    root.hidden = true;
-    hideDetail();
-    document.removeEventListener('pointerdown', onDocumentPointerDown, true);
-    document.removeEventListener('keydown', onDocumentKeyDown, true);
-  }
-
   function toggle() {
-    if (open) closeMenu();
+    if (open) close();
     else openMenu();
   }
 
@@ -138,8 +116,8 @@ export function createSkillsMenu({ loadSkills, onBeforeOpen, onSelect }) {
     triggerElement = element;
   }
 
-  refreshButton.addEventListener('pointerdown', preserveComposerFocus);
+  refreshButton.addEventListener('pointerdown', preserveFocus);
   refreshButton.addEventListener('click', () => refresh({ force: true }));
 
-  return { element: root, open: openMenu, close: closeMenu, toggle, bindTrigger };
+  return { element: root, open: openMenu, close, toggle, bindTrigger };
 }

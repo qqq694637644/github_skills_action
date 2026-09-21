@@ -9,6 +9,7 @@ import { summarize } from './src/formatter/action-formatter.js';
 import { validateBackend } from './src/profile/profile-store.js';
 import { createActivityPanel } from './src/ui/activity-panel.js';
 import { createMonitorPanel } from './src/ui/monitor-panel.js';
+import { MONITOR_CSS } from './src/ui/styles.js';
 import {
   FakeElement,
   FakeMutationObserver,
@@ -32,6 +33,8 @@ assert.deepEqual(validateBackend('https://skills.example.com/'), {
 });
 assert.equal(validateBackend('ftp://skills.example.com').ok, false);
 assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintenance"])');
+assert.match(MONITOR_CSS, /resize:\s*both/);
+assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/);
 
 // Skill catalog reads are cached in-page, while explicit refresh performs a
 // new backend read so the server can rescan its on-disk Skill catalog.
@@ -335,7 +338,8 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   }
   activityStore.ingest(items);
   assert.equal(activityStore.snapshot().recent.length, 100);
-  assert.equal(presentActivity(activityStore.snapshot().recent[0]).title, 'Loaded skill skill-1');
+  assert.equal(presentActivity(activityStore.snapshot().recent[0]).title, 'Loaded skill skill-100');
+  assert.equal(presentActivity(activityStore.snapshot().recent.at(-1)).title, 'Loaded skill skill-1');
 
   const legacy = createActivityStore();
   legacy.ingest([{
@@ -345,6 +349,110 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   const title = presentActivity(legacy.snapshot().recent[0]).title;
   assert.equal(title, 'Ran command');
   assert.equal(title.includes('workspaceCommand'), false);
+}
+
+// Active and completed activity are newest-first so the current work remains
+// at the front of the inspector rather than forcing the user to chase the
+// bottom of a growing transcript.
+{
+  const activityStore = createActivityStore();
+  activityStore.ingest([
+    {
+      id: 600,
+      event: {
+        activity_id: 'command:older',
+        kind: 'command',
+        phase: 'started',
+        timestamp: '2026-09-21T12:00:00Z',
+        payload: { command: 'older' },
+      },
+    },
+    {
+      id: 601,
+      event: {
+        activity_id: 'command:newer',
+        kind: 'command',
+        phase: 'started',
+        timestamp: '2026-09-21T12:00:01Z',
+        payload: { command: 'newer' },
+      },
+    },
+  ]);
+  assert.deepEqual(activityStore.snapshot().active.map((cell) => cell.id), [
+    'command:newer',
+    'command:older',
+  ]);
+
+  activityStore.ingest([
+    {
+      id: 602,
+      event: {
+        activity_id: 'command:older',
+        kind: 'command',
+        phase: 'completed',
+        timestamp: '2026-09-21T12:00:02Z',
+        payload: { command: 'older', stdout_preview: ['older done'] },
+      },
+    },
+    {
+      id: 603,
+      event: {
+        activity_id: 'command:newer',
+        kind: 'command',
+        phase: 'completed',
+        timestamp: '2026-09-21T12:00:03Z',
+        payload: { command: 'newer', stdout_preview: ['newer done'] },
+      },
+    },
+  ]);
+  assert.deepEqual(activityStore.snapshot().recent.map((cell) => cell.id), [
+    'command:newer',
+    'command:older',
+  ]);
+}
+
+// Command JSON is presentation data, not an Action protocol failure. Render
+// complete JSON and common pretty-printed key/value fragments readably, and
+// emit bounded console diagnostics when JSON-like output is encountered so a
+// real browser sample can be supplied if an unfamiliar shape still looks bad.
+{
+  const diagnostics = [];
+  const originalDebug = console.debug;
+  console.debug = (...args) => diagnostics.push(args);
+  try {
+    const cell = {
+      id: 'command:json',
+      kind: 'command',
+      phase: 'completed',
+      payload: {
+        command: 'gh pr view --json state,baseRefName,headRefName',
+        stdout_preview: [
+          '{"state":"OPEN","baseRefName":"main","headRefName":"feature","headRefOid":"abc"}',
+          '"esbuild": "^0.28.2",',
+          '}',
+        ],
+        stderr_preview: [],
+      },
+      liveOutput: '',
+      entries: [],
+      revision: 1,
+    };
+    const presentation = presentActivity(cell);
+    assert.deepEqual(presentation.lines, [
+      'state: OPEN · baseRefName: main · headRefName: feature · …',
+      'esbuild: ^0.28.2',
+    ]);
+    assert.equal(diagnostics.some(([label, detail]) => (
+      label === '[GPT Action Monitor][Activity JSON]'
+      && detail.outcome === 'json-parsed'
+    )), true);
+    assert.equal(diagnostics.some(([label, detail]) => (
+      label === '[GPT Action Monitor][Activity JSON]'
+      && detail.outcome === 'json-fragment'
+    )), true);
+  } finally {
+    console.debug = originalDebug;
+  }
 }
 
 // NOW cells update in place and terminal cells move into RECENT without

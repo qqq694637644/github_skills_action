@@ -19,8 +19,13 @@ export function createActivityStore() {
   const seenOrder = [];
 
   function snapshot() {
+    const active = [...state.active.values()].sort((left, right) => {
+      const leftTime = left.updatedAt || left.startedAt || '';
+      const rightTime = right.updatedAt || right.startedAt || '';
+      return rightTime.localeCompare(leftTime);
+    });
     return {
-      active: [...state.active.values()],
+      active,
       recent: [...state.recent],
     };
   }

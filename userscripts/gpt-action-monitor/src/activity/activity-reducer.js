@@ -81,8 +81,8 @@ export function createActivityState() {
 }
 
 function addRecent(state, cell, maxHistory) {
-  state.recent.push(cell);
-  if (state.recent.length > maxHistory) state.recent = state.recent.slice(-maxHistory);
+  state.recent.unshift(cell);
+  if (state.recent.length > maxHistory) state.recent = state.recent.slice(0, maxHistory);
   return cell;
 }
 

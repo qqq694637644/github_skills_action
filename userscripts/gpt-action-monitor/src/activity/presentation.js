@@ -1,4 +1,101 @@
 const PREVIEW_LINES = 3;
+const JSON_DIAGNOSTIC_LIMIT = 100;
+const jsonDiagnostics = new Set();
+
+function rememberJsonDiagnostic(key) {
+  if (jsonDiagnostics.has(key)) return false;
+  jsonDiagnostics.add(key);
+  if (jsonDiagnostics.size > JSON_DIAGNOSTIC_LIMIT) {
+    const oldest = jsonDiagnostics.values().next().value;
+    jsonDiagnostics.delete(oldest);
+  }
+  return true;
+}
+
+function reportJsonDiagnostic(cell, raw, outcome, formatted = '') {
+  const rawPreview = String(raw || '').slice(0, 800);
+  const key = `${cell.id}:${cell.revision}:${outcome}:${rawPreview}`;
+  if (!rememberJsonDiagnostic(key)) return;
+  console.debug('[GPT Action Monitor][Activity JSON]', {
+    activityId: cell.id,
+    phase: cell.phase,
+    command: cell.payload?.command || '',
+    outcome,
+    raw: rawPreview,
+    formatted: String(formatted || '').slice(0, 800),
+  });
+}
+
+function scalarText(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return `${value.length} items`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value);
+    if (entries.length === 1) return scalarText(entries[0][1]);
+    return `${entries.length} fields`;
+  }
+  return String(value ?? '');
+}
+
+function summarizeJson(value) {
+  if (Array.isArray(value)) return `${value.length} items`;
+  if (!value || typeof value !== 'object') return scalarText(value);
+  const entries = Object.entries(value);
+  const priority = [
+    'state', 'number', 'title', 'nameWithOwner', 'defaultBranchRef',
+    'baseRefName', 'headRefName', 'url',
+  ];
+  entries.sort(([left], [right]) => {
+    const leftRank = priority.indexOf(left);
+    const rightRank = priority.indexOf(right);
+    if (leftRank < 0 && rightRank < 0) return 0;
+    if (leftRank < 0) return 1;
+    if (rightRank < 0) return -1;
+    return leftRank - rightRank;
+  });
+  const parts = entries.slice(0, 3).map(([key, nested]) => `${key}: ${scalarText(nested)}`);
+  if (entries.length > 3) parts.push('…');
+  return parts.join(' · ');
+}
+
+function readableOutputLine(cell, line) {
+  const trimmed = String(line || '').trim();
+  if (!trimmed) return '';
+  if (/^[\[\]{}],?$/.test(trimmed)) {
+    reportJsonDiagnostic(cell, trimmed, 'json-syntax-hidden');
+    return '';
+  }
+  const looksLikeJsonContainer = trimmed.startsWith('{')
+    || /^\[\s*(?:[\]{"\d\-tfn])/.test(trimmed);
+  if (looksLikeJsonContainer) {
+    try {
+      const formatted = summarizeJson(JSON.parse(trimmed));
+      reportJsonDiagnostic(cell, trimmed, 'json-parsed', formatted);
+      return formatted;
+    } catch {
+      reportJsonDiagnostic(cell, trimmed, 'json-parse-failed');
+    }
+  }
+  const fragment = trimmed.match(/^"([^"\\]+)"\s*:\s*(.+?),?$/);
+  if (fragment) {
+    let value = fragment[2].trim();
+    try {
+      value = scalarText(JSON.parse(value.replace(/,$/, '')));
+    } catch {
+      value = value.replace(/,$/, '').replace(/^"|"$/g, '');
+    }
+    const formatted = `${fragment[1]}: ${value}`;
+    reportJsonDiagnostic(cell, trimmed, 'json-fragment', formatted);
+    return formatted;
+  }
+  return trimmed;
+}
+
+function readableOutputLines(cell, lines) {
+  return compactLines((lines || []).map((line) => readableOutputLine(cell, line)).filter(Boolean));
+}
 
 function compactLines(lines) {
   return (lines || [])
@@ -16,13 +113,13 @@ function leadingLines(lines) {
 
 function outputLines(cell) {
   if (cell.phase === 'started' || cell.phase === 'updated') {
-    return compactLines(String(cell.liveOutput || '').split(/\r?\n/));
+    return readableOutputLines(cell, String(cell.liveOutput || '').split(/\r?\n/));
   }
   const payload = cell.payload || {};
   const preferred = cell.phase === 'failed'
     ? [...(payload.stdout_preview || []), ...(payload.stderr_preview || [])]
     : [...(payload.stderr_preview || []), ...(payload.stdout_preview || [])];
-  return compactLines(preferred);
+  return readableOutputLines(cell, preferred);
 }
 
 function commandPresentation(cell) {

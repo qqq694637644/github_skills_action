@@ -35,6 +35,7 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
   const close = panel.querySelector('.gam-close');
   const skillsButton = panel.querySelector('.gam-skills-button');
   const header = panel.querySelector('.gam-header');
+  const expanded = panel.querySelector('.gam-expanded');
   const activityRoot = panel.querySelector('.gam-activity-root');
   const currentAction = panel.querySelector('.gam-current-action');
   const currentDetail = panel.querySelector('.gam-current-detail');
@@ -307,6 +308,11 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
   });
   skillsButton.addEventListener('click', () => skillsMenu?.toggle());
   close.addEventListener('click', closeHistory);
+  expanded.addEventListener('pointerup', () => {
+    if (!manualOpen) return;
+    keepInViewport();
+    savePosition();
+  });
 
   return {
     mount,

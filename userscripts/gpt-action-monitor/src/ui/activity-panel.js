@@ -84,12 +84,10 @@ export function createActivityPanel({ root }) {
   const recentNodes = new Map();
 
   function render(snapshot) {
-    const wasNearBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 28;
     syncList(nowList, snapshot.active || [], nowNodes);
     syncList(recentList, snapshot.recent || [], recentNodes);
     nowSection.hidden = !(snapshot.active || []).length;
     recentSection.hidden = !(snapshot.recent || []).length;
-    if (wasNearBottom) root.scrollTop = root.scrollHeight;
   }
 
   function setHint(message) {

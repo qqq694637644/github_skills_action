@@ -25,6 +25,6 @@ npm run check
 
 `npm run build` rewrites `../gpt-action-monitor.user.js`. The generated file is committed so users can install it directly from GitHub, while maintenance stays in small, responsibility-focused source files.
 
-The expanded monitor renders structured backend activity as `NOW` and `RECENT` cells modeled after the Codex TUI: running commands update in place, inspect/search/read activity coalesces into `Explored`, command output is limited to a compact three-line preview, and file changes use aggregate `(+additions -deletions)` summaries. Completed activity history is page-session-only and capped at 100 cells.
+The expanded monitor renders structured backend activity as `NOW` and `RECENT` cells modeled after the Codex TUI: running commands update in place, `NOW` stays visible above independently scrollable newest-first history, inspect/search/read activity coalesces into `Explored`, command output is limited to a compact three-line preview, JSON-like command output is humanized when possible, and file changes use aggregate `(+additions -deletions)` summaries. The expanded window can be resized directly. Completed activity history is page-session-only and capped at 100 cells.
 
 The expanded monitor also includes a `Skills` menu. Each backend profile catalog is fetched once on demand and persisted by the userscript across ChatGPT page reloads. Only `↻` explicitly refreshes that profile catalog. Clicking a Skill inserts `loadSkills(["<skill-id>"])` at the ChatGPT composer caret without sending the message.

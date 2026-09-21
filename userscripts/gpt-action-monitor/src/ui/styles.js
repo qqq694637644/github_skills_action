@@ -103,17 +103,22 @@ export const MONITOR_CSS = `
     #gpt-action-monitor.gam-dragging .gam-header { cursor: grabbing; }
     #gpt-action-monitor .gam-expanded { display: none; }
     #gpt-action-monitor.gam-open {
-      width: min(380px, calc(100vw - 16px));
-      height: min(420px, 62vh);
+      width: auto;
+      height: auto;
     }
     #gpt-action-monitor.gam-open .gam-compact { display: none; }
     #gpt-action-monitor.gam-open .gam-expanded {
       position: relative;
-      width: 100%;
-      height: 100%;
+      width: min(380px, calc(100vw - 16px));
+      height: min(420px, 62vh);
+      min-width: min(280px, calc(100vw - 16px));
+      min-height: min(220px, calc(100vh - 16px));
+      max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 16px);
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      resize: both;
       box-sizing: border-box;
       border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
       border-radius: 12px;
@@ -180,9 +185,11 @@ export const MONITOR_CSS = `
     #gpt-action-monitor .gam-close:hover { background: color-mix(in srgb, CanvasText 7%, transparent); }
     #gpt-action-monitor .gam-activity-root {
       flex: 1;
-      overflow-y: auto;
-      padding: 6px 8px 10px;
-      scrollbar-width: thin;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding: 6px 8px 8px;
     }
     #gpt-action-monitor .gam-monitor-hint {
       margin: 4px 2px 8px;
@@ -198,6 +205,18 @@ export const MONITOR_CSS = `
       margin-top: 9px;
       padding-top: 8px;
       border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+    }
+    #gpt-action-monitor .gam-now-section {
+      flex: 0 1 auto;
+      max-height: 45%;
+      overflow-y: auto;
+      scrollbar-width: thin;
+    }
+    #gpt-action-monitor .gam-recent-section {
+      min-height: 0;
+      flex: 1 1 auto;
+      overflow-y: auto;
+      scrollbar-width: thin;
     }
     #gpt-action-monitor .gam-activity-section-label {
       padding: 2px 8px 5px;

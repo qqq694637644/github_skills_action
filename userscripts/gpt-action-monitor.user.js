@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.7.0
+// @version      0.7.1
 // @description  Show Codex-style github_skills_action activity on ChatGPT without changing the page layout.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -155,8 +155,8 @@
     };
   }
   function addRecent(state, cell, maxHistory) {
-    state.recent.push(cell);
-    if (state.recent.length > maxHistory) state.recent = state.recent.slice(-maxHistory);
+    state.recent.unshift(cell);
+    if (state.recent.length > maxHistory) state.recent = state.recent.slice(0, maxHistory);
     return cell;
   }
   function breakExplorationGroup(state) {
@@ -290,8 +290,13 @@
     const seen = /* @__PURE__ */ new Set();
     const seenOrder = [];
     function snapshot() {
+      const active = [...state.active.values()].sort((left, right) => {
+        const leftTime = left.updatedAt || left.startedAt || "";
+        const rightTime = right.updatedAt || right.startedAt || "";
+        return rightTime.localeCompare(leftTime);
+      });
       return {
-        active: [...state.active.values()],
+        active,
         recent: [...state.recent]
       };
     }
@@ -338,6 +343,102 @@
 
   // src/activity/presentation.js
   var PREVIEW_LINES = 3;
+  var JSON_DIAGNOSTIC_LIMIT = 100;
+  var jsonDiagnostics = /* @__PURE__ */ new Set();
+  function rememberJsonDiagnostic(key) {
+    if (jsonDiagnostics.has(key)) return false;
+    jsonDiagnostics.add(key);
+    if (jsonDiagnostics.size > JSON_DIAGNOSTIC_LIMIT) {
+      const oldest = jsonDiagnostics.values().next().value;
+      jsonDiagnostics.delete(oldest);
+    }
+    return true;
+  }
+  function reportJsonDiagnostic(cell, raw, outcome, formatted = "") {
+    const rawPreview = String(raw || "").slice(0, 800);
+    const key = `${cell.id}:${cell.revision}:${outcome}:${rawPreview}`;
+    if (!rememberJsonDiagnostic(key)) return;
+    console.debug("[GPT Action Monitor][Activity JSON]", {
+      activityId: cell.id,
+      phase: cell.phase,
+      command: cell.payload?.command || "",
+      outcome,
+      raw: rawPreview,
+      formatted: String(formatted || "").slice(0, 800)
+    });
+  }
+  function scalarText(value) {
+    if (value === null) return "null";
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (Array.isArray(value)) return `${value.length} items`;
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value);
+      if (entries.length === 1) return scalarText(entries[0][1]);
+      return `${entries.length} fields`;
+    }
+    return String(value ?? "");
+  }
+  function summarizeJson(value) {
+    if (Array.isArray(value)) return `${value.length} items`;
+    if (!value || typeof value !== "object") return scalarText(value);
+    const entries = Object.entries(value);
+    const priority = [
+      "state",
+      "number",
+      "title",
+      "nameWithOwner",
+      "defaultBranchRef",
+      "baseRefName",
+      "headRefName",
+      "url"
+    ];
+    entries.sort(([left], [right]) => {
+      const leftRank = priority.indexOf(left);
+      const rightRank = priority.indexOf(right);
+      if (leftRank < 0 && rightRank < 0) return 0;
+      if (leftRank < 0) return 1;
+      if (rightRank < 0) return -1;
+      return leftRank - rightRank;
+    });
+    const parts = entries.slice(0, 3).map(([key, nested]) => `${key}: ${scalarText(nested)}`);
+    if (entries.length > 3) parts.push("\u2026");
+    return parts.join(" \xB7 ");
+  }
+  function readableOutputLine(cell, line) {
+    const trimmed = String(line || "").trim();
+    if (!trimmed) return "";
+    if (/^[\[\]{}],?$/.test(trimmed)) {
+      reportJsonDiagnostic(cell, trimmed, "json-syntax-hidden");
+      return "";
+    }
+    const looksLikeJsonContainer = trimmed.startsWith("{") || /^\[\s*(?:[\]{"\d\-tfn])/.test(trimmed);
+    if (looksLikeJsonContainer) {
+      try {
+        const formatted = summarizeJson(JSON.parse(trimmed));
+        reportJsonDiagnostic(cell, trimmed, "json-parsed", formatted);
+        return formatted;
+      } catch {
+        reportJsonDiagnostic(cell, trimmed, "json-parse-failed");
+      }
+    }
+    const fragment = trimmed.match(/^"([^"\\]+)"\s*:\s*(.+?),?$/);
+    if (fragment) {
+      let value = fragment[2].trim();
+      try {
+        value = scalarText(JSON.parse(value.replace(/,$/, "")));
+      } catch {
+        value = value.replace(/,$/, "").replace(/^"|"$/g, "");
+      }
+      const formatted = `${fragment[1]}: ${value}`;
+      reportJsonDiagnostic(cell, trimmed, "json-fragment", formatted);
+      return formatted;
+    }
+    return trimmed;
+  }
+  function readableOutputLines(cell, lines) {
+    return compactLines((lines || []).map((line) => readableOutputLine(cell, line)).filter(Boolean));
+  }
   function compactLines(lines) {
     return (lines || []).map((line) => String(line || "").trimEnd()).filter((line) => line.trim()).slice(-PREVIEW_LINES);
   }
@@ -346,11 +447,11 @@
   }
   function outputLines(cell) {
     if (cell.phase === "started" || cell.phase === "updated") {
-      return compactLines(String(cell.liveOutput || "").split(/\r?\n/));
+      return readableOutputLines(cell, String(cell.liveOutput || "").split(/\r?\n/));
     }
     const payload = cell.payload || {};
     const preferred = cell.phase === "failed" ? [...payload.stdout_preview || [], ...payload.stderr_preview || []] : [...payload.stderr_preview || [], ...payload.stdout_preview || []];
-    return compactLines(preferred);
+    return readableOutputLines(cell, preferred);
   }
   function commandPresentation(cell) {
     const payload = cell.payload || {};
@@ -1091,17 +1192,22 @@
     #gpt-action-monitor.gam-dragging .gam-header { cursor: grabbing; }
     #gpt-action-monitor .gam-expanded { display: none; }
     #gpt-action-monitor.gam-open {
-      width: min(380px, calc(100vw - 16px));
-      height: min(420px, 62vh);
+      width: auto;
+      height: auto;
     }
     #gpt-action-monitor.gam-open .gam-compact { display: none; }
     #gpt-action-monitor.gam-open .gam-expanded {
       position: relative;
-      width: 100%;
-      height: 100%;
+      width: min(380px, calc(100vw - 16px));
+      height: min(420px, 62vh);
+      min-width: min(280px, calc(100vw - 16px));
+      min-height: min(220px, calc(100vh - 16px));
+      max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 16px);
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      resize: both;
       box-sizing: border-box;
       border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
       border-radius: 12px;
@@ -1168,9 +1274,11 @@
     #gpt-action-monitor .gam-close:hover { background: color-mix(in srgb, CanvasText 7%, transparent); }
     #gpt-action-monitor .gam-activity-root {
       flex: 1;
-      overflow-y: auto;
-      padding: 6px 8px 10px;
-      scrollbar-width: thin;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      padding: 6px 8px 8px;
     }
     #gpt-action-monitor .gam-monitor-hint {
       margin: 4px 2px 8px;
@@ -1186,6 +1294,18 @@
       margin-top: 9px;
       padding-top: 8px;
       border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
+    }
+    #gpt-action-monitor .gam-now-section {
+      flex: 0 1 auto;
+      max-height: 45%;
+      overflow-y: auto;
+      scrollbar-width: thin;
+    }
+    #gpt-action-monitor .gam-recent-section {
+      min-height: 0;
+      flex: 1 1 auto;
+      overflow-y: auto;
+      scrollbar-width: thin;
     }
     #gpt-action-monitor .gam-activity-section-label {
       padding: 2px 8px 5px;
@@ -1565,12 +1685,10 @@
     const nowNodes = /* @__PURE__ */ new Map();
     const recentNodes = /* @__PURE__ */ new Map();
     function render(snapshot) {
-      const wasNearBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 28;
       syncList(nowList, snapshot.active || [], nowNodes);
       syncList(recentList, snapshot.recent || [], recentNodes);
       nowSection.hidden = !(snapshot.active || []).length;
       recentSection.hidden = !(snapshot.recent || []).length;
-      if (wasNearBottom) root.scrollTop = root.scrollHeight;
     }
     function setHint(message) {
       hint.textContent = message || "";
@@ -1619,6 +1737,7 @@
     const close = panel.querySelector(".gam-close");
     const skillsButton = panel.querySelector(".gam-skills-button");
     const header = panel.querySelector(".gam-header");
+    const expanded = panel.querySelector(".gam-expanded");
     const activityRoot = panel.querySelector(".gam-activity-root");
     const currentAction = panel.querySelector(".gam-current-action");
     const currentDetail = panel.querySelector(".gam-current-detail");
@@ -1861,6 +1980,11 @@
     });
     skillsButton.addEventListener("click", () => skillsMenu?.toggle());
     close.addEventListener("click", closeHistory);
+    expanded.addEventListener("pointerup", () => {
+      if (!manualOpen) return;
+      keepInViewport();
+      savePosition();
+    });
     return {
       mount,
       unmount,
@@ -2342,7 +2466,7 @@
     function resume() {
       if (!monitorActive) return;
       monitorUi.resumeActivity();
-      const active = activityStore.snapshot().active.at(-1);
+      const active = activityStore.snapshot().active.at(0);
       if (active) monitorUi.queueActivity(compactActivity(active));
       actionLogClient?.resume();
     }

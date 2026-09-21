@@ -120,7 +120,7 @@ import { createSkillsMenu } from './ui/skills-menu.js';
   function resume() {
     if (!monitorActive) return;
     monitorUi.resumeActivity();
-    const active = activityStore.snapshot().active.at(-1);
+    const active = activityStore.snapshot().active.at(0);
     if (active) monitorUi.queueActivity(compactActivity(active));
     actionLogClient?.resume();
   }

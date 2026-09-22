@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         GPT Action Monitor
 // @namespace    https://github.com/qqq694637644/github_skills_action
-// @version      0.7.4
+// @version      0.7.5
 // @description  Show Codex-style github_skills_action activity on ChatGPT without changing the page layout.
+// @updateURL    https://github.com/qqq694637644/github_skills_action/releases/latest/download/gpt-action-monitor.user.js
+// @downloadURL  https://github.com/qqq694637644/github_skills_action/releases/latest/download/gpt-action-monitor.user.js
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @grant        GM_xmlhttpRequest
@@ -671,22 +673,26 @@
   }
   function genericPresentation(cell) {
     const payload = cell.payload || {};
+    const active = cell.phase === "started" || cell.phase === "updated";
     const locator = locatorPresentation(cell);
     if (locator) return locator;
     if (payload.operation === "prepare_workspace") {
-      const title = cell.phase === "failed" ? "Failed to prepare workspace" : "Prepared workspace";
+      const title2 = cell.phase === "failed" ? "Failed to prepare workspace" : active ? "Preparing workspace" : "Prepared workspace";
       return {
-        status: cell.phase === "failed" ? "failed" : "completed",
-        title,
+        status: cell.phase === "failed" ? "failed" : active ? "active" : "completed",
+        title: title2,
         lines: compactLines([payload.diagnostic || payload.workspace_id]),
-        detail: payload.workspace_id || title
+        detail: payload.workspace_id || title2
       };
     }
+    const status = cell.phase === "failed" ? "failed" : active ? "active" : "completed";
+    const title = status === "failed" ? "Failed action" : status === "active" ? "Running action" : "Completed action";
+    const detail = payload.diagnostic || (status === "failed" ? "Action failed" : status === "active" ? "Action in progress" : "Action completed");
     return {
-      status: cell.phase === "failed" ? "failed" : "completed",
-      title: cell.phase === "failed" ? "Failed action" : "Completed action",
+      status,
+      title,
       lines: compactLines([payload.diagnostic || ""]),
-      detail: payload.diagnostic || "Action completed"
+      detail
     };
   }
   function presentActivity(cell) {
@@ -2072,6 +2078,7 @@
         window.clearTimeout(activityTimer);
         activityTimer = null;
       }
+      clearHint();
     }
     function recordHint(message) {
       if (!message || message === lastHint) return;

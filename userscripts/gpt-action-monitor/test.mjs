@@ -299,6 +299,27 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.equal(failedLocator.status, 'failed');
   assert.equal(failedLocator.title, 'Failed to get section locator 2.6.99');
   assert.deepEqual(failedLocator.lines, ['Section not found']);
+
+  const unknownRunning = presentActivity({
+    id: 'generic:running',
+    kind: 'future-kind',
+    phase: 'updated',
+    payload: { operation: 'future_operation' },
+    revision: 1,
+  });
+  assert.equal(unknownRunning.status, 'active');
+  assert.equal(unknownRunning.title, 'Running action');
+  assert.equal(unknownRunning.detail, 'Action in progress');
+
+  const preparingWorkspace = presentActivity({
+    id: 'generic:workspace',
+    kind: 'future-kind',
+    phase: 'started',
+    payload: { operation: 'prepare_workspace' },
+    revision: 1,
+  });
+  assert.equal(preparingWorkspace.status, 'active');
+  assert.equal(preparingWorkspace.title, 'Preparing workspace');
 }
 
 // Consecutive inspect/search/read activity is coalesced into one Codex-style
@@ -655,6 +676,34 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   document.visibilityState = 'visible';
   panel.resumeActivity();
   assert.equal(timers.size, 0);
+}
+
+// Profile/session teardown must clear connection hints as well as queued
+// activity so a newly mounted profile cannot inherit stale backend status.
+{
+  const { document } = installDomFixture();
+  const panel = createMonitorPanel({
+    activityStore: createActivityStore(),
+    isActive: () => true,
+  });
+  panel.mount();
+  const panelElement = document.body.children[0];
+  const activityRoot = panelElement.querySelector('.gam-activity-root');
+  const hint = activityRoot.querySelector('.gam-monitor-hint');
+
+  panel.recordHint('Profile A disconnected');
+  assert.equal(hint.textContent, 'Profile A disconnected');
+  assert.equal(hint.hidden, false);
+
+  panel.unmount();
+  assert.equal(hint.textContent, '');
+  assert.equal(hint.hidden, true);
+
+  panel.mount();
+  panel.recordHint('Profile A disconnected');
+  assert.equal(hint.textContent, 'Profile A disconnected');
+  assert.equal(hint.hidden, false);
+  panel.unmount();
 }
 
 // Poll suspension must abort the active request and resume with a fresh poll

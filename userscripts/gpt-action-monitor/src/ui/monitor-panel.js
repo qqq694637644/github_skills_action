@@ -321,6 +321,7 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
       window.clearTimeout(activityTimer);
       activityTimer = null;
     }
+    clearHint();
   }
 
   function recordHint(message) {

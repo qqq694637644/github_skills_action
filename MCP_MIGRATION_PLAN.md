@@ -1,29 +1,64 @@
-# ChatGPT Web MCP Migration Plan
+# ChatGPT 网页版 MCP 迁移计划
 
-## Goal
+## 目标
 
-Migrate the current Custom GPT Actions integration to a ChatGPT Web remote MCP integration while preserving the backend behavior that is already stable in personal use.
+把当前基于 Custom GPT Actions 的接入方式迁移到 ChatGPT 网页版远程 MCP，同时尽量保持现有后端行为不变。
 
-This is a transport/authentication migration, not a redesign of the workspace execution model.
+这次迁移的重点是：
 
-## Non-goals
+- 更换 ChatGPT 与后端之间的接入协议；
+- 增加符合网页版 MCP 要求的 OAuth 认证；
+- 保留已经稳定使用的 Workspace 执行模型；
+- 不为了迁移去重构已经用顺手的任意 PowerShell 和长任务状态机。
 
-- Do not register or redesign `github-maintenance` as a native ChatGPT Web Skill as part of this migration.
-- Do not replace arbitrary PowerShell with narrow command-specific tools.
-- Do not split `workspaceCommand(action=start|get|logs|cancel|list)` into separate tools.
-- Do not introduce multi-user tenancy, per-user workspaces, or per-user GitHub credentials.
-- Do not refactor the workspace engine unless required by MCP compatibility.
+这不是一次 Workspace 架构重写。
 
-## Current behavior that must remain compatible
+## 本次不做的事情
 
-The following backend behavior is intentionally preserved:
+- 不把 `github-maintenance` 注册或重构成 ChatGPT 网页版原生 Skill。
+- 不把任意 PowerShell 改成一堆狭窄的专用命令工具。
+- 不拆分 `workspaceCommand(action=start|get|logs|cancel|list)`。
+- 不引入多用户、多租户、每用户独立 Workspace。
+- 不引入每用户独立 GitHub 凭据。
+- 除非 MCP 兼容性确实要求，否则不重构 Workspace 内核。
 
-- One persistent workspace root managed by the existing workspace registry.
-- One personal service account / OS account.
-- Existing `git`, `gh`, Python, build tools, network CLIs, and project tooling available through arbitrary PowerShell.
-- Existing workspace file/search/patch behavior.
-- Existing operation persistence, timeout, cancellation, log paging, and idempotency behavior.
-- `workspaceCommand` remains one tool with the current state machine:
+## 必须保持兼容的现有行为
+
+以下行为都视为迁移后的兼容性要求。
+
+### 1. 保留单用户、单环境模型
+
+继续维持：
+
+- 一个持久化 Workspace 根目录；
+- 一个后端服务 OS 账户；
+- 一套现有的 `git` / `gh` 凭据；
+- 一套 Python、构建工具、网络 CLI 和项目工具环境。
+
+这是个人使用场景，不因为接入 OAuth 就强行改成多租户系统。
+
+### 2. 保留任意 PowerShell
+
+`workspaceCommand` 继续允许直接执行任意 PowerShell。
+
+例如现有能力继续保留：
+
+- `git`；
+- `gh`；
+- Python；
+- 测试、构建、lint；
+- 项目 CLI；
+- 网络 CLI；
+- 多条命令组合；
+- 其他 PowerShell 能执行的操作。
+
+不增加命令白名单，不增加命令解析器。
+
+实际命令权限仍然由后端服务所在 OS 账户决定。
+
+### 3. 保留 `workspaceCommand` 单工具状态机
+
+继续保留当前工具形式：
 
 ```text
 workspaceCommand(
@@ -32,112 +67,234 @@ workspaceCommand(
 )
 ```
 
-For long-running commands the expected flow remains:
+长任务继续按当前方式工作：
 
 ```text
 start -> operation_id -> get/logs -> terminal state
 ```
 
-No command allowlist or command parser is introduced. The effective command permissions remain those of the service OS account.
+需要继续保留：
 
-## ChatGPT Web MCP requirements that affect this migration
+- `start` 启动命令；
+- 短命令直接返回终态；
+- 长命令返回 `operation_id`；
+- `get` 查询状态；
+- `logs` 分页读取 stdout/stderr；
+- `cancel` 取消运行中的命令；
+- `list` 查看操作列表；
+- timeout；
+- operation 持久化；
+- stdout/stderr continuation offset；
+- truncation 标记；
+- 现有 idempotency 行为。
 
-The target integration must follow the current ChatGPT plugin/MCP connection requirements rather than the old Custom GPT Actions model.
+这里不做拆工具重构。
 
-### Transport
+## ChatGPT 网页版 MCP 对本项目有影响的要求
 
-Use a remote MCP endpoint over Streamable HTTP at a stable HTTPS URL, normally `/mcp`.
+目标接入方式需要遵循当前 ChatGPT Plugin / Remote MCP 的要求，而不是继续沿用 Custom GPT Actions 的认证模型。
 
-For development, Secure MCP Tunnel can be used instead of exposing the local server directly. The normal deployed path should remain a stable remote endpoint if the existing service is already remotely hosted.
+## MCP 传输方式
 
-### Authentication
+使用远程 MCP 的 Streamable HTTP 方式，对外提供稳定 HTTPS 地址。
 
-Although ChatGPT can connect to anonymous (`noauth`) MCP tools, this backend exposes private workspace state and write/command execution. The migration therefore treats OAuth as required for this project.
-
-Use OAuth 2.1-compatible MCP authorization with authorization-code + PKCE (`S256`).
-
-The MCP resource server must support the authorization discovery flow expected by ChatGPT, including protected-resource metadata and an authorization server that publishes the required OAuth metadata.
-
-At minimum the authentication path must support:
-
-- `/.well-known/oauth-protected-resource` (or equivalent discovery advertised through `WWW-Authenticate`).
-- OAuth authorization-server metadata.
-- Authorization-code flow with PKCE `S256`.
-- Propagation and validation of the MCP `resource` parameter / token audience.
-- Access-token verification on MCP requests.
-- Tool `securitySchemes` declaring OAuth for the protected tools.
-- The MCP OAuth challenge metadata required for ChatGPT to surface account linking when authorization is missing or insufficient.
-
-The old fixed `SKILL_TEMPLE_BEARER_TOKEN` mechanism must not be treated as the ChatGPT MCP authentication mechanism. ChatGPT does not provide an arbitrary custom API-key field for this connection model.
-
-### Personal-use authentication model
-
-OAuth does not imply multi-tenancy for this project.
-
-The first implementation should remain deliberately single-user:
+建议入口：
 
 ```text
-ChatGPT account
-    -> OAuth authorization
-    -> one MCP deployment
-    -> one service OS account
-    -> one existing workspace root
-    -> one existing gh/git credential context
+https://<domain>/mcp
 ```
 
-The authorization server may have only one permitted user/account. The resource server still validates tokens correctly, but no tenant abstraction is added to the workspace backend.
+本地开发时可以使用 Secure MCP Tunnel 或等价方式临时暴露服务。
 
-Prefer using an established OAuth/OIDC provider that can satisfy the MCP authorization metadata and PKCE requirements. If a minimal self-hosted authorization server is chosen instead, it must still satisfy the same protocol contract; "personal use" is not a reason to fall back to a static bearer token on the ChatGPT-facing endpoint.
+生产使用时应提供稳定远程 HTTPS MCP 地址。
 
-## Target architecture
+## OAuth 认证
+
+ChatGPT 可以连接匿名 `noauth` MCP，但本项目不应该使用匿名方式。
+
+原因很直接：当前 MCP 后端将拥有以下能力：
+
+- 读取私有 Workspace；
+- 修改文件；
+- 应用 patch；
+- 执行任意 PowerShell；
+- 调用 `git` / `gh`；
+- 运行网络命令。
+
+因此，本项目把 OAuth 认证作为迁移必做项。
+
+### OAuth 方案
+
+采用符合当前 MCP / ChatGPT 要求的 OAuth 2.1 授权流程：
+
+```text
+Authorization Code + PKCE S256
+```
+
+MCP Resource Server 至少需要支持：
+
+- Protected Resource Metadata；
+- OAuth Authorization Server Metadata；
+- Authorization Code Flow；
+- PKCE `S256`；
+- MCP `resource` 参数；
+- Access Token audience 校验；
+- Access Token issuer 校验；
+- Access Token expiry 校验；
+- scope 校验；
+- MCP 工具 `securitySchemes`；
+- 未授权或权限不足时返回 ChatGPT 能识别的 OAuth challenge 信息。
+
+### Protected Resource Metadata
+
+MCP 服务需要暴露或正确声明类似：
+
+```text
+/.well-known/oauth-protected-resource
+```
+
+也可以通过标准 `WWW-Authenticate` discovery 方式引导 ChatGPT 找到 protected-resource metadata。
+
+### 旧 Bearer Token 的处理
+
+现有：
+
+```text
+SKILL_TEMPLE_BEARER_TOKEN
+```
+
+不能继续作为 ChatGPT 网页版 MCP 的主要认证方式。
+
+它可以暂时保留给旧 Actions 接口或内部调试，但 ChatGPT Web -> MCP 这条正式链路应改成 OAuth。
+
+## 个人使用的 OAuth 模型
+
+这里最重要的一点是：
+
+**OAuth 不等于必须做多租户。**
+
+本项目仍然按单用户部署：
+
+```text
+ChatGPT 账号
+    ↓
+OAuth 授权
+    ↓
+一个 MCP 服务实例
+    ↓
+一个服务 OS 账户
+    ↓
+一个现有 Workspace 根目录
+    ↓
+一套现有 git / gh 登录状态
+```
+
+OAuth 的作用只是确认：
+
+> 当前请求确实来自已经授权的 ChatGPT 客户端。
+
+不在 Workspace 内核里引入：
+
+```text
+user_id -> workspace
+user_id -> github credential
+user_id -> tenant
+```
+
+这些当前都没有必要。
+
+第一版可以只允许一个个人账号完成授权。
+
+如果使用现成 OAuth/OIDC Provider，应选择能满足 MCP metadata、PKCE、resource/audience 等要求的方案。
+
+如果自己实现最小 OAuth Authorization Server，也必须完整满足同样的协议要求，不能因为“只是个人用”就把 ChatGPT-facing MCP 改回固定静态 Bearer Token。
+
+## 目标架构
 
 ```text
 ChatGPT Web
     |
     | MCP Streamable HTTP + OAuth 2.1
     v
-Remote MCP endpoint (/mcp)
+Remote MCP Endpoint (/mcp)
     |
     v
-Thin MCP adapter
+薄 MCP Adapter
     |
     v
-WorkspaceActionService / existing transport-independent facade
+WorkspaceActionService
     |
     v
 LocalWorkspaceService
+    |
     |-- WorkspaceRegistry
-    |-- file/search/patch services
+    |-- Workspace Files/Search/Patch
     `-- WorkspaceOperationManager
-           `-- arbitrary PowerShell / git / gh / project CLI
+            |
+            `-- 任意 PowerShell / git / gh / 项目 CLI
 ```
 
-OAuth belongs at the MCP boundary. Workspace ownership/tenant concepts should not be pushed into the existing backend for this personal deployment.
+原则：
 
-## Repository changes
+- OAuth 放在 MCP 边界；
+- MCP adapter 尽量薄；
+- Workspace 内核继续保持 transport-independent；
+- 不把 OAuth 用户概念强行下沉到现有 Workspace 服务。
 
-### Add
+## 仓库改造范围
 
-- `src/skill_temple/mcp_server.py` (or equivalent) as the MCP server/transport entry point.
-- OAuth resource-server integration for the MCP endpoint.
-- Configuration for authorization-server issuer/audience/scopes and the protected-resource metadata URL.
-- MCP contract tests.
-- Deployment/configuration documentation for connecting the server from ChatGPT Web.
+## 新增
 
-### Reuse with minimal changes
+建议新增：
 
-- `src/skill_temple/workspace_registry.py`
-- `src/skill_temple/workspace_files.py`
-- `src/skill_temple/workspace_patch.py`
-- `src/skill_temple/workspace_operations.py`
-- `src/skill_temple/workspace_actions.py`
-- Existing workspace/regression tests.
+```text
+src/skill_temple/mcp_server.py
+```
 
-`workspace_actions.py` should remain the transport-independent facade if practical. The MCP layer should translate MCP requests/results to the existing service API rather than reimplement workspace behavior.
+或等价 MCP 入口文件。
 
-### Keep unchanged semantically
+同时新增：
 
-Expose the existing tool set through MCP:
+- MCP SDK 依赖；
+- Streamable HTTP `/mcp` 入口；
+- OAuth Resource Server 集成；
+- OAuth issuer / audience / scope 配置；
+- protected-resource metadata；
+- MCP contract tests；
+- ChatGPT Web 连接说明；
+- OAuth 配置说明。
+
+## 尽量原样复用
+
+以下模块优先保持不动，或者只做非常小的兼容修改：
+
+```text
+src/skill_temple/workspace_registry.py
+src/skill_temple/workspace_files.py
+src/skill_temple/workspace_patch.py
+src/skill_temple/workspace_operations.py
+src/skill_temple/workspace_actions.py
+```
+
+现有 Workspace 测试也继续保留。
+
+如果当前 `workspace_actions.py` 已经承担 transport-independent facade 的作用，就继续让它承担这一层职责。
+
+目标结构：
+
+```text
+MCP Tool
+    ↓
+WorkspaceActionService
+    ↓
+LocalWorkspaceService
+```
+
+而不是在 MCP 层重新实现一遍文件、patch、operation 逻辑。
+
+## MCP 暴露的工具
+
+保持当前工具集合：
 
 - `prepareWorkspace`
 - `workspaceInspect`
@@ -147,120 +304,298 @@ Expose the existing tool set through MCP:
 - `workspaceApplyPatch`
 - `workspaceCommand`
 
-Keep the existing `workspaceCommand.action` enum and input/result semantics wherever MCP schema rules permit.
+其中：
 
-### Retire only after MCP parity is proven
+```text
+workspaceCommand.action
+```
 
-- Custom GPT Actions/OpenAPI transport code that has no remaining caller.
-- GPT Actions-only skill-loading endpoints if no retained workflow uses them.
-- ChatGPT-page action-log polling endpoints used by the userscript.
-- Tampermonkey runtime dependency for normal use.
-- Tampermonkey release/publishing workflow if the userscript is not retained as a debugging utility.
+继续保留：
 
-Do not delete legacy integration pieces in the first MCP implementation commit. Keep rollback possible until the Web MCP path has been exercised successfully.
+```text
+start | get | logs | cancel | list
+```
 
-## Implementation phases
+只在 MCP schema 本身有硬性限制时做最小适配，不主动改参数和返回语义。
 
-### Phase 1: MCP transport adapter
+## 暂时保留旧链路
 
-1. Add the MCP SDK dependency.
-2. Create the Streamable HTTP MCP endpoint.
-3. Register the seven existing workspace tools.
-4. Route each tool directly into the existing workspace action/service layer.
-5. Preserve current request validation, result fields, truncation markers, continuation offsets, and error codes where practical.
-6. Keep the old Actions transport available in parallel during migration.
+第一阶段不要一上来就删除现有 Custom GPT Actions 实现。
 
-Exit criterion: MCP Inspector can discover and invoke all seven tools against the same backend implementation used by the current Actions API.
+迁移期保持：
 
-### Phase 2: OAuth 2.1 for ChatGPT Web
+```text
+旧 Actions -> WorkspaceActionService
+新 MCP     -> WorkspaceActionService
+```
 
-1. Select the OAuth/OIDC provider or minimal authorization-server implementation.
-2. Configure a single permitted personal identity.
-3. Publish MCP protected-resource metadata.
-4. Publish/consume the required OAuth authorization-server metadata.
-5. Configure authorization-code + PKCE `S256`.
-6. Ensure the MCP `resource` value is reflected in the issued token audience and validated by the MCP server.
-7. Declare OAuth `securitySchemes` on all workspace tools.
-8. Return the expected MCP OAuth challenge metadata when the token is absent/invalid/insufficient.
-9. Validate issuer, audience, expiry, and required scope(s) on every protected MCP request.
+也就是两个 transport 暂时共用同一个后端。
 
-A small scope model is sufficient for personal use. A single scope such as `workspace:execute` is acceptable initially if it covers the whole tool surface and keeps configuration simple.
+这样做有两个好处：
 
-Exit criterion: ChatGPT Web can complete account linking and subsequently invoke MCP tools with a validated access token; unauthenticated direct calls cannot execute workspace tools.
+- MCP 有问题可以快速对比旧链路；
+- 可以验证 MCP adapter 是否真正做到行为兼容。
 
-### Phase 3: Behavioral parity tests
+只有网页版 MCP 全链路验证完成后，再删除旧代码。
 
-Add MCP-level tests for:
+## 最终可以退役的旧组件
 
-- tool discovery and schemas;
-- OAuth-required behavior;
-- invalid/expired/wrong-audience token rejection;
-- `prepareWorkspace` creation/reuse;
-- inspect/search/read;
-- write/patch including dry-run and hash mismatch;
-- synchronous `workspaceCommand(start)` completion;
-- asynchronous `start -> get/logs -> terminal state`;
-- `cancel`;
-- `list`;
-- stdout/stderr continuation offsets and truncation;
-- command failure and timeout;
-- invalid workspace/operation IDs.
+MCP 跑通以后，再考虑删除或归档：
 
-Keep the existing workspace test suite as the primary regression suite. MCP tests should prove adapter/auth correctness, not duplicate all backend unit coverage.
+- Custom GPT Actions / OpenAPI transport；
+- 只为 GPT Actions Skill loader 服务的接口；
+- 页面 action-log polling 接口；
+- 油猴脚本正常使用依赖；
+- 油猴发布 workflow。
 
-Exit criterion: existing tests still pass and new MCP/auth contract tests pass.
+后端中仍有通用价值的部分继续保留，例如：
 
-### Phase 4: ChatGPT Web end-to-end validation
+- 日志；
+- secret redact；
+- operation diagnostics；
+- PowerShell operation state；
+- timeout / cancellation；
+- stdout / stderr 分页。
 
-From the actual ChatGPT Web plugin connection, exercise representative real workflows:
+## 实施阶段
 
-1. Create/reuse a workspace.
-2. Clone or inspect a repository through `workspaceCommand`.
-3. Search/read files.
-4. Apply a patch.
-5. Run tests/build commands.
-6. Run `git` and `gh` through arbitrary PowerShell.
-7. Start a long-running command and follow it through `get` / `logs`.
-8. Cancel a running command.
-9. Confirm a later chat/tool call can reuse persistent workspace state as expected.
+## 阶段 1：增加 MCP 传输层
 
-Exit criterion: the Web MCP path provides the same practical workflow currently provided by GPT Actions, without requiring the userscript.
+### 工作内容
 
-### Phase 5: Legacy cleanup
+1. 增加 MCP SDK。
+2. 创建 Streamable HTTP MCP Server。
+3. 暴露 `/mcp`。
+4. 注册现有 7 个 Workspace 工具。
+5. 每个工具直接调用现有 `WorkspaceActionService` / `LocalWorkspaceService`。
+6. 尽量保留现有：
+   - 参数校验；
+   - 返回字段；
+   - error code；
+   - truncation；
+   - continuation offset；
+   - operation state。
+7. 旧 Actions transport 暂时继续运行。
 
-Only after Phase 4 succeeds:
+### 验收标准
 
-1. Make MCP the documented primary integration.
-2. Remove/archive Custom GPT Actions/OpenAPI-only transport code no longer used.
-3. Remove/archive the userscript path from normal setup.
-4. Remove its release workflow if it is no longer needed.
-5. Retain backend logging/redaction/operation diagnostics that are useful independently of the userscript.
-6. Re-run the full test/lint suite after cleanup.
+使用 MCP Inspector 可以：
 
-## Verification commands
+- 正确发现全部 7 个工具；
+- 正确读取工具 schema；
+- 调用工具；
+- 实际进入现有 Workspace 后端；
+- 不需要为 MCP 重新实现 Workspace 逻辑。
 
-At each implementation stage run the most direct checks first, then the full suite:
+## 阶段 2：实现 ChatGPT Web OAuth
+
+### 工作内容
+
+1. 确定 OAuth/OIDC Provider 或最小 Authorization Server 方案。
+2. 只允许个人账号完成授权。
+3. 提供 MCP Protected Resource Metadata。
+4. 提供或正确引用 Authorization Server Metadata。
+5. 实现 Authorization Code + PKCE `S256`。
+6. 正确处理 MCP `resource` 参数。
+7. Token 中 audience 必须匹配当前 MCP resource。
+8. MCP Server 校验：
+   - issuer；
+   - audience；
+   - expiry；
+   - scope。
+9. 所有 Workspace MCP tools 声明 OAuth `securitySchemes`。
+10. 无 Token、Token 无效或 scope 不足时，返回 ChatGPT 能识别的 OAuth challenge。
+
+### Scope
+
+个人使用第一版不需要复杂 scope 系统。
+
+可以先使用一个完整 Workspace 权限：
+
+```text
+workspace:execute
+```
+
+这个 scope 直接覆盖整个 Workspace MCP 能力即可。
+
+以后如果真有需要，再拆：
+
+```text
+workspace:read
+workspace:write
+workspace:execute
+```
+
+当前没有必要为了形式增加复杂度。
+
+### 验收标准
+
+在 ChatGPT Web 中：
+
+1. 添加 MCP；
+2. 正确触发 OAuth 登录/授权；
+3. 完成账号授权；
+4. ChatGPT 获得有效 Access Token；
+5. MCP 服务正确验证 Token；
+6. 授权后能够调用 Workspace tools；
+7. 未授权的直接请求无法执行 Workspace tools。
+
+## 阶段 3：MCP 行为兼容测试
+
+新增 MCP 层测试，重点验证 adapter 和 auth，不重复现有 Workspace 单元测试。
+
+需要覆盖：
+
+### Tool discovery
+
+- 7 个工具全部存在；
+- schema 正确；
+- `workspaceCommand.action` 包含：
+  - `start`
+  - `get`
+  - `logs`
+  - `cancel`
+  - `list`
+
+### OAuth
+
+- 没有 Token；
+- 无效 Token；
+- 过期 Token；
+- issuer 错误；
+- audience 错误；
+- scope 不足；
+- 正常 Token。
+
+### Workspace
+
+- `prepareWorkspace` 创建；
+- `prepareWorkspace` 复用；
+- inspect；
+- search；
+- read；
+- write；
+- patch；
+- dry-run；
+- sha256 mismatch。
+
+### workspaceCommand
+
+覆盖：
+
+```text
+start
+start -> immediate terminal state
+start -> operation_id
+get
+logs
+cancel
+list
+```
+
+还要覆盖：
+
+- command failure；
+- timeout；
+- stdout 分页；
+- stderr 分页；
+- continuation offset；
+- truncation；
+- 不存在的 workspace_id；
+- 不存在的 operation_id。
+
+### 验收标准
+
+现有测试继续通过，并且新增 MCP/OAuth contract tests 全部通过。
+
+## 阶段 4：ChatGPT 网页版真实端到端验证
+
+不能只停留在 MCP Inspector。
+
+必须使用真正的 ChatGPT Web MCP 连接跑一遍实际工作流。
+
+至少验证：
+
+1. 创建或复用 Workspace。
+2. 用 `workspaceCommand` clone / inspect 仓库。
+3. 搜索代码。
+4. 读取文件。
+5. 修改文件。
+6. 应用 patch。
+7. 运行测试。
+8. 运行构建。
+9. 通过任意 PowerShell 调用 `git`。
+10. 通过任意 PowerShell 调用 `gh`。
+11. 启动一个长任务。
+12. 用 `get` 查询任务状态。
+13. 用 `logs` 分页读取输出。
+14. 用 `cancel` 取消运行中的任务。
+15. 在后续调用中继续复用现有 Workspace 状态。
+
+### 验收标准
+
+达到当前 GPT Actions 实际使用体验：
+
+```text
+ChatGPT Web
+    -> MCP
+    -> Workspace
+    -> 任意 PowerShell / git / gh
+```
+
+并且正常使用时不再依赖油猴脚本。
+
+## 阶段 5：清理旧 GPT Actions / 油猴路径
+
+只有阶段 4 验证通过后再做。
+
+### 工作内容
+
+1. 把 MCP 改成 README 中推荐的主接入方式。
+2. 删除或归档无调用方的 Custom GPT Actions/OpenAPI transport。
+3. 删除或归档旧 Skill loader 相关接口。
+4. 删除正常使用流程中的油猴依赖。
+5. 如果油猴不再用于调试，则删除对应发布 workflow。
+6. 保留有独立价值的后端日志、redact、operation diagnostics。
+7. 再跑一次完整测试和 lint。
+
+## 验证命令
+
+每个实现阶段先跑直接相关测试，然后跑完整回归：
 
 ```powershell
 python -m pytest -q
 python -m ruff check .
 ```
 
-Also validate the MCP endpoint with MCP Inspector before testing through ChatGPT Web.
+MCP 层还需要用 MCP Inspector 验证。
 
-## Migration principles
+最终必须再从 ChatGPT Web 做真实端到端测试。
 
-- Preserve proven behavior before improving architecture.
-- Treat arbitrary PowerShell as a required capability, not a temporary escape hatch.
-- Treat `workspaceCommand(action=start|get|logs|cancel|list)` as a compatibility contract.
-- Keep MCP and OAuth code thin and isolated from the workspace engine.
-- Keep the deployment single-user unless requirements actually change.
-- Do not make native Skill registration part of this migration.
-- Do not remove the old path until the new ChatGPT Web MCP path has been verified end to end.
+## 迁移原则
 
-## Current OpenAI references
+整个迁移过程遵守以下原则：
 
-- Plugin MCP authentication: https://developers.openai.com/plugins/build/auth
-- Build an MCP server: https://developers.openai.com/plugins/build/mcp-server
-- Connect and test a plugin in ChatGPT: https://developers.openai.com/plugins/deploy/connect-chatgpt
-- Personal plugin quickstart: https://developers.openai.com/plugins/quickstart
+1. **先保证兼容，再谈优化。**
+2. **任意 PowerShell 是正式能力，不是临时逃生口。**
+3. **`workspaceCommand(action=start|get|logs|cancel|list)` 是兼容性契约。**
+4. **MCP adapter 尽量薄。**
+5. **OAuth 只负责 ChatGPT-facing MCP 的授权，不强行改造 Workspace 内核。**
+6. **继续保持单用户部署。**
+7. **本次不做原生 Skill 注册。**
+8. **MCP 没有实际跑通前，不删除旧 Actions 路径。**
+9. **油猴在 MCP 全链路验证完成后再正式退役。**
+10. **不为了“架构更漂亮”破坏现在已经稳定的 PowerShell / operation 调用方式。**
+
+## 官方参考
+
+当前计划依据以下 OpenAI 官方文档整理：
+
+- MCP / Plugin 认证：
+  https://developers.openai.com/plugins/build/auth
+- 构建 MCP Server：
+  https://developers.openai.com/plugins/build/mcp-server
+- 在 ChatGPT 中连接和测试 Plugin：
+  https://developers.openai.com/plugins/deploy/connect-chatgpt
+- Personal Plugin Quickstart：
+  https://developers.openai.com/plugins/quickstart

@@ -56,7 +56,7 @@
 
 实际命令权限仍然由后端服务所在 OS 账户决定。
 
-### 3. 保留 `workspaceCommand` 单工具状态机
+### 3. 保留 `workspaceCommand` 单工具状态机，并针对远程 MCP 简化常用调用链
 
 继续保留当前工具形式：
 
@@ -67,19 +67,22 @@ workspaceCommand(
 )
 ```
 
-长任务继续按当前方式工作：
+长任务继续保持“工具调用生命周期”和“PowerShell 生命周期”分离，但远程 MCP 下优化正常调用路径：
 
 ```text
-start -> operation_id -> get/logs -> terminal state
+start -> operation_id + 当前日志
+      -> get(wait + 增量日志)
+      -> get(wait + 增量日志)
+      -> terminal state
 ```
 
 需要继续保留：
 
-- `start` 启动命令；
+- `start` 启动命令，并在返回时直接附带当前已有 stdout/stderr；
 - 短命令直接返回终态；
 - 长命令返回 `operation_id`；
-- `get` 查询状态；
-- `logs` 分页读取 stdout/stderr；
+- `get` 查询状态，同时支持有限等待并直接返回新增 stdout/stderr；
+- `logs` 只作为显式历史日志分页、补读或重新读取日志的接口；
 - `cancel` 取消运行中的命令；
 - `list` 查看操作列表；
 - timeout；
@@ -88,7 +91,29 @@ start -> operation_id -> get/logs -> terminal state
 - truncation 标记；
 - 现有 idempotency 行为。
 
-这里不做拆工具重构。
+这里不做拆工具重构，也不把 PowerShell 生命周期绑定到单次 MCP HTTP 请求。
+
+建议给 `start` / `get` 统一使用日志游标：
+
+```text
+stdout_offset
+stderr_offset
+max_bytes
+```
+
+`get` 额外支持：
+
+```text
+wait_seconds
+```
+
+语义如下：
+
+- 有新日志时可以立即返回；
+- operation 已结束时立即返回终态和剩余日志；
+- 没有变化时最多等待 `wait_seconds` 后返回当前 `running` 状态；
+- 每次返回 `next_stdout_offset` / `next_stderr_offset`，供下一次 `get` 继续增量读取；
+- `logs` 继续保留完整的显式 offset 分页能力，但不再是正常 follow 流程中的必经步骤。
 
 ## ChatGPT 网页版 MCP 对本项目有影响的要求
 
@@ -316,7 +341,26 @@ workspaceCommand.action
 start | get | logs | cancel | list
 ```
 
-只在 MCP schema 本身有硬性限制时做最小适配，不主动改参数和返回语义。
+远程 MCP 版本允许对 `start` / `get` 做兼容增强，目标是减少一次状态查询再一次日志查询的重复往返。
+
+建议语义：
+
+```text
+start
+  -> operation metadata
+  -> 当前已有 stdout/stderr
+  -> next stdout/stderr offsets
+
+get
+  -> operation metadata
+  -> 可选 wait_seconds
+  -> 从指定 offset 开始的增量 stdout/stderr
+  -> next stdout/stderr offsets
+```
+
+`logs` 保持显式分页读取能力，用于历史日志、补读、重读和大日志场景。
+
+除上述优化外，不主动改变现有 operation 状态、取消、超时、idempotency 和持久化语义。
 
 ## 暂时保留旧链路
 
@@ -368,14 +412,19 @@ MCP 跑通以后，再考虑删除或归档：
 3. 暴露 `/mcp`。
 4. 注册现有 7 个 Workspace 工具。
 5. 每个工具直接调用现有 `WorkspaceActionService` / `LocalWorkspaceService`。
-6. 尽量保留现有：
+6. 为 MCP 版 `workspaceCommand` 增加“状态 + 增量日志”返回能力：
+   - `start` 返回当前已有日志；
+   - `get` 支持 `wait_seconds`；
+   - `get` 直接返回从指定 offset 开始的 stdout/stderr；
+   - 返回下一次读取使用的 stdout/stderr offset。
+7. 尽量保留现有：
    - 参数校验；
    - 返回字段；
    - error code；
    - truncation；
    - continuation offset；
    - operation state。
-7. 旧 Actions transport 暂时继续运行。
+8. 旧 Actions transport 暂时继续运行。
 
 ### 验收标准
 
@@ -486,8 +535,8 @@ workspace:execute
 ```text
 start
 start -> immediate terminal state
-start -> operation_id
-get
+start -> operation_id + current logs
+get -> status + wait + delta logs
 logs
 cancel
 list
@@ -495,6 +544,12 @@ list
 
 还要覆盖：
 
+- `start` 返回首批 stdout/stderr；
+- `get(wait_seconds=...)` 在有新日志时提前返回；
+- `get(wait_seconds=...)` 在命令结束时提前返回；
+- `get(wait_seconds=...)` 无变化时到期返回 `running`；
+- 连续 `get` 使用 next offsets 时不重复返回旧日志；
+- `logs` 可以独立从任意 offset 补读历史日志；
 - command failure；
 - timeout；
 - stdout 分页；
@@ -527,10 +582,11 @@ list
 9. 通过任意 PowerShell 调用 `git`。
 10. 通过任意 PowerShell 调用 `gh`。
 11. 启动一个长任务。
-12. 用 `get` 查询任务状态。
-13. 用 `logs` 分页读取输出。
-14. 用 `cancel` 取消运行中的任务。
-15. 在后续调用中继续复用现有 Workspace 状态。
+12. 用 `get` 查询任务状态，并直接获取新增 stdout/stderr。
+13. 连续 `get` 验证 offset 续读时不会重复返回旧日志。
+14. 单独用 `logs` 从指定 offset 补读历史日志，验证备用分页能力。
+15. 用 `cancel` 取消运行中的任务。
+16. 在后续调用中继续复用现有 Workspace 状态。
 
 ### 验收标准
 
@@ -578,7 +634,7 @@ MCP 层还需要用 MCP Inspector 验证。
 
 1. **先保证兼容，再谈优化。**
 2. **任意 PowerShell 是正式能力，不是临时逃生口。**
-3. **`workspaceCommand(action=start|get|logs|cancel|list)` 是兼容性契约。**
+3. **`workspaceCommand(action=start|get|logs|cancel|list)` 是兼容性契约，但 MCP 版 `start/get` 直接携带增量日志，减少额外 `logs` 往返。**
 4. **MCP adapter 尽量薄。**
 5. **OAuth 只负责 ChatGPT-facing MCP 的授权，不强行改造 Workspace 内核。**
 6. **继续保持单用户部署。**
@@ -586,6 +642,7 @@ MCP 层还需要用 MCP Inspector 验证。
 8. **MCP 没有实际跑通前，不删除旧 Actions 路径。**
 9. **油猴在 MCP 全链路验证完成后再正式退役。**
 10. **不为了“架构更漂亮”破坏现在已经稳定的 PowerShell / operation 调用方式。**
+11. **正常 follow 路径优先使用 `start -> get -> get`，`logs` 只作为显式日志分页、补读和重读接口。**
 
 ## 官方参考
 

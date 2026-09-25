@@ -1,64 +1,376 @@
-# ChatGPT 网页版 MCP 迁移计划
+# ChatGPT 网页版 Remote MCP 破坏式重构计划
 
-## 目标
+## 1. 背景和结论
 
-把当前基于 Custom GPT Actions 的接入方式迁移到 ChatGPT 网页版远程 MCP，同时尽量保持现有后端行为不变。
+OpenAI 已宣布 Custom GPT 将退休，标准退休日期为 2026-12-11；Custom GPT 的 Custom Actions 不会自动迁移到 Plugin，依赖 Custom Actions 的能力需要单独重建，典型替代方案就是 Remote MCP。
 
-这次迁移的重点是：
+因此，本项目不再按“兼容升级”处理，而是做一次明确的破坏式重构：
 
-- 更换 ChatGPT 与后端之间的接入协议；
-- 增加符合网页版 MCP 要求的 OAuth 认证；
-- 保留已经稳定使用的 Workspace 执行模型；
-- 不为了迁移去重构已经用顺手的任意 PowerShell 和长任务状态机。
+- GPT Actions 彻底退出；
+- OpenAPI Actions 网关彻底退出；
+- 旧 Skill runtime 彻底退出；
+- 油猴监控彻底退出；
+- Remote MCP 成为唯一后端接入方式；
+- 不保留旧 `/v1/*` Action 接口；
+- 不保留旧 Bearer Token Action 认证；
+- 不做双轨运行；
+- 不做旧版兜底；
+- 不为旧 GPT Actions 保持 schema、路由或 CLI 兼容。
 
-这不是一次 Workspace 架构重写。
+这次重构不是“给现有 FastAPI 再套一层 MCP”，而是把仓库从“Skill Temple + GPT Actions Gateway”直接改造成一个单用户 Remote Workspace MCP Server。
 
-## 本次不做的事情
+## 2. 本次目标
 
-- 不把 `github-maintenance` 注册或重构成 ChatGPT 网页版原生 Skill。
-- 不把任意 PowerShell 改成一堆狭窄的专用命令工具。
-- 不拆分 `workspaceCommand(action=start|get|logs|cancel|list)`。
-- 不引入多用户、多租户、每用户独立 Workspace。
-- 不引入每用户独立 GitHub 凭据。
-- 除非 MCP 兼容性确实要求，否则不重构 Workspace 内核。
+最终只保留一条正式运行链路：
 
-## 必须保持兼容的现有行为
+```text
+ChatGPT Web
+    |
+    | Remote MCP / Streamable HTTP
+    | OAuth 2.1
+    v
+Remote MCP Server
+    |
+    v
+Workspace tools
+    |
+    v
+LocalWorkspaceService
+    |
+    +-- WorkspaceRegistry
+    +-- Workspace file/search/patch
+    `-- WorkspaceOperationManager
+            |
+            `-- 任意 PowerShell / git / gh / Python / 项目 CLI
+```
 
-以下行为都视为迁移后的兼容性要求。
+目标包括：
 
-### 1. 保留单用户、单环境模型
+1. 使用官方 Python `mcp` SDK 提供 Streamable HTTP MCP 服务；
+2. 对外提供稳定 HTTPS `/mcp`；
+3. 使用 OAuth 2.1 保护全部 Workspace 工具；
+4. 保留现有持久 Workspace 模型；
+5. 保留任意 PowerShell；
+6. 保留 PowerShell 生命周期与单次 MCP tool call 生命周期分离；
+7. 保留现有 operation、timeout、cancel、idempotency、日志分页能力；
+8. 优化 `workspaceCommand`，让 `start/get` 直接返回日志，减少远程 MCP 往返；
+9. 删除所有 GPT Actions / Skill runtime / userscript 遗留实现；
+10. README、配置、测试、包名和 CLI 全部改成 MCP 语义。
 
-继续维持：
+## 3. 明确不做的事情
 
-- 一个持久化 Workspace 根目录；
-- 一个后端服务 OS 账户；
-- 一套现有的 `git` / `gh` 凭据；
-- 一套 Python、构建工具、网络 CLI 和项目工具环境。
+### 3.1 不处理网页版 Skill 注册
 
-这是个人使用场景，不因为接入 OAuth 就强行改成多租户系统。
+`github-maintenance` Skill 如何在 ChatGPT 网页版注册，不属于这个后端仓库的迁移范围。
 
-### 2. 保留任意 PowerShell
+这个仓库只负责 Remote MCP 后端。
 
-`workspaceCommand` 继续允许直接执行任意 PowerShell。
+因此不在本计划中实现：
 
-例如现有能力继续保留：
+- Skill 注册；
+- Skill 打包；
+- Skill 自动发现；
+- `loadSkills`；
+- `readSkillContent`；
+- Skill catalog；
+- GPT Instructions 编译。
+
+### 3.2 不限制 PowerShell
+
+`workspaceCommand` 继续执行任意 PowerShell，不增加命令白名单，不替换成固定 GitHub API 工具集。
+
+继续允许：
 
 - `git`；
 - `gh`；
 - Python；
-- 测试、构建、lint；
-- 项目 CLI；
+- pytest / Ruff / build；
+- 任意项目 CLI；
 - 网络 CLI；
-- 多条命令组合；
-- 其他 PowerShell 能执行的操作。
+- 多条 PowerShell 组合；
+- 当前 OS 账户有权执行的其他命令。
 
-不增加命令白名单，不增加命令解析器。
+权限边界仍然是运行 MCP Server 的操作系统账户及其现有环境、凭据和 CLI 登录状态。
 
-实际命令权限仍然由后端服务所在 OS 账户决定。
+### 3.3 不做多租户
 
-### 3. 保留 `workspaceCommand` 单工具状态机，并针对远程 MCP 简化常用调用链
+这是个人自用服务。
 
-继续保留当前工具形式：
+不引入：
+
+- tenant；
+- user -> workspace 映射；
+- 每用户 GitHub 凭据；
+- 每用户 Workspace 根目录；
+- 多用户权限模型。
+
+OAuth 只负责确认调用 MCP 的 ChatGPT 客户端已经完成授权，不改变 Workspace 内部模型。
+
+### 3.4 不考虑 MCP Server 重启恢复正在运行的 PowerShell
+
+本次不设计跨 Server restart 的 command recovery。
+
+现有运行中 operation 在进程结束后的处理方式不是这次重构目标，也不为它增加额外基础设施。
+
+## 4. 现有仓库的全局处理结果
+
+当前仓库混合了四类职责：
+
+1. Skill runtime；
+2. GPT Actions HTTP/OpenAPI gateway；
+3. Workspace 执行内核；
+4. 油猴监控。
+
+重构后只保留第 3 类，并新增 Remote MCP + OAuth 边界。
+
+### 4.1 保留的核心实现
+
+以下能力继续作为新项目核心：
+
+```text
+workspace_registry.py
+workspace_files.py
+workspace_patch.py
+workspace_operations.py
+```
+
+保留的具体行为包括：
+
+- `ws_*` 持久 Workspace；
+- 文件读取；
+- 文本搜索；
+- inspect；
+- 安全文本写入；
+- sha256 compare-and-write；
+- multi-file patch；
+- patch dry-run；
+- operation id；
+- command idempotency；
+- PowerShell 子进程；
+- timeout；
+- process-tree cancel；
+- stdout/stderr 独立文件；
+- stdout/stderr offset 分页；
+- output byte limit；
+- ANSI 清理；
+- secret redact。
+
+这些能力应保持 transport-independent，不直接依赖 ChatGPT、HTTP route 或 MCP SDK。
+
+### 4.2 删除的 GPT Actions / Skill runtime 代码
+
+以下内容在最终版本中删除，不保留兼容入口：
+
+```text
+GPT_ACTION_PROMPT.md
+src/skill_temple/app.py
+src/skill_temple/openapi_builder.py
+src/skill_temple/prompt_builder.py
+src/skill_temple/evals.py
+src/skill_temple/example_skills/
+evals/
+```
+
+`runtime.py` 也不再保留 Skill runtime 职责。
+
+其中真正仍被 Workspace 使用的 `.env` 读取逻辑先抽到独立配置模块，再删除 `runtime.py`。
+
+删除：
+
+- `SkillRuntime`；
+- Skill frontmatter 扫描；
+- Skill path 解析；
+- catalog；
+- `loadSkills`；
+- `readSkillContent`；
+- Prompt builder；
+- OpenAPI builder；
+- Skill eval CLI。
+
+### 4.3 删除的 GPT Actions HTTP 接口
+
+最终版本不再提供：
+
+```text
+/openapi.json
+/v1/skills
+/v1/skills/load
+/v1/skills/read
+/v1/workspace/prepare
+/v1/workspace/inspect
+/v1/workspace/search
+/v1/workspace/read-files
+/v1/workspace/write-file
+/v1/workspace/apply-patch
+/v1/workspace/command
+/console
+/console/load
+/console/read
+/v1/action-logs
+```
+
+Workspace 功能只通过 MCP tools 暴露。
+
+如果部署需要简单 health check，可以单独保留一个不承载业务语义的 `/health`，但它不是旧 Actions 兼容接口。
+
+### 4.4 删除油猴相关实现
+
+最终版本删除：
+
+```text
+userscripts/
+.github/workflows/publish-gpt-action-monitor.yml
+```
+
+同时删除只服务于油猴监控的后端逻辑：
+
+- in-memory action event queue；
+- `ACTION_EVENT_LIMIT`；
+- `wait_for_action_events`；
+- `/v1/action-logs`；
+- activity monitor 专用事件结构；
+- userscript profile / GPT 名称匹配逻辑。
+
+### 4.5 保留并重构日志脱敏能力
+
+`action_logging.py` 不能整文件删除，因为其中仍有通用价值：
+
+- `redact_text`；
+- `sensitive_environment_values`；
+- `command_for_log`；
+- 简洁 command/error 日志。
+
+把这些能力迁到新的普通服务日志模块，例如：
+
+```text
+src/workspace_mcp/logging.py
+```
+
+删除所有 `ACTION` / legacy monitor 命名，不再维护前端事件缓冲区。
+
+## 5. 包结构和命名一起清理
+
+既然是破坏式重构，不继续保留已经失去意义的 `skill_temple` 包名和 `skill-temple` CLI。
+
+建议改为：
+
+```text
+src/workspace_mcp/
+    __init__.py
+    server.py
+    auth.py
+    config.py
+    models.py
+    logging.py
+    workspace_registry.py
+    workspace_files.py
+    workspace_patch.py
+    workspace_operations.py
+```
+
+项目名/CLI 同步改成：
+
+```text
+package: workspace-mcp
+module:  workspace_mcp
+cli:     workspace-mcp
+```
+
+GitHub 仓库本身是否改名可以单独决定，不作为这次代码重构的前置条件。
+
+## 6. 新 MCP Server
+
+### 6.1 MCP SDK
+
+使用官方 Python MCP SDK：
+
+```text
+mcp
+```
+
+生产 transport：
+
+```text
+Streamable HTTP
+```
+
+公开地址：
+
+```text
+https://<domain>/mcp
+```
+
+不提供旧 REST Actions transport。
+
+### 6.2 MCP Server instructions
+
+初始化时提供简短 server instructions，只描述跨工具的稳定规则，例如：
+
+- 未知目录先 inspect/search；
+- 读取已知文件用 read；
+- 修改使用 write/patch；
+- 长命令使用 `workspaceCommand` operation 流程；
+- `start/get` 已直接返回日志；
+- `logs` 只用于补读、重读和大日志分页。
+
+不要在 server instructions 重复整份 Skill 指令。
+
+## 7. MCP Tool 设计
+
+MCP 对外保留 7 个 Workspace tools：
+
+```text
+prepareWorkspace
+workspaceInspect
+workspaceSearch
+workspaceReadFiles
+workspaceWriteFile
+workspaceApplyPatch
+workspaceCommand
+```
+
+继续使用这些名字，是因为它们已经清晰、稳定，而且外部 Skill/提示词可能已经围绕这些语义编写；但不再要求兼容旧 HTTP schema。
+
+每个 tool 使用明确 input schema 和 structured output。
+
+### 7.1 错误模型
+
+当前 `WorkspaceToolError` 的：
+
+```text
+code
+message
+suggested_next_action
+```
+
+继续保留语义，但不再转换成 FastAPI `HTTPException`。
+
+MCP adapter 负责把它转换成模型可读的 MCP error result。
+
+不再把 HTTP status code 当作业务契约。
+
+### 7.2 Tool annotations
+
+按工具真实能力声明 MCP annotations。
+
+原则：
+
+- inspect/search/read：read-only；
+- write/patch：write tool；
+- `workspaceCommand`：可以访问外部世界，也可以产生破坏性行为；
+- annotations 只描述能力，不限制任意 PowerShell。
+
+### 7.3 structuredContent
+
+所有工具结果优先提供稳定 `structuredContent`，同时提供简短模型可读 `content`。
+
+不要把大型文件、patch、stdout/stderr 再复制一份到 verbose 文本说明里。
+
+## 8. `workspaceCommand` 的远程 MCP 版本
+
+## 8.1 保留 operation 模型
+
+仍然保留一个统一工具：
 
 ```text
 workspaceCommand(
@@ -67,592 +379,593 @@ workspaceCommand(
 )
 ```
 
-长任务继续保持“工具调用生命周期”和“PowerShell 生命周期”分离，但远程 MCP 下优化正常调用路径：
+不拆成五个 MCP tools。
+
+原因是这五个 action 都围绕同一个 command operation resource，属于一套完整状态机，不是五个无关功能。
+
+核心设计继续保持：
 
 ```text
-start -> operation_id + 当前日志
-      -> get(wait + 增量日志)
-      -> get(wait + 增量日志)
-      -> terminal state
+MCP tool call 生命周期 != PowerShell 生命周期
 ```
 
-需要继续保留：
+不能把最长可运行几十分钟甚至更久的 PowerShell 直接绑定在一个远程 MCP HTTP 请求上。
 
-- `start` 启动命令，并在返回时直接附带当前已有 stdout/stderr；
-- 短命令直接返回终态；
-- 长命令返回 `operation_id`；
-- `get` 查询状态，同时支持有限等待并直接返回新增 stdout/stderr；
-- `logs` 只作为显式历史日志分页、补读或重新读取日志的接口；
-- `cancel` 取消运行中的命令；
-- `list` 查看操作列表；
-- timeout；
-- operation 持久化；
-- stdout/stderr continuation offset；
-- truncation 标记；
-- 现有 idempotency 行为。
+### 8.2 新的正常调用链
 
-这里不做拆工具重构，也不把 PowerShell 生命周期绑定到单次 MCP HTTP 请求。
-
-建议给 `start` / `get` 统一使用日志游标：
+旧逻辑：
 
 ```text
+start
+get
+logs
+get
+logs
+get
+logs
+```
+
+远程 MCP 改成：
+
+```text
+start
+  -> operation + 当前 stdout/stderr + next offsets
+
+get
+  -> 状态 + bounded wait + 增量 stdout/stderr + next offsets
+
+get
+  -> 状态 + bounded wait + 增量 stdout/stderr + next offsets
+
+...
+
+terminal state
+```
+
+`logs` 不再是正常 follow 流程中的必经步骤。
+
+### 8.3 `start`
+
+`start` 输入继续包含：
+
+```text
+idempotency_key
+workspace_id
+script
+timeout_seconds
+max_output_bytes
+plain_output
+utf8_output
+max_bytes
+```
+
+行为：
+
+1. 创建 operation；
+2. 独立启动 PowerShell；
+3. 在短同步窗口内等待快速命令完成；
+4. 无论命令是否已结束，都读取当前已有 stdout/stderr；
+5. 返回 operation 状态和日志游标。
+
+返回：
+
+```text
+operation
+stdout
+stderr
+next_stdout_offset
+next_stderr_offset
+stdout_eof
+stderr_eof
+```
+
+因此长命令第一次 `start` 返回 `running` 时，模型也能马上看到已经产生的首批日志。
+
+### 8.4 `get`
+
+`get` 输入：
+
+```text
+operation_id
+wait_seconds
 stdout_offset
 stderr_offset
 max_bytes
 ```
 
-`get` 额外支持：
+`wait_seconds` 使用较短 bounded wait，不等同于 command timeout。
+
+建议默认值继续从现有 5 秒同步窗口思路出发，并允许配置一个小上限。
+
+`get` 等待以下任一条件：
+
+1. operation 进入 terminal state；
+2. stdout 从给定 offset 后产生新数据；
+3. stderr 从给定 offset 后产生新数据；
+4. `wait_seconds` 到期。
+
+然后一次返回：
 
 ```text
-wait_seconds
+operation
+stdout
+stderr
+next_stdout_offset
+next_stderr_offset
+stdout_eof
+stderr_eof
 ```
 
-语义如下：
+正常情况下模型只需要连续调用 `get`，不用额外再调用 `logs`。
 
-- 有新日志时可以立即返回；
-- operation 已结束时立即返回终态和剩余日志；
-- 没有变化时最多等待 `wait_seconds` 后返回当前 `running` 状态；
-- 每次返回 `next_stdout_offset` / `next_stderr_offset`，供下一次 `get` 继续增量读取；
-- `logs` 继续保留完整的显式 offset 分页能力，但不再是正常 follow 流程中的必经步骤。
+### 8.5 `get` 内部实现
 
-## ChatGPT 网页版 MCP 对本项目有影响的要求
+当前 `wait_for_terminal()` 只等待 task 结束，不感知新日志。
 
-目标接入方式需要遵循当前 ChatGPT Plugin / Remote MCP 的要求，而不是继续沿用 Custom GPT Actions 的认证模型。
-
-## MCP 传输方式
-
-使用远程 MCP 的 Streamable HTTP 方式，对外提供稳定 HTTPS 地址。
-
-建议入口：
+需要新增一个类似：
 
 ```text
-https://<domain>/mcp
+wait_for_change(operation_id, stdout_offset, stderr_offset, wait_seconds)
 ```
 
-本地开发时可以使用 Secure MCP Tunnel 或等价方式临时暴露服务。
+的内部能力。
 
-生产使用时应提供稳定远程 HTTPS MCP 地址。
+它监听/检查：
 
-## OAuth 认证
+- operation 是否完成；
+- stdout 文件大小是否超过 `stdout_offset`；
+- stderr 文件大小是否超过 `stderr_offset`。
 
-ChatGPT 可以连接匿名 `noauth` MCP，但本项目不应该使用匿名方式。
+不需要把 PowerShell stdout/stderr 改成 MCP streaming channel；现有文件日志模型继续保留。
 
-原因很直接：当前 MCP 后端将拥有以下能力：
+实现可以使用小间隔异步轮询或内部 event，但必须 bounded，并且不能阻塞 event loop。
 
-- 读取私有 Workspace；
-- 修改文件；
-- 应用 patch；
-- 执行任意 PowerShell；
-- 调用 `git` / `gh`；
-- 运行网络命令。
+### 8.6 `logs`
 
-因此，本项目把 OAuth 认证作为迁移必做项。
+`logs` 继续保留，但定位变成显式日志工具：
 
-### OAuth 方案
+- 从任意 offset 补读；
+- 重新读历史日志；
+- 大日志手工分页；
+- 之前返回被 `max_bytes` 截断后继续读取。
 
-采用符合当前 MCP / ChatGPT 要求的 OAuth 2.1 授权流程：
+输入继续使用：
 
 ```text
-Authorization Code + PKCE S256
+operation_id
+stdout_offset
+stderr_offset
+max_bytes
 ```
 
-MCP Resource Server 至少需要支持：
+### 8.7 `cancel`
 
-- Protected Resource Metadata；
-- OAuth Authorization Server Metadata；
-- Authorization Code Flow；
-- PKCE `S256`；
-- MCP `resource` 参数；
-- Access Token audience 校验；
-- Access Token issuer 校验；
-- Access Token expiry 校验；
-- scope 校验；
-- MCP 工具 `securitySchemes`；
-- 未授权或权限不足时返回 ChatGPT 能识别的 OAuth challenge 信息。
+继续取消 operation，并终止对应 PowerShell process tree。
 
-### Protected Resource Metadata
+不改变现有 process-tree cleanup 设计。
 
-MCP 服务需要暴露或正确声明类似：
+### 8.8 `list`
+
+继续列出 operation，并允许按 state 过滤。
+
+它用于人工诊断和恢复上下文，不承担正常日志 follow。
+
+### 8.9 idempotency
+
+`start` 的 idempotency 保留。
+
+远程 MCP 同样可能发生：
 
 ```text
-/.well-known/oauth-protected-resource
+命令已经启动
+-> 网络响应丢失
+-> 客户端重试 tool call
 ```
 
-也可以通过标准 `WWW-Authenticate` discovery 方式引导 ChatGPT 找到 protected-resource metadata。
+因此 `idempotency_key + request_hash -> existing operation_id` 仍然有价值，特别是命令可能执行：
 
-### 旧 Bearer Token 的处理
+- `git push`；
+- `gh pr create`；
+- `gh workflow run`；
+- 文件删除或其他有副作用的命令。
 
-现有：
+## 9. OAuth 2.1
+
+## 9.1 本项目不提供 noauth 模式
+
+OpenAI 的 MCP 体系允许匿名 MCP，但本项目拥有私有 Workspace、文件写入和任意 PowerShell，因此正式 ChatGPT Web 链路强制 OAuth。
+
+删除：
 
 ```text
 SKILL_TEMPLE_BEARER_TOKEN
 ```
 
-不能继续作为 ChatGPT 网页版 MCP 的主要认证方式。
+不再提供自定义 API Key/Bearer Token 兼容入口。
 
-它可以暂时保留给旧 Actions 接口或内部调试，但 ChatGPT Web -> MCP 这条正式链路应改成 OAuth。
-
-## 个人使用的 OAuth 模型
-
-这里最重要的一点是：
-
-**OAuth 不等于必须做多租户。**
-
-本项目仍然按单用户部署：
-
-```text
-ChatGPT 账号
-    ↓
-OAuth 授权
-    ↓
-一个 MCP 服务实例
-    ↓
-一个服务 OS 账户
-    ↓
-一个现有 Workspace 根目录
-    ↓
-一套现有 git / gh 登录状态
-```
-
-OAuth 的作用只是确认：
-
-> 当前请求确实来自已经授权的 ChatGPT 客户端。
-
-不在 Workspace 内核里引入：
-
-```text
-user_id -> workspace
-user_id -> github credential
-user_id -> tenant
-```
-
-这些当前都没有必要。
-
-第一版可以只允许一个个人账号完成授权。
-
-如果使用现成 OAuth/OIDC Provider，应选择能满足 MCP metadata、PKCE、resource/audience 等要求的方案。
-
-如果自己实现最小 OAuth Authorization Server，也必须完整满足同样的协议要求，不能因为“只是个人用”就把 ChatGPT-facing MCP 改回固定静态 Bearer Token。
-
-## 目标架构
+## 9.2 OAuth 架构
 
 ```text
 ChatGPT Web
     |
-    | MCP Streamable HTTP + OAuth 2.1
+    | Authorization Code + PKCE S256
     v
-Remote MCP Endpoint (/mcp)
+Authorization Server
     |
+    | Access Token
     v
-薄 MCP Adapter
-    |
-    v
-WorkspaceActionService
-    |
-    v
-LocalWorkspaceService
-    |
-    |-- WorkspaceRegistry
-    |-- Workspace Files/Search/Patch
-    `-- WorkspaceOperationManager
-            |
-            `-- 任意 PowerShell / git / gh / 项目 CLI
+Remote MCP Resource Server
 ```
 
-原则：
+MCP Server 每次请求验证 Access Token。
 
-- OAuth 放在 MCP 边界；
-- MCP adapter 尽量薄；
-- Workspace 内核继续保持 transport-independent；
-- 不把 OAuth 用户概念强行下沉到现有 Workspace 服务。
+### 9.3 必须实现的协议要求
 
-## 仓库改造范围
+至少包括：
 
-## 新增
+- Protected Resource Metadata；
+- `/.well-known/oauth-protected-resource` 或标准 discovery challenge；
+- Authorization Server Metadata；
+- Authorization Code flow；
+- PKCE `S256`；
+- `resource` 参数贯穿授权和 token exchange；
+- token signature 校验；
+- issuer 校验；
+- audience/resource 校验；
+- expiry/nbf 校验；
+- scope 校验；
+- 每个 MCP tool 的 `securitySchemes`；
+- 未授权时 `_meta["mcp/www_authenticate"]` challenge；
+- 使用 ChatGPT MCP 管理页给出的正确 redirect URI。
 
-建议新增：
+### 9.4 OAuth client 注册方式
 
-```text
-src/skill_temple/mcp_server.py
-```
+按当前 OpenAI 支持方式选择其中一种：
 
-或等价 MCP 入口文件。
+- CIMD；
+- DCR；
+- 预定义 OAuth client。
 
-同时新增：
+实现时优先使用成熟 OAuth/OIDC Provider，不自己造完整认证系统。
 
-- MCP SDK 依赖；
-- Streamable HTTP `/mcp` 入口；
-- OAuth Resource Server 集成；
-- OAuth issuer / audience / scope 配置；
-- protected-resource metadata；
-- MCP contract tests；
-- ChatGPT Web 连接说明；
-- OAuth 配置说明。
+Provider 必须真正满足 MCP 的 metadata、PKCE、resource/audience 和 ChatGPT client registration 要求。
 
-## 尽量原样复用
+### 9.5 单用户授权
 
-以下模块优先保持不动，或者只做非常小的兼容修改：
+虽然使用 OAuth，但只允许自己的账号通过授权。
 
-```text
-src/skill_temple/workspace_registry.py
-src/skill_temple/workspace_files.py
-src/skill_temple/workspace_patch.py
-src/skill_temple/workspace_operations.py
-src/skill_temple/workspace_actions.py
-```
-
-现有 Workspace 测试也继续保留。
-
-如果当前 `workspace_actions.py` 已经承担 transport-independent facade 的作用，就继续让它承担这一层职责。
-
-目标结构：
-
-```text
-MCP Tool
-    ↓
-WorkspaceActionService
-    ↓
-LocalWorkspaceService
-```
-
-而不是在 MCP 层重新实现一遍文件、patch、operation 逻辑。
-
-## MCP 暴露的工具
-
-保持当前工具集合：
-
-- `prepareWorkspace`
-- `workspaceInspect`
-- `workspaceSearch`
-- `workspaceReadFiles`
-- `workspaceWriteFile`
-- `workspaceApplyPatch`
-- `workspaceCommand`
-
-其中：
-
-```text
-workspaceCommand.action
-```
-
-继续保留：
-
-```text
-start | get | logs | cancel | list
-```
-
-远程 MCP 版本允许对 `start` / `get` 做兼容增强，目标是减少一次状态查询再一次日志查询的重复往返。
-
-建议语义：
-
-```text
-start
-  -> operation metadata
-  -> 当前已有 stdout/stderr
-  -> next stdout/stderr offsets
-
-get
-  -> operation metadata
-  -> 可选 wait_seconds
-  -> 从指定 offset 开始的增量 stdout/stderr
-  -> next stdout/stderr offsets
-```
-
-`logs` 保持显式分页读取能力，用于历史日志、补读、重读和大日志场景。
-
-除上述优化外，不主动改变现有 operation 状态、取消、超时、idempotency 和持久化语义。
-
-## 暂时保留旧链路
-
-第一阶段不要一上来就删除现有 Custom GPT Actions 实现。
-
-迁移期保持：
-
-```text
-旧 Actions -> WorkspaceActionService
-新 MCP     -> WorkspaceActionService
-```
-
-也就是两个 transport 暂时共用同一个后端。
-
-这样做有两个好处：
-
-- MCP 有问题可以快速对比旧链路；
-- 可以验证 MCP adapter 是否真正做到行为兼容。
-
-只有网页版 MCP 全链路验证完成后，再删除旧代码。
-
-## 最终可以退役的旧组件
-
-MCP 跑通以后，再考虑删除或归档：
-
-- Custom GPT Actions / OpenAPI transport；
-- 只为 GPT Actions Skill loader 服务的接口；
-- 页面 action-log polling 接口；
-- 油猴脚本正常使用依赖；
-- 油猴发布 workflow。
-
-后端中仍有通用价值的部分继续保留，例如：
-
-- 日志；
-- secret redact；
-- operation diagnostics；
-- PowerShell operation state；
-- timeout / cancellation；
-- stdout / stderr 分页。
-
-## 实施阶段
-
-## 阶段 1：增加 MCP 传输层
-
-### 工作内容
-
-1. 增加 MCP SDK。
-2. 创建 Streamable HTTP MCP Server。
-3. 暴露 `/mcp`。
-4. 注册现有 7 个 Workspace 工具。
-5. 每个工具直接调用现有 `WorkspaceActionService` / `LocalWorkspaceService`。
-6. 为 MCP 版 `workspaceCommand` 增加“状态 + 增量日志”返回能力：
-   - `start` 返回当前已有日志；
-   - `get` 支持 `wait_seconds`；
-   - `get` 直接返回从指定 offset 开始的 stdout/stderr；
-   - 返回下一次读取使用的 stdout/stderr offset。
-7. 尽量保留现有：
-   - 参数校验；
-   - 返回字段；
-   - error code；
-   - truncation；
-   - continuation offset；
-   - operation state。
-8. 旧 Actions transport 暂时继续运行。
-
-### 验收标准
-
-使用 MCP Inspector 可以：
-
-- 正确发现全部 7 个工具；
-- 正确读取工具 schema；
-- 调用工具；
-- 实际进入现有 Workspace 后端；
-- 不需要为 MCP 重新实现 Workspace 逻辑。
-
-## 阶段 2：实现 ChatGPT Web OAuth
-
-### 工作内容
-
-1. 确定 OAuth/OIDC Provider 或最小 Authorization Server 方案。
-2. 只允许个人账号完成授权。
-3. 提供 MCP Protected Resource Metadata。
-4. 提供或正确引用 Authorization Server Metadata。
-5. 实现 Authorization Code + PKCE `S256`。
-6. 正确处理 MCP `resource` 参数。
-7. Token 中 audience 必须匹配当前 MCP resource。
-8. MCP Server 校验：
-   - issuer；
-   - audience；
-   - expiry；
-   - scope。
-9. 所有 Workspace MCP tools 声明 OAuth `securitySchemes`。
-10. 无 Token、Token 无效或 scope 不足时，返回 ChatGPT 能识别的 OAuth challenge。
-
-### Scope
-
-个人使用第一版不需要复杂 scope 系统。
-
-可以先使用一个完整 Workspace 权限：
+第一版 scope 可以保持简单：
 
 ```text
 workspace:execute
 ```
 
-这个 scope 直接覆盖整个 Workspace MCP 能力即可。
+全部 7 个 tools 都要求这个 scope。
 
-以后如果真有需要，再拆：
+这里不为了形式拆成复杂 scope 模型。
+
+## 10. 配置重构
+
+现有 `.env.example` 中与 Actions/Skill 有关的变量全部删除：
 
 ```text
-workspace:read
-workspace:write
-workspace:execute
+SKILL_TEMPLE_SERVER_URL
+SKILL_TEMPLE_SKILLS_DIR
+SKILL_TEMPLE_OPENAPI_OUTPUT
+SKILL_TEMPLE_BEARER_TOKEN
 ```
 
-当前没有必要为了形式增加复杂度。
+新的配置集中到 `config.py`，例如：
 
-### 验收标准
+```text
+WORKSPACE_ROOT
+WORKSPACE_OPERATION_ROOT
+WORKSPACE_COMMAND_SYNC_WAIT_SECONDS
+WORKSPACE_COMMAND_TIMEOUT_SECONDS
+WORKSPACE_COMMAND_MAX_OUTPUT_BYTES
 
-在 ChatGPT Web 中：
+MCP_PUBLIC_URL
+MCP_RESOURCE
+OAUTH_ISSUER
+OAUTH_AUDIENCE
+MCP_REQUIRED_SCOPE
+```
 
-1. 添加 MCP；
-2. 正确触发 OAuth 登录/授权；
-3. 完成账号授权；
-4. ChatGPT 获得有效 Access Token；
-5. MCP 服务正确验证 Token；
-6. 授权后能够调用 Workspace tools；
-7. 未授权的直接请求无法执行 Workspace tools。
+OAuth Provider 特定配置按最终选型补充。
 
-## 阶段 3：MCP 行为兼容测试
+`.env` 解析函数从旧 `runtime.py` 抽出来，不让 Workspace 模块继续依赖 Skill runtime。
 
-新增 MCP 层测试，重点验证 adapter 和 auth，不重复现有 Workspace 单元测试。
+## 11. `pyproject.toml` 重构
 
-需要覆盖：
+### 删除
 
-### Tool discovery
+- GPT Actions / OpenAPI 相关描述；
+- `PyYAML`，如果删除 Skill runtime 后不再有其他用途；
+- `skill-temple-eval`；
+- `skill-temple-build-prompt`；
+- `skill-temple-build-openapi`；
+- 旧 `skill-temple` CLI。
 
-- 7 个工具全部存在；
-- schema 正确；
-- `workspaceCommand.action` 包含：
-  - `start`
-  - `get`
-  - `logs`
-  - `cancel`
-  - `list`
+### 新增/调整
 
-### OAuth
+- 项目名改为 `workspace-mcp`；
+- 增加官方 `mcp` SDK；
+- 保留 Pydantic；
+- 按 MCP SDK 实际运行方式保留或调整 Uvicorn/HTTP 依赖；
+- 增加 OAuth token verification 所需依赖；
+- 新 CLI：
 
-- 没有 Token；
-- 无效 Token；
-- 过期 Token；
-- issuer 错误；
-- audience 错误；
-- scope 不足；
-- 正常 Token。
+```text
+workspace-mcp
+```
 
-### Workspace
+## 12. 测试体系重构
 
-- `prepareWorkspace` 创建；
-- `prepareWorkspace` 复用；
-- inspect；
-- search；
-- read；
+### 12.1 删除 legacy tests
+
+删除只验证以下内容的测试：
+
+- SkillRuntime；
+- prompt builder；
+- OpenAPI builder；
+- Bearer Action auth；
+- `/console`；
+- `/v1/action-logs`；
+- Skill eval；
+- GPT Actions route schema。
+
+因此 `tests/test_runtime.py` 不再原样保留。
+
+### 12.2 保留 Workspace 回归测试
+
+保留并适配：
+
+- registry；
+- read/search/inspect；
 - write；
 - patch；
-- dry-run；
-- sha256 mismatch。
+- command operation；
+- timeout；
+- cancel；
+- idempotency；
+- log offsets；
+- output truncation。
 
-### workspaceCommand
+模块 rename 后更新 import，不为了新 transport 重写已经可靠的内核测试。
 
-覆盖：
+### 12.3 新增 MCP contract tests
+
+新增：
 
 ```text
-start
-start -> immediate terminal state
-start -> operation_id + current logs
-get -> status + wait + delta logs
-logs
-cancel
-list
+tests/test_mcp_tools.py
+tests/test_mcp_auth.py
 ```
-
-还要覆盖：
-
-- `start` 返回首批 stdout/stderr；
-- `get(wait_seconds=...)` 在有新日志时提前返回；
-- `get(wait_seconds=...)` 在命令结束时提前返回；
-- `get(wait_seconds=...)` 无变化时到期返回 `running`；
-- 连续 `get` 使用 next offsets 时不重复返回旧日志；
-- `logs` 可以独立从任意 offset 补读历史日志；
-- command failure；
-- timeout；
-- stdout 分页；
-- stderr 分页；
-- continuation offset；
-- truncation；
-- 不存在的 workspace_id；
-- 不存在的 operation_id。
-
-### 验收标准
-
-现有测试继续通过，并且新增 MCP/OAuth contract tests 全部通过。
-
-## 阶段 4：ChatGPT 网页版真实端到端验证
-
-不能只停留在 MCP Inspector。
-
-必须使用真正的 ChatGPT Web MCP 连接跑一遍实际工作流。
 
 至少验证：
 
-1. 创建或复用 Workspace。
-2. 用 `workspaceCommand` clone / inspect 仓库。
-3. 搜索代码。
-4. 读取文件。
-5. 修改文件。
-6. 应用 patch。
-7. 运行测试。
-8. 运行构建。
-9. 通过任意 PowerShell 调用 `git`。
-10. 通过任意 PowerShell 调用 `gh`。
-11. 启动一个长任务。
-12. 用 `get` 查询任务状态，并直接获取新增 stdout/stderr。
-13. 连续 `get` 验证 offset 续读时不会重复返回旧日志。
-14. 单独用 `logs` 从指定 offset 补读历史日志，验证备用分页能力。
-15. 用 `cancel` 取消运行中的任务。
-16. 在后续调用中继续复用现有 Workspace 状态。
+- MCP initialize；
+- 7 个 tools 可发现；
+- tool input schema；
+- structured output；
+- WorkspaceToolError -> MCP error result；
+- OAuth 必须存在；
+- invalid token；
+- expired token；
+- wrong issuer；
+- wrong audience/resource；
+- missing scope；
+- valid token；
+- OAuth challenge metadata。
 
-### 验收标准
+### 12.4 `workspaceCommand` 新行为测试
 
-达到当前 GPT Actions 实际使用体验：
+必须覆盖：
+
+#### start
+
+- 快速成功：直接返回 terminal + 全部当前日志；
+- 快速失败：直接返回 terminal + stderr；
+- 慢命令：返回 `running` + 首批日志；
+- 返回正确 next offsets；
+- idempotent retry 返回原 operation。
+
+#### get
+
+- 有新 stdout 时提前返回；
+- 有新 stderr 时提前返回；
+- terminal 时提前返回；
+- 无变化时 `wait_seconds` 到期返回 running；
+- 连续 get 使用 next offsets 不重复日志；
+- `max_bytes` 截断后可以继续 get；
+- stdout/stderr 游标独立。
+
+#### logs
+
+- 任意 offset 补读；
+- terminal 后重新读取；
+- 大日志分页。
+
+#### cancel/list
+
+- cancel 终止进程树；
+- list/state filter 正常。
+
+## 13. README 全量重写
+
+README 不再以 Skill Temple / Custom GPT Actions 为主语。
+
+新 README 只描述：
+
+1. 这个项目是什么：个人 Remote Workspace MCP Server；
+2. 架构；
+3. 7 个 MCP tools；
+4. `workspaceCommand` 生命周期；
+5. 任意 PowerShell 权限模型；
+6. OAuth 配置；
+7. 安装依赖；
+8. `gh auth`；
+9. 启动 MCP Server；
+10. MCP Inspector 验证；
+11. ChatGPT Developer Mode 添加 `/mcp`；
+12. 测试和 lint。
+
+README 中全部删除：
+
+- Custom GPT Actions；
+- GPT Instructions；
+- OpenAPI schema；
+- `loadSkills`；
+- `readSkillContent`；
+- Skill catalog；
+- Tampermonkey；
+- Action 小窗；
+- Actions Bearer Token；
+- OpenAPI generator；
+- Skill eval。
+
+## 14. 实施顺序
+
+这是一次破坏式更新，不设计双轨切换。
+
+### 阶段 1：清理项目边界
+
+1. 新建 `workspace_mcp` 包；
+2. 抽出 `config.py`；
+3. 抽出通用 logging/redaction；
+4. 搬迁 Workspace 内核；
+5. 修复内核 import；
+6. 保证 Workspace 内核测试通过。
+
+### 阶段 2：实现 MCP tools
+
+1. 加入官方 `mcp` SDK；
+2. 创建 Remote MCP Server；
+3. 注册 7 个 tools；
+4. 直接调用 Workspace service；
+5. 实现 structured results / errors / annotations；
+6. 实现 `workspaceCommand` 新 `start/get` 日志语义。
+
+### 阶段 3：实现 OAuth
+
+1. 选定 OAuth/OIDC Provider；
+2. 配置单用户访问；
+3. Protected Resource Metadata；
+4. Authorization Server discovery；
+5. PKCE S256；
+6. `resource` / audience；
+7. token validation；
+8. tool `securitySchemes`；
+9. `_meta["mcp/www_authenticate"]`。
+
+### 阶段 4：删除全部 legacy
+
+直接删除：
+
+- GPT Actions routes；
+- OpenAPI builder；
+- Prompt builder；
+- Skill runtime；
+- Skill eval；
+- example skills；
+- userscript；
+- userscript workflow；
+- Action monitor event buffer；
+- legacy CLI；
+- legacy env vars；
+- legacy tests。
+
+最终仓库中不留下“备用旧版本”。
+
+### 阶段 5：文档和端到端验证
+
+1. 全量重写 README；
+2. 更新 `.env.example`；
+3. MCP Inspector 验证；
+4. OAuth 实际授权验证；
+5. ChatGPT Web Developer Mode 添加 Remote MCP；
+6. 跑真实 Workspace 工作流。
+
+## 15. 端到端验收
+
+最终必须从真实 ChatGPT Web 完成：
+
+1. OAuth 授权；
+2. `prepareWorkspace`；
+3. `workspaceInspect`；
+4. clone GitHub repo；
+5. `workspaceSearch`；
+6. `workspaceReadFiles`；
+7. `workspaceWriteFile`；
+8. `workspaceApplyPatch`；
+9. `workspaceCommand(start)` 执行快速命令；
+10. `workspaceCommand(start)` 执行长命令并拿到首批日志；
+11. 连续 `workspaceCommand(get)` 获取状态和增量日志；
+12. 验证日志不重复；
+13. 用 `logs` 从指定 offset 补读；
+14. `cancel` 取消长任务；
+15. 通过 PowerShell 使用 `git`；
+16. 通过 PowerShell 使用 `gh`；
+17. 运行项目测试/构建；
+18. 后续调用继续复用已有 Workspace。
+
+验收完成时，不应再依赖：
 
 ```text
-ChatGPT Web
-    -> MCP
-    -> Workspace
-    -> 任意 PowerShell / git / gh
+Custom GPT
+GPT Actions
+OpenAPI Actions schema
+loadSkills/readSkillContent
+Tampermonkey
+/v1/action-logs
+SKILL_TEMPLE_BEARER_TOKEN
 ```
 
-并且正常使用时不再依赖油猴脚本。
+## 16. 本地验证
 
-## 阶段 5：清理旧 GPT Actions / 油猴路径
-
-只有阶段 4 验证通过后再做。
-
-### 工作内容
-
-1. 把 MCP 改成 README 中推荐的主接入方式。
-2. 删除或归档无调用方的 Custom GPT Actions/OpenAPI transport。
-3. 删除或归档旧 Skill loader 相关接口。
-4. 删除正常使用流程中的油猴依赖。
-5. 如果油猴不再用于调试，则删除对应发布 workflow。
-6. 保留有独立价值的后端日志、redact、operation diagnostics。
-7. 再跑一次完整测试和 lint。
-
-## 验证命令
-
-每个实现阶段先跑直接相关测试，然后跑完整回归：
+代码改造过程中至少持续运行：
 
 ```powershell
 python -m pytest -q
 python -m ruff check .
 ```
 
-MCP 层还需要用 MCP Inspector 验证。
+MCP 实现完成后增加：
 
-最终必须再从 ChatGPT Web 做真实端到端测试。
+```text
+MCP Inspector
+ChatGPT Web Developer Mode
+```
 
-## 迁移原则
+两层真实验证。
 
-整个迁移过程遵守以下原则：
+## 17. 完成定义
 
-1. **先保证兼容，再谈优化。**
-2. **任意 PowerShell 是正式能力，不是临时逃生口。**
-3. **`workspaceCommand(action=start|get|logs|cancel|list)` 是兼容性契约，但 MCP 版 `start/get` 直接携带增量日志，减少额外 `logs` 往返。**
-4. **MCP adapter 尽量薄。**
-5. **OAuth 只负责 ChatGPT-facing MCP 的授权，不强行改造 Workspace 内核。**
-6. **继续保持单用户部署。**
-7. **本次不做原生 Skill 注册。**
-8. **MCP 没有实际跑通前，不删除旧 Actions 路径。**
-9. **油猴在 MCP 全链路验证完成后再正式退役。**
-10. **不为了“架构更漂亮”破坏现在已经稳定的 PowerShell / operation 调用方式。**
-11. **正常 follow 路径优先使用 `start -> get -> get`，`logs` 只作为显式日志分页、补读和重读接口。**
+这个重构只有同时满足以下条件才算完成：
 
-## 官方参考
+- Remote MCP 是唯一业务入口；
+- OAuth 是唯一 ChatGPT-facing 认证方式；
+- 7 个 Workspace tools 全部通过 MCP 暴露；
+- 任意 PowerShell 保留；
+- `workspaceCommand` 的 PowerShell 生命周期独立于 tool call；
+- `start/get` 直接返回增量日志；
+- `logs` 只负责显式补读/分页；
+- Workspace 内核回归测试通过；
+- MCP/OAuth contract tests 通过；
+- 真实 ChatGPT Web 端到端通过；
+- GPT Actions/OpenAPI/Skill runtime/userscript 代码已删除；
+- README 和配置中不再出现旧运行方式。
 
-当前计划依据以下 OpenAI 官方文档整理：
+## 18. 官方参考
 
-- MCP / Plugin 认证：
-  https://developers.openai.com/plugins/build/auth
-- 构建 MCP Server：
+- Custom GPT retirement and migration FAQ
+  https://help.openai.com/en/articles/20001519-custom-gpt-retirement-and-migration-faq
+
+- Build an MCP server
   https://developers.openai.com/plugins/build/mcp-server
-- 在 ChatGPT 中连接和测试 Plugin：
+
+- Authentication
+  https://developers.openai.com/plugins/build/auth
+
+- Connect and test your plugin
   https://developers.openai.com/plugins/deploy/connect-chatgpt
-- Personal Plugin Quickstart：
-  https://developers.openai.com/plugins/quickstart

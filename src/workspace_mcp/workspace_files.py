@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .runtime import env_value_from_environment_or_dotenv
+from .config import env_int, env_value
 from .workspace_operations import OperationSettings, WorkspaceOperationManager
 from .workspace_patch import (
     WorkspaceToolError,
@@ -292,17 +292,53 @@ class LocalWorkspaceService:
             "diff_stat": diff_stat,
         }
 
-    async def command_start(self, *, workspace_id: str, **kwargs: Any) -> dict[str, Any]:
+    async def command_start(
+        self,
+        *,
+        workspace_id: str,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = 50_000,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         root = self.root(workspace_id)
         manager = self._operation_manager()
         operation = await manager.start(workspace_id=workspace_id, workspace_root=root, **kwargs)
-        return await manager.wait_for_terminal(
+        operation = await manager.wait_for_terminal(
             str(operation["operation_id"]),
             timeout_seconds=manager.settings.sync_wait_seconds,
         )
+        logs = await manager.logs(
+            str(operation["operation_id"]),
+            stdout_offset=stdout_offset,
+            stderr_offset=stderr_offset,
+            max_bytes=max_bytes,
+        )
+        return {"operation": operation, **logs}
 
-    async def command_get(self, operation_id: str) -> dict[str, Any]:
-        return await self._operation_manager().get(operation_id)
+    async def command_get(
+        self,
+        operation_id: str,
+        *,
+        wait_seconds: float,
+        stdout_offset: int,
+        stderr_offset: int,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        manager = self._operation_manager()
+        operation = await manager.wait_for_change(
+            operation_id,
+            stdout_offset=stdout_offset,
+            stderr_offset=stderr_offset,
+            timeout_seconds=wait_seconds,
+        )
+        logs = await manager.logs(
+            operation_id,
+            stdout_offset=stdout_offset,
+            stderr_offset=stderr_offset,
+            max_bytes=max_bytes,
+        )
+        return {"operation": operation, **logs}
 
     async def command_logs(self, operation_id: str, **kwargs: Any) -> dict[str, Any]:
         return await self._operation_manager().logs(operation_id, **kwargs)
@@ -318,7 +354,7 @@ class LocalWorkspaceService:
             await self._operations.shutdown()
 
     def _operation_manager(self) -> WorkspaceOperationManager:
-        runtime_value = env_value_from_environment_or_dotenv("WORKSPACE_OPERATION_ROOT")
+        runtime_value = env_value("WORKSPACE_OPERATION_ROOT")
         runtime_root = (
             Path(runtime_value).expanduser().resolve()
             if runtime_value
@@ -328,14 +364,12 @@ class LocalWorkspaceService:
             self._operations = WorkspaceOperationManager(
                 OperationSettings(
                     root=runtime_root,
-                    shell=env_value_from_environment_or_dotenv("WORKSPACE_PWSH_PATH") or "pwsh",
-                    sync_wait_seconds=max(
-                        0, _env_int("WORKSPACE_COMMAND_SYNC_WAIT_SECONDS", 5)
-                    ),
-                    default_timeout_seconds=_env_int("WORKSPACE_COMMAND_TIMEOUT_SECONDS", 120),
-                    max_timeout_seconds=_env_int("WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS", 3600),
-                    default_output_bytes=_env_int("WORKSPACE_COMMAND_OUTPUT_BYTES", 1_000_000),
-                    max_output_bytes=_env_int("WORKSPACE_COMMAND_MAX_OUTPUT_BYTES", 10_000_000),
+                    shell=env_value("WORKSPACE_PWSH_PATH") or "pwsh",
+                    sync_wait_seconds=max(0, env_int("WORKSPACE_COMMAND_SYNC_WAIT_SECONDS", 5)),
+                    default_timeout_seconds=env_int("WORKSPACE_COMMAND_TIMEOUT_SECONDS", 120),
+                    max_timeout_seconds=env_int("WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS", 3600),
+                    default_output_bytes=env_int("WORKSPACE_COMMAND_OUTPUT_BYTES", 1_000_000),
+                    max_output_bytes=env_int("WORKSPACE_COMMAND_MAX_OUTPUT_BYTES", 10_000_000),
                 )
             )
             self._operations_root = runtime_root
@@ -749,15 +783,3 @@ def _fit_inspect_response(response: dict[str, Any], max_bytes: int) -> dict[str,
             status_code=422,
         )
     return response
-
-
-def _env_int(name: str, default: int) -> int:
-    value = env_value_from_environment_or_dotenv(name)
-    if not value:
-        return default
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise WorkspaceToolError(
-            "WORKSPACE_CONFIG_INVALID", f"{name} must be an integer.", status_code=503
-        ) from exc

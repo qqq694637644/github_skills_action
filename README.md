@@ -1,417 +1,481 @@
-# Skill Temple
+# Workspace MCP
 
-Skill Temple 把 Codex 的 Skill 思路适配到 Custom GPT Actions：
+面向个人使用的 ChatGPT Web Remote MCP 后端。
 
-1. 构建时把每个 Skill 的 `name + description + skill_id` 编译进 GPT Instructions。
-2. 模型在初始上下文中看到 Skill 目录，自行选择需要的 Skill。
-3. 选中后调用 `loadSkills`，只加载对应的完整 `SKILL.md`。
-4. `SKILL.md` 引用的其他文件再通过 `readSkillContent` 按需读取。
-5. 实际项目读取、修改和命令执行由 Workspace Actions 完成。
+它提供一个持久 Workspace，以及文件搜索、读取、写入、Patch 和任意 PowerShell 7 执行能力。Remote MCP 是唯一业务入口。
 
-不会把所有 Skill 正文静态塞进 prompt，也不需要先调用 Action 查询目录。
-
-第一次部署请先完成下文的 [安装和运行](#安装和运行)，再生成 GPT Instructions 和 `openapi.json`。
-
-## 公开 Actions
-
-| operationId | 路径 | 用途 |
-| --- | --- | --- |
-| `loadSkills` | `POST /v1/skills/load` | 按精确 `skill_id` 加载完整 `SKILL.md` |
-| `readSkillContent` | `POST /v1/skills/read` | 读取选中 Skill 内的引用文件 |
-| `prepareWorkspace` | `POST /v1/workspace/prepare` | 创建或复用持久 workspace |
-| `workspaceInspect` | `POST /v1/workspace/inspect` | 查看目录、搜索结果和文件片段 |
-| `workspaceSearch` | `POST /v1/workspace/search` | 使用 ripgrep 搜索工作区 |
-| `workspaceReadFiles` | `POST /v1/workspace/read-files` | 读取工作区文件 |
-| `workspaceWriteFile` | `POST /v1/workspace/write-file` | 创建或覆盖文本文件 |
-| `workspaceApplyPatch` | `POST /v1/workspace/apply-patch` | 应用多文件文本补丁 |
-| `workspaceCommand` | `POST /v1/workspace/command` | 运行 PowerShell 7 命令，短任务同步返回，长任务返回 operation |
-
-## Workspace 模型
-
-`WORKSPACE_ROOT` 是持久 workspace 的容器目录，而不是单个项目目录。`prepareWorkspace` 根据 `idempotency_key` 创建稳定的 `ws_*` 目录；再次使用同一个 key 会复用原目录，也可以直接传已有 `workspace_id` 继续工作。
-
-Workspace 本身不理解 GitHub、repo、branch、PR 或 CI，也不会 clone 仓库。模型在 workspace 中直接通过 `workspaceCommand` 使用 `git`、`gh`、Python、构建工具或其他宿主 CLI：
-
-```powershell
-gh repo clone qqq694637644/project .
-git switch main
-git fetch origin
-git switch feature/example
-gh pr view 123
-```
-
-同一个 workspace 可以长期复用并自由切换 branch，也可以同时放多个仓库。不同任务需要隔离状态时创建不同的 workspace。
-
-除 `workspaceCommand(action="start")` 外，文件类 Workspace Actions 都要求显式 `workspace_id`；`start` 会先等待一个较短的同步窗口，命令快速完成时直接返回 stdout/stderr 和终态；仍在运行时返回全局唯一 `operation_id`，再用 `get`、`logs`、`cancel` 跟进。operation 的 timeout、日志、取消、进程树终止、持久状态和 idempotency 机制保持独立于 workspace 生命周期。
-
-`workspaceCommand` 是宿主权限下的原生 PowerShell：后端不检查命令字符串、不区分网络命令，也不清洗子进程环境。实际权限边界就是运行服务的操作系统账户以及该账户已经配置的 CLI/凭据。
-
-## Skill 目录
+## 架构
 
 ```text
-skills/
-  api-review/
-    SKILL.md
-    docs/
-      openapi.md
-    scripts/
-      helper.py
+ChatGPT Web
+    |
+    | OAuth 2.1 + Remote MCP / Streamable HTTP
+    v
+https://<domain>/mcp
+    |
+    v
+workspace_mcp.server
+    |
+    +-- prepareWorkspace
+    +-- workspaceInspect
+    +-- workspaceSearch
+    +-- workspaceReadFiles
+    +-- workspaceWriteFile
+    +-- workspaceApplyPatch
+    `-- workspaceCommand
+            |
+            v
+      LocalWorkspaceService
+            |
+            +-- WorkspaceRegistry
+            +-- 文件 / 搜索 / Patch
+            `-- WorkspaceOperationManager
+                    |
+                    `-- 任意 PowerShell / git / gh / Python / 项目 CLI
 ```
 
-`SKILL.md` 必须包含 frontmatter：
+## 设计原则
 
-```markdown
----
-name: api-review
-description: Review API schemas, compatibility, and migration risks.
----
+- 单用户、个人部署。
+- 一个 MCP 服务实例对应一个 OS 账户和一套现有 `git` / `gh` 登录状态。
+- OAuth 只负责保护 ChatGPT -> MCP 边界，不引入多租户。
+- `workspaceCommand` 保留任意 PowerShell，不做命令白名单。
+- PowerShell 生命周期和单次 MCP tool call 生命周期分离。
+- 快速命令可以在 `start` 中直接完成；长命令继续后台运行，通过 `get` 跟进。
+- `start` / `get` 直接携带增量 stdout/stderr，正常流程不需要额外调用 `logs`。
+- `logs` 只用于历史日志重读、指定 offset 补读和大日志分页。
 
-# API review
+## MCP Tools
 
-Read `docs/openapi.md` when the task involves OpenAPI compatibility.
-```
+### `prepareWorkspace`
 
-`name` 同时作为稳定的 `skill_id`。详细资料放在 `docs/`、`references/`、`scripts/` 或 `assets/`，并从 `SKILL.md` 中明确引用。
+创建一个持久 Workspace，或者复用已存在的 `workspace_id`。
 
-## 生成 GPT Instructions
+创建时使用 `idempotency_key` 生成稳定的 `ws_<16 hex>` ID。同一个 key 会得到同一个 Workspace。
 
-`GPT_ACTION_PROMPT.md` 是模板，其中包含：
+### `workspaceInspect`
+
+第一次进入不熟悉的 Workspace 时使用。返回：
+
+- 有界目录树；
+- 可选 literal 搜索结果；
+- 命中文件的有界内容；
+- 截断标记。
+
+### `workspaceSearch`
+
+使用 ripgrep 搜索 Workspace。
+
+默认 literal、忽略大小写；可启用 regex 和大小写敏感模式。结果包含路径、行号、列号、命中行和上下文片段。
+
+### `workspaceReadFiles`
+
+读取已知 UTF-8 文本文件，支持：
+
+- `start_line`；
+- `max_lines`；
+- 单文件 byte limit；
+- 整体 response byte limit；
+- SHA-256；
+- `next_start_line` continuation。
+
+### `workspaceWriteFile`
+
+创建或覆盖单个文本文件。
+
+支持：
 
 ```text
-{{SKILL_CATALOG}}
+create_only
+overwrite
+overwrite_if_sha256_matches
 ```
 
-安装后运行：
+同时支持 dry-run、line ending 控制和 SHA-256 compare-and-write。
 
-```powershell
-skill-temple-build-prompt --skills-dir C:/path/to/skills
-```
+### `workspaceApplyPatch`
 
-默认输出：
+应用多文件文本 Patch。
+
+支持：
+
+- dry-run；
+- changed-file limit；
+- patch byte limit；
+- 可选 delete；
+- 事务式提交；
+- 提交失败时回滚。
+
+### `workspaceCommand`
+
+统一管理任意 PowerShell 7 命令：
 
 ```text
-dist/GPT_INSTRUCTIONS.md
+workspaceCommand(
+    action = start | get | logs | cancel | list,
+    ...
+)
 ```
 
-生成器会把当前所有 Skill 的元数据替换进模板：
+#### `start`
+
+启动 PowerShell command。
+
+输入核心字段：
 
 ```text
-- api-review: Review API schemas, compatibility, and migration risks. (skill_id: api-review)
-- release-notes: Draft release notes from repository changes. (skill_id: release-notes)
+idempotency_key
+workspace_id
+script
+timeout_seconds
+max_output_bytes
+plain_output
+utf8_output
+stdout_offset
+stderr_offset
+max_bytes
 ```
 
-把生成文件复制到 Custom GPT 的 Instructions。Skill 增删或 description 修改后重新生成即可。
+后端会在一个短同步窗口内等待快速命令。如果命令已经结束，直接返回终态；如果仍在运行，则返回 `running`。
 
-也可以指定输入输出：
-
-```powershell
-skill-temple-build-prompt `
-  --skills-dir C:/path/to/skills `
-  --template GPT_ACTION_PROMPT.md `
-  --output dist/GPT_INSTRUCTIONS.md
-```
-
-## 生成 `openapi.json`
-
-安装后运行：
-
-```powershell
-skill-temple-build-openapi
-```
-
-默认输出根目录的 `openapi.json`。生成器优先读取 `.env` 中的：
-
-```dotenv
-SKILL_TEMPLE_SERVER_URL=https://skills.example.com
-SKILL_TEMPLE_OPENAPI_OUTPUT=openapi.json
-```
-
-因此生成结果会包含：
-
-```json
-{
-  "servers": [
-    {"url": "https://skills.example.com"}
-  ]
-}
-```
-
-也可以直接覆盖：
-
-```powershell
-skill-temple-build-openapi `
-  --server-url https://skills.example.com `
-  --output openapi.json
-```
-
-## `loadSkills`
-
-请求：
-
-```json
-{
-  "skill_ids": ["api-review"]
-}
-```
-
-响应中的 `skills[].content` 使用 Codex 风格的上下文块：
-
-```xml
-<skill>
-<name>api-review</name>
-<path>api-review/SKILL.md</path>
-完整 SKILL.md 内容
-</skill>
-```
-
-一次可以加载多个 Skill。运行时只做精确 ID 加载，不替模型判断哪个 Skill 匹配任务。
-
-## `readSkillContent`
-
-```json
-{
-  "skill_id": "api-review",
-  "path": "docs/openapi.md",
-  "start_line": 1,
-  "max_lines": 300
-}
-```
-
-相对路径被限制在对应 Skill 目录内。响应包含 `truncated` 和 `next_start_line`，大型引用文件可以继续读取。
-
-## 配置
-
-复制 `.env.example` 为 `.env`：
-
-```dotenv
-SKILL_TEMPLE_SERVER_URL=https://skills.example.com
-WORKSPACE_ROOT=C:/path/to/persistent/workspaces
-
-# Optional: enable Bearer authentication for /v1/* endpoints.
-# SKILL_TEMPLE_BEARER_TOKEN=replace-with-a-long-random-secret
-```
-
-其他环境变量只在需要覆盖默认行为时设置。例如自定义 Skill 目录、OpenAPI 输出路径、PowerShell 路径、operation 存储目录，以及 command timeout/output limits；未设置时使用程序内默认值。
-
-Skill 目录查找顺序：
-
-1. 命令行或 `create_app(skills_dir=...)`
-2. `SKILL_TEMPLE_SKILLS_DIR`
-3. 当前目录 `.env`
-4. 当前目录的 `skills/`
-5. 包内示例 Skill
-
-设置 `SKILL_TEMPLE_BEARER_TOKEN` 后，所有 `/v1/*` 接口以及控制台的加载、读取请求都要求：
+无论是否结束，`start` 都同时返回当前已有日志：
 
 ```text
-Authorization: Bearer <token>
+operation
+stdout
+stderr
+next_stdout_offset
+next_stderr_offset
+stdout_eof
+stderr_eof
 ```
 
-`/openapi.json`、`/health` 和 `/console` 保持公开，方便导入 schema 和打开调试页面。生成的 OpenAPI 会自动包含 `BearerAuth` security scheme。
+#### `get`
 
-### ChatGPT 页面 Action 小窗（Tampermonkey）
+跟进运行中的 operation。
 
-仓库提供 `userscripts/gpt-action-monitor.user.js`。安装到 Tampermonkey 后，它会在 ChatGPT 页面右侧显示一个可折叠的小日志窗，并通过长轮询读取最近的 `ACTION ...` 日志。
+输入：
 
-安装脚本后，在 Tampermonkey 菜单中打开 **⚙ 监控配置...**。每条监控配置由 GPT 名称、后端地址、Bearer Token 和启用状态组成，可以维护多组映射；GPT 名称要求唯一。配置页支持添加、编辑、删除、启停和“测试连接”，列表不会直接显示 Token。
-
-脚本会读取 ChatGPT 顶部 GPT 菜单的当前名称，并精确匹配一条已启用配置。例如 `github_skill` 可以指向后端 A，`company_github` 可以指向后端 B；没有匹配配置时不会挂载监控 UI，也不会请求任何后端。切换到另一条已配置 GPT 时会停止当前连接并改用对应的后端和 Token。0.4.0 起配置格式为破坏式升级，不再读取旧版单组“后端地址 + Token”设置，需要在 **⚙ 监控配置...** 中重新创建 Profile。
-
-脚本访问 `GET /v1/action-logs`，该接口不会出现在 GPT 使用的 OpenAPI schema 中，只用于日志小窗；它复用 `/v1/*` 的 Bearer 认证，并仅返回内存中最近的脱敏 Action 日志。页面可见时使用 55 秒低频长轮询，有 Action 会立即返回；切到后台标签页或最小化浏览器时会中止请求，重新可见后再恢复监听。
-
-## 安装和运行
-
-### 1. 前置条件
-
-- Python 3.11 或更高版本。
-- PowerShell 7，命令名必须是 `pwsh`；`workspaceCommand` 使用它执行命令。
-- ripgrep，命令名必须是 `rg`；`workspaceSearch` 和 `workspaceInspect` 使用它搜索文件。
-- 如果要使用内置 `github-maintenance` Skill，再安装 Git 和 GitHub CLI (`gh`) 并完成 GitHub 登录。
-
-先确认宿主工具已经在 `PATH`：
-
-```powershell
-python --version
-pwsh --version
-rg --version
-git --version
-gh --version
+```text
+operation_id
+wait_seconds
+stdout_offset
+stderr_offset
+max_bytes
 ```
 
-只使用非 GitHub Workspace 功能时，`git` 和 `gh` 不是必需项。
+`get` 会等待以下任一事件：
 
-### 2. 克隆项目并创建虚拟环境
+1. operation 进入终态；
+2. stdout 从指定 offset 后产生新数据；
+3. stderr 从指定 offset 后产生新数据；
+4. `wait_seconds` 到期。
 
-```powershell
-git clone https://github.com/qqq694637644/github_skills_action.git
-Set-Location github_skills_action
+然后一次性返回状态和增量日志。
 
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+正常长任务流程：
+
+```text
+start
+  -> operation_id + 首批日志 + next offsets
+
+get(offsets...)
+  -> state + 新日志 + next offsets
+
+get(offsets...)
+  -> state + 新日志 + next offsets
+
+...
+
+terminal state
 ```
 
-如果 `python` 不是目标 Python 3.11+，Windows 也可以用 `py` launcher 显式选择版本，例如：
+调用方应把每次返回的 `next_stdout_offset` / `next_stderr_offset` 传给下一次 `get`，这样不会重复读取旧日志。
 
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+`wait_seconds` 默认 5 秒，最大 30 秒。它只是一次 follow call 的 bounded wait，不是 command timeout。
+
+#### `logs`
+
+显式读取历史日志：
+
+```text
+operation_id
+stdout_offset
+stderr_offset
+max_bytes
 ```
 
-### 3. 安装项目
+适合：
 
-仅运行服务：
+- 从头重新看日志；
+- 从任意 offset 补读；
+- 大日志分页；
+- 之前因为 `max_bytes` 截断后继续读取。
 
-```powershell
-python -m pip install -e .
+#### `cancel`
+
+请求取消 operation，并终止对应 PowerShell process tree。
+
+#### `list`
+
+枚举 operation，可按 state 过滤。
+
+## PowerShell 权限模型
+
+`workspaceCommand` 是任意 PowerShell 执行入口。
+
+后端不会解析或限制命令，可以运行：
+
+- `git`；
+- `gh`；
+- Python；
+- 测试和构建工具；
+- 网络 CLI；
+- 项目自定义 CLI；
+- 运行服务的 OS 账户有权执行的其他 PowerShell 操作。
+
+因此，谁能够成功通过 OAuth 调用这个 MCP，谁就拥有该服务 OS 账户对应的 Workspace/命令权限。
+
+本项目面向个人自用，不提供多租户隔离。
+
+## OAuth 2.1
+
+Remote MCP 不提供 `noauth` 或旧静态 Bearer Token 模式。
+
+项目采用 Resource Server 模式：登录、Authorization Code + PKCE、client registration 和 token 签发由外部 OAuth/OIDC Provider 负责；本服务负责验证 Access Token。
+
+```text
+ChatGPT Web
+    |
+    | Authorization Code + PKCE S256
+    v
+OAuth/OIDC Provider
+    |
+    | Access Token
+    v
+Workspace MCP Resource Server
 ```
 
-需要运行测试和 Ruff 的开发环境：
+服务会验证：
 
-```powershell
-python -m pip install -e ".[dev]"
-```
+- JWT 签名；
+- 允许的签名算法；
+- issuer；
+- audience/resource；
+- expiry；
+- MCP required scope；
+- 可选的固定 `sub`，用于只允许自己的账号。
 
-安装成功后应能直接找到这些入口：
+MCP Python SDK 会根据 Resource Server 配置暴露 protected-resource metadata，并在未认证请求上返回标准 `WWW-Authenticate` challenge。
 
-```powershell
-skill-temple --help
-skill-temple-build-prompt --help
-skill-temple-build-openapi --help
-```
+### OAuth Provider 要求
 
-### 4. 配置 `.env`
+Provider 至少需要满足 ChatGPT Remote MCP 的 OAuth client 接入要求，并支持：
 
-从示例创建本地配置：
+- Authorization Code；
+- PKCE S256；
+- 正确的 OAuth/OIDC metadata；
+- JWT/JWKS；
+- 为 MCP resource/audience 签发 Token；
+- ChatGPT 使用的 client registration 方式（按 Provider 选择 CIMD、DCR 或预定义 client）。
+
+ChatGPT 中实际使用的 redirect URI 应以 ChatGPT MCP 管理界面显示的值为准，并配置到 Provider。
+
+## 环境变量
+
+复制：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-至少确认：
-
-```dotenv
-SKILL_TEMPLE_SERVER_URL=https://skills.example.com
-WORKSPACE_ROOT=C:/path/to/persistent/workspaces
-```
-
-`WORKSPACE_ROOT` 是所有持久 workspace 的父目录；目录不存在时服务会自动创建。`SKILL_TEMPLE_SERVER_URL` 应填写最终提供给 Custom GPT Actions 访问的 HTTPS 地址，而不是本机监听地址。
-
-如果需要 Bearer 认证，再在 `.env` 中启用：
-
-```dotenv
-SKILL_TEMPLE_BEARER_TOKEN=replace-with-a-long-random-secret
-```
-
-不要提交包含真实 token 的 `.env`。
-
-`workspaceCommand(action="start")` 默认等待短命令完成；超过同步等待窗口后才返回仍在运行的 `operation_id`：
-
-```dotenv
-WORKSPACE_COMMAND_SYNC_WAIT_SECONDS=5
-```
-
-这个值只控制 GPT Action 当前请求等待多久，不是命令最大运行时间；命令运行上限仍由 `timeout_seconds` 或 `WORKSPACE_COMMAND_TIMEOUT_SECONDS` 控制。
-
-### 5. 可选：配置 GitHub CLI
-
-使用 `github-maintenance` Skill 前确认 `gh` 已登录，并让 Git HTTPS 操作使用相同认证：
-
-```powershell
-gh auth status
-gh auth setup-git
-gh api user --jq .login
-```
-
-如果尚未登录，可先运行：
-
-```powershell
-gh auth login --hostname github.com --git-protocol https --web
-```
-
-服务启动后，`workspaceCommand` 会继承运行服务账户的环境和 CLI 登录状态，因此应当用**实际运行 `skill-temple` 的同一个操作系统账户**完成 `gh` 登录。
-
-### 6. 启动服务
-
-仅供本机验证时：
-
-```powershell
-skill-temple --host 127.0.0.1 --port 8012
-```
-
-如果需要让反向代理、容器网络或其他主机访问，可以监听所有网卡：
-
-```powershell
-skill-temple --host 0.0.0.0 --port 8765
-```
-
-`--host` 只控制本地监听地址；Custom GPT Actions 使用的公网地址仍由 `SKILL_TEMPLE_SERVER_URL` / `--server-url` 决定，并应通过 HTTPS 暴露。
-
-默认日志只输出 Action 的关键输入和结果，不再输出每个 HTTP 请求的 Uvicorn access log。例如：
+主要配置：
 
 ```text
-ACTION workspaceSearch workspace_id="ws_..." query="workspaceSearch" paths=["repo"] match_count=12 truncated=false
-ACTION workspaceCommand action="start" workspace_id="ws_..." command="git status --short --branch" timeout_seconds=60 operation_id="op_..." state="succeeded" exit_code=0 duration_ms=183
+WORKSPACE_ROOT
+WORKSPACE_OPERATION_ROOT
+WORKSPACE_PWSH_PATH
+WORKSPACE_COMMAND_SYNC_WAIT_SECONDS
+WORKSPACE_COMMAND_TIMEOUT_SECONDS
+WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS
+WORKSPACE_COMMAND_OUTPUT_BYTES
+WORKSPACE_COMMAND_MAX_OUTPUT_BYTES
+
+MCP_PUBLIC_URL
+MCP_HOST
+MCP_PORT
+
+OAUTH_ISSUER
+OAUTH_AUDIENCE
+OAUTH_JWKS_URL
+OAUTH_ALLOWED_ALGORITHMS
+OAUTH_ALLOWED_SUBJECT
+MCP_REQUIRED_SCOPE
 ```
 
-命令会保留关键文本但限制单条日志长度，并对常见 token/password/secret/API key 赋值做脱敏；文件正文、完整 patch、stdout/stderr 正文不会进入 Action 日志。需要临时恢复原始 HTTP access log 时加 `--access-log`。
+### `WORKSPACE_ROOT`
 
-### 7. 验证安装
+持久 Workspace 根目录。服务会在其中创建 `ws_*` 目录。
 
-启动服务后检查：
+### `WORKSPACE_OPERATION_ROOT`
 
-健康检查：
+operation 状态和 stdout/stderr 日志目录。未配置时默认：
 
 ```text
-http://127.0.0.1:8765/health
+.runtime/workspace-operations
 ```
 
-OpenAPI schema：
+### `MCP_PUBLIC_URL`
+
+ChatGPT 访问的公开 MCP resource URL，例如：
 
 ```text
-http://127.0.0.1:8765/openapi.json
+https://mcp.example.com/mcp
 ```
 
-调试检索控制台：
+### `OAUTH_AUDIENCE`
 
-```text
-http://127.0.0.1:8765/console
-```
+Access Token 必须包含的 audience。默认等于 `MCP_PUBLIC_URL`。
 
-控制台可以查看 Skill 目录、调用 `loadSkills`，以及读取选中 Skill 内的引用文件。Token 只保存在当前浏览器标签页的 `sessionStorage`。
+如果 Provider 使用不同的 resource identifier，需要显式配置成 Provider 实际签发的 audience，并保证它与 MCP resource 设计一致。
 
-## Skill 检索评测
+### `OAUTH_ISSUER`
 
-评测工具验证编译目录、精确加载、引用路径和关键符号是否可达：
+必须使用 Provider discovery metadata 中公布的规范 issuer，字符串要精确一致。不要自行增加或删除尾部 `/`。对于只有 host 的 issuer，如果 Provider 公布的是带尾 `/` 的值，就必须保持该 `/`。
+
+### `OAUTH_ALLOWED_SUBJECT`
+
+可选。设置后只有 JWT `sub` 完全匹配的 Token 才会被接受。
+
+个人部署建议配置这个字段，进一步锁定自己的账号。
+
+## 安装
+
+要求：
+
+- Python 3.11+；
+- PowerShell 7 (`pwsh`)；
+- ripgrep (`rg`)；
+- 如果要操作 GitHub：`git` 和 `gh`。
+
+安装：
 
 ```powershell
-skill-temple-eval evals/skill_queries.jsonl
+python -m pip install -e ".[dev]"
 ```
 
-JSONL 示例：
+如果需要 GitHub CLI：
 
-```json
-{"id":"api-review","query":"review API compatibility","expected_skill":"api-review","expected_paths":["docs/openapi.md"],"expected_symbols":["breaking change"]}
+```powershell
+gh auth login
 ```
 
-当前架构由模型根据静态目录选择 Skill，因此该工具不模拟服务端语义路由，只检查被选 Skill 的加载链路和引用资料是否完整。
+MCP Server 会继承启动它的 OS 账户环境，因此 `gh` 使用该账户已有的登录状态。
+
+## 启动
+
+配置 `.env` 后：
+
+```powershell
+workspace-mcp
+```
+
+默认监听：
+
+```text
+127.0.0.1:8000
+```
+
+正式部署时应通过稳定 HTTPS 域名暴露：
+
+```text
+https://<domain>/mcp
+```
+
+如果使用反向代理，需要允许 Streamable HTTP 的长连接/流式响应，不要把 `/mcp` 当普通短请求接口处理。
+
+## MCP Protected Resource Metadata
+
+当：
+
+```text
+MCP_PUBLIC_URL=https://mcp.example.com/mcp
+```
+
+SDK 会暴露与该 resource 对应的 protected-resource metadata，例如：
+
+```text
+https://mcp.example.com/.well-known/oauth-protected-resource/mcp
+```
+
+未携带有效 Token 访问 `/mcp` 会得到 HTTP 401 和 `WWW-Authenticate` challenge，引导客户端发现 OAuth metadata。
+
+## ChatGPT Web 连接
+
+部署和 OAuth Provider 配置完成后：
+
+1. 在 ChatGPT Web 打开 Developer Mode / Plugin MCP 管理；
+2. 添加 Remote MCP URL：`https://<domain>/mcp`；
+3. 按界面完成 OAuth 授权；
+4. 确认 ChatGPT 能发现 7 个 Workspace tools；
+5. 用真实 Workspace 流程验证读、写、Patch 和 PowerShell。
+
+本项目不负责网页版 Skill 注册；Skill 与后端 MCP 是两个独立层面。
 
 ## 验证
 
+运行测试：
+
 ```powershell
-python -m ruff check .
 python -m pytest -q
-skill-temple-eval evals/skill_queries.jsonl
-skill-temple-build-openapi --output .runtime/openapi.json
 ```
 
-测试覆盖：Skill 扫描、目录生成、精确加载、Codex 风格上下文、引用路径发现、安全读取、Bearer Token、调试控制台、评测工具、OpenAPI 生成和 Workspace Actions。
+运行 lint：
 
+```powershell
+python -m ruff check .
+```
 
-永久保存PAT
-$pat = Read-Host "输入 GitHub PAT" -MaskInput
-$pat | gh auth login --hostname github.com --with-token
-Remove-Variable pat
+格式化：
 
-gh auth setup-git
-gh auth status
+```powershell
+python -m ruff format .
+```
+
+在连接 ChatGPT 之前，建议先使用 MCP Inspector 检查：
+
+- initialize；
+- tool discovery；
+- input/output schema；
+- OAuth challenge；
+- Workspace tool 调用。
+
+最终仍需要从真实 ChatGPT Web 完成 OAuth + Remote MCP 端到端验证。
+
+## 测试覆盖
+
+当前测试重点覆盖：
+
+- 7 个 MCP tools discovery/schema/annotations/structured output；
+- OAuth protected-resource metadata 和 401 challenge；
+- JWT 签名、issuer、audience、expiry、subject；
+- Workspace create/reuse；
+- inspect/search/read；
+- write/hash/dry-run；
+- patch transaction/rollback；
+- bounded output；
+- PowerShell quick start；
+- 长任务 `start -> get` 增量日志；
+- 日志 offset 不重复；
+- `logs` 历史补读；
+- idempotency；
+- timeout；
+- cancel；
+- operation list。
+
+## 官方参考
+
+- OpenAI Plugin / MCP server: https://developers.openai.com/plugins/build/mcp-server
+- OpenAI Plugin authentication: https://developers.openai.com/plugins/build/auth
+- OpenAI connect ChatGPT: https://developers.openai.com/plugins/deploy/connect-chatgpt
+- MCP Python SDK: https://github.com/modelcontextprotocol/python-sdk

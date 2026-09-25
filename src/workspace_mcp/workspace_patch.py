@@ -123,11 +123,7 @@ def parse_codex_patch(
             "WORKSPACE_BINARY_NOT_ALLOWED", "Binary patches are not allowed.", status_code=403
         )
     lines = patch.splitlines()
-    if (
-        not lines
-        or lines[0].strip() != "*** Begin Patch"
-        or lines[-1].strip() != "*** End Patch"
-    ):
+    if not lines or lines[0].strip() != "*** Begin Patch" or lines[-1].strip() != "*** End Patch":
         raise WorkspaceToolError(
             "WORKSPACE_PATCH_INVALID",
             "Patch must start with '*** Begin Patch' and end with '*** End Patch'.",
@@ -232,9 +228,7 @@ def prepare_text_patch(
                     status_code=409,
                 )
             assert_text_bytes(original, path=operation.path)
-            original_text = (
-                original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-            )
+            original_text = original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
             lines, trailing = _split_text_lines(original_text)
             new_lines = _apply_hunks(lines, operation.hunks, operation.path)
             current[operation.path] = _join_lines(
@@ -273,7 +267,7 @@ def prepare_write_change(
 
 
 def commit_prepared_changes(root: Path, changes: list[PreparedFileChange]) -> None:
-    transaction_parent = root.parent / ".skill-temple-workspace-transactions"
+    transaction_parent = root.parent / ".workspace-mcp-transactions"
     transaction_dir = transaction_parent / ("txn_" + secrets.token_hex(12))
     staged_dir = transaction_dir / "staged"
     backup_dir = transaction_dir / "backups"
@@ -314,8 +308,7 @@ def commit_prepared_changes(root: Path, changes: list[PreparedFileChange]) -> No
                 details.append(str(cleanup_error))
             raise WorkspaceToolError(
                 "WORKSPACE_TRANSACTION_RECOVERY_FAILED",
-                "Workspace transaction failed and cleanup was incomplete: "
-                + "; ".join(details),
+                "Workspace transaction failed and cleanup was incomplete: " + "; ".join(details),
                 status_code=500,
             ) from original
         raise
@@ -566,15 +559,9 @@ def _join_lines(lines: list[str], *, trailing_newline: bool) -> str:
 
 def _line_change_counts(before: bytes | None, after: bytes | None) -> tuple[int, int]:
     old = (
-        []
-        if before is None
-        else before.decode("utf-8", errors="replace").splitlines(keepends=True)
+        [] if before is None else before.decode("utf-8", errors="replace").splitlines(keepends=True)
     )
-    new = (
-        []
-        if after is None
-        else after.decode("utf-8", errors="replace").splitlines(keepends=True)
-    )
+    new = [] if after is None else after.decode("utf-8", errors="replace").splitlines(keepends=True)
     additions = 0
     deletions = 0
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=old, b=new).get_opcodes():

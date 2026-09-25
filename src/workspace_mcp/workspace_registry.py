@@ -4,7 +4,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from .runtime import env_value_from_environment_or_dotenv
+from .config import env_value
 from .workspace_patch import WorkspaceToolError
 
 _WORKSPACE_ID_RE = re.compile(r"^ws_[0-9a-f]{16}$")
@@ -14,7 +14,7 @@ class WorkspaceRegistry:
     """Persistent workspace directories addressed by opaque workspace IDs."""
 
     def storage_root(self) -> Path:
-        value = env_value_from_environment_or_dotenv("WORKSPACE_ROOT")
+        value = env_value("WORKSPACE_ROOT")
         if not value:
             raise WorkspaceToolError(
                 "WORKSPACE_ROOT_NOT_CONFIGURED",

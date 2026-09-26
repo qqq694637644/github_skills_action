@@ -73,12 +73,18 @@ class MCPSettings:
         if public.query or public.fragment:
             raise ValueError("MCP_PUBLIC_URL must not contain a query string or fragment.")
 
+        issuer_parts = urlsplit(self.issuer)
+        jwks_parts = urlsplit(self.jwks_url)
+        if issuer_parts.scheme != "https" or not issuer_parts.hostname:
+            raise ValueError("OAUTH_ISSUER must be an absolute HTTPS URL.")
+        if jwks_parts.scheme != "https" or not jwks_parts.hostname:
+            raise ValueError("OAUTH_JWKS_URL must be an absolute HTTPS URL.")
         try:
             canonical_issuer = str(AnyHttpUrl(self.issuer))
             AnyHttpUrl(self.jwks_url)
         except ValueError as exc:
             raise ValueError(
-                "OAUTH_ISSUER and OAUTH_JWKS_URL must be absolute HTTP(S) URLs."
+                "OAUTH_ISSUER and OAUTH_JWKS_URL must be absolute HTTPS URLs."
             ) from exc
         if canonical_issuer != self.issuer:
             raise ValueError(

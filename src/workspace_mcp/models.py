@@ -13,8 +13,8 @@ QueryText = Annotated[str, Field(min_length=1, max_length=500)]
 ScriptText = Annotated[str, Field(min_length=1, max_length=20000)]
 PatchText = Annotated[str, Field(min_length=1)]
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
-Paths = Annotated[list[str], Field(min_length=1, max_length=50)]
-Queries = Annotated[list[str], Field(max_length=10)]
+Paths = Annotated[list[WorkspacePath], Field(min_length=1, max_length=50)]
+Queries = Annotated[list[QueryText], Field(max_length=10)]
 PositiveInt = Annotated[int, Field(ge=1)]
 ResponseBytes = Annotated[int, Field(ge=1024)]
 LogOffset = Annotated[int, Field(ge=0)]
@@ -159,6 +159,12 @@ class WorkspaceWriteFileRequest(WorkspaceScopedModel):
     expected_sha256: Sha256 | None = None
     dry_run: bool = False
     max_bytes: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def validate_hash_checked_overwrite(self) -> WorkspaceWriteFileRequest:
+        if self.mode == "overwrite_if_sha256_matches" and self.expected_sha256 is None:
+            raise ValueError("expected_sha256 is required when mode=overwrite_if_sha256_matches")
+        return self
 
 
 class WorkspaceWriteFileResponse(WorkspaceModel):

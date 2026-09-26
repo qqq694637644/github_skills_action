@@ -185,6 +185,31 @@ def test_personal_server_requires_allowed_subject() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("issuer", "jwks_url", "message"),
+    [
+        (
+            "http://auth.example.com/",
+            "https://auth.example.com/.well-known/jwks.json",
+            "OAUTH_ISSUER",
+        ),
+        (
+            "https://auth.example.com/",
+            "http://auth.example.com/.well-known/jwks.json",
+            "OAUTH_JWKS_URL",
+        ),
+    ],
+)
+def test_oauth_configuration_requires_https(issuer: str, jwks_url: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        MCPSettings(
+            public_url="https://workspace.example.com/mcp",
+            issuer=issuer,
+            jwks_url=jwks_url,
+            allowed_subject="personal-user",
+        )
+
+
 def test_authenticated_http_initialize_accepts_public_mcp_host() -> None:
     class FullScopeVerifier:
         def __init__(self, settings: MCPSettings) -> None:

@@ -515,8 +515,15 @@ wait_for_change(operation_id, stdout_offset, stderr_offset, wait_seconds)
 它监听/检查：
 
 - operation 是否完成；
-- stdout 文件大小是否超过 `stdout_offset`；
-- stderr 文件大小是否超过 `stderr_offset`。
+- stdout 从 `stdout_offset` 后是否已经出现至少一个完整可解码 UTF-8 code point；
+- stderr 从 `stderr_offset` 后是否已经出现至少一个完整可解码 UTF-8 code point。
+
+运行中的 command 遇到临时 EOF 时，不能把 incomplete UTF-8 sequence 当成真正 EOF：
+
+- partial bytes 不输出 replacement character；
+- partial bytes 不推进 offset；
+- `wait_for_change` 在 bounded wait 内继续等剩余 byte；
+- operation 进入 terminal state 后，才允许 final decoder 处理真正残留的不完整尾巴。
 
 不需要把 PowerShell stdout/stderr 改成 MCP streaming channel；现有文件日志模型继续保留。
 
@@ -682,6 +689,8 @@ MCP_REQUIRED_SCOPE
 
 OAuth Provider 特定配置按最终选型补充。
 
+正式 Remote MCP 配置中 `OAUTH_ISSUER` 和 `OAUTH_JWKS_URL` 都必须使用绝对 HTTPS URL，不提供 HTTP OAuth 基础设施兼容模式。
+
 `.env` 解析函数从旧 `runtime.py` 抽出来，不让 Workspace 模块继续依赖 Skill runtime。
 
 ## 11. `pyproject.toml` 重构
@@ -739,6 +748,7 @@ workspace-mcp
 - idempotency；
 - log offsets；
 - UTF-8 多字节字符跨分页边界时不损坏；
+- running command 将一个 UTF-8 code point 分多次写入 pipe 时，`start -> get` 不提前消费 partial bytes；
 - 文件工具拒绝 `..`、绝对路径和指向 root 外的 symlink/junction；
 - `workspaceCommand` 仍可按设计访问 Workspace root 外的 OS-account-scoped 路径；
 - output truncation。
@@ -763,6 +773,9 @@ tests/test_mcp_auth.py
 - structured output；
 - 大型 structured output 不在文本 `content` 中完整复制；
 - tool schema 暴露与实际参数校验一致的长度、范围和 pattern；
+- paths/queries 数组 item 约束与单值 path/query 约束一致；
+- `overwrite_if_sha256_matches` 在 schema 中条件要求 `expected_sha256`；
+- `workspaceCommand` 的 timeout/output maximum 从当前运行时配置写入 descriptor；
 - WorkspaceToolError -> MCP error result；
 - OAuth 必须存在；
 - invalid token；

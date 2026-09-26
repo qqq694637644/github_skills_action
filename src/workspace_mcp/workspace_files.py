@@ -348,6 +348,13 @@ class LocalWorkspaceService:
     async def command_list(self, state: str | None) -> list[dict[str, Any]]:
         return await self._operation_manager().list_operations(state)
 
+    def command_limits(self) -> dict[str, int]:
+        settings = self._operation_manager().settings
+        return {
+            "max_timeout_seconds": settings.max_timeout_seconds,
+            "max_output_bytes": settings.max_output_bytes,
+        }
+
     async def shutdown(self) -> None:
         if self._operations is not None:
             await self._operations.shutdown()

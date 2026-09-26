@@ -81,6 +81,22 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         assert write_properties["path"]["minLength"] == 1
         assert write_properties["path"]["maxLength"] == 500
         assert write_properties["expected_sha256"]["anyOf"][0]["pattern"] == ("^[0-9a-fA-F]{64}$")
+        write_conditions = by_name["workspaceWriteFile"].input_schema["allOf"]
+        assert any(
+            item.get("if", {}).get("properties", {}).get("mode", {}).get("const")
+            == "overwrite_if_sha256_matches"
+            and item["then"]["required"] == ["expected_sha256"]
+            for item in write_conditions
+        )
+
+        read_paths = by_name["workspaceReadFiles"].input_schema["properties"]["paths"]
+        assert read_paths["items"]["minLength"] == 1
+        assert read_paths["items"]["maxLength"] == 500
+        inspect_properties = by_name["workspaceInspect"].input_schema["properties"]
+        assert inspect_properties["paths"]["anyOf"][0]["items"]["minLength"] == 1
+        assert inspect_properties["paths"]["anyOf"][0]["items"]["maxLength"] == 500
+        assert inspect_properties["queries"]["anyOf"][0]["items"]["minLength"] == 1
+        assert inspect_properties["queries"]["anyOf"][0]["items"]["maxLength"] == 500
         assert command.annotations is not None
         assert command.annotations.destructive_hint is True
         assert command.annotations.open_world_hint is True
@@ -90,6 +106,45 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
             assert by_name[name].annotations.read_only_hint is True
 
     asyncio.run(scenario())
+
+
+def test_command_schema_advertises_runtime_configured_limits() -> None:
+    async def scenario(root: Path) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WORKSPACE_ROOT": str(root / "workspaces"),
+                "WORKSPACE_OPERATION_ROOT": str(root / "operations"),
+                "WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS": "42",
+                "WORKSPACE_COMMAND_MAX_OUTPUT_BYTES": "123456",
+            },
+            clear=False,
+        ):
+            server = create_server(_settings())
+            tools = {tool.name: tool for tool in await server.list_tools()}
+            properties = tools["workspaceCommand"].input_schema["properties"]
+            assert properties["timeout_seconds"]["maximum"] == 42
+            assert properties["max_output_bytes"]["maximum"] == 123_456
+
+            prepared = await server.call_tool(
+                "prepareWorkspace", {"idempotency_key": "dynamic-limits-workspace-001"}
+            )
+            workspace_id = str(prepared.structured_content["workspace_id"])
+            with pytest.raises(ToolError) as timeout_limit:
+                await server.call_tool(
+                    "workspaceCommand",
+                    {
+                        "action": "start",
+                        "idempotency_key": "dynamic-limits-op-001",
+                        "workspace_id": workspace_id,
+                        "script": "Write-Output unreachable",
+                        "timeout_seconds": 43,
+                    },
+                )
+            assert "timeout_seconds exceeds 42" in str(timeout_limit.value)
+
+    with tempfile.TemporaryDirectory() as temp:
+        asyncio.run(scenario(Path(temp)))
 
 
 def test_mcp_tool_calls_return_structured_content_and_new_command_follow_shape() -> None:
@@ -129,6 +184,25 @@ def test_mcp_tool_calls_return_structured_content_and_new_command_follow_shape()
         assert "x" * 100 in read.structured_content["files"][0]["content"]
         assert len(read.content[0].text) < 200
         assert "x" * 100 not in read.content[0].text
+
+        with pytest.raises(ToolError) as invalid_path_item:
+            await server.call_tool(
+                "workspaceReadFiles",
+                {"workspace_id": workspace_id, "paths": [""]},
+            )
+        assert "at least 1 character" in str(invalid_path_item.value)
+
+        with pytest.raises(ToolError) as missing_hash:
+            await server.call_tool(
+                "workspaceWriteFile",
+                {
+                    "workspace_id": workspace_id,
+                    "path": "hello.txt",
+                    "content": "replacement\n",
+                    "mode": "overwrite_if_sha256_matches",
+                },
+            )
+        assert "expected_sha256 is required" in str(missing_hash.value)
 
         with pytest.raises(ToolError) as escaped:
             await server.call_tool(

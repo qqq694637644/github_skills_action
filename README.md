@@ -91,7 +91,9 @@ overwrite
 overwrite_if_sha256_matches
 ```
 
-同时支持 dry-run、line ending 控制和 SHA-256 compare-and-write。
+同时支持 dry-run、line ending 控制和 SHA-256 compare-and-write。选择
+`overwrite_if_sha256_matches` 时，MCP schema 和运行时校验都会要求
+`expected_sha256`。
 
 ### `workspaceApplyPatch`
 
@@ -349,6 +351,8 @@ https://mcp.example.com/mcp
 
 必须使用 Provider discovery metadata 中公布的规范 issuer，字符串要精确一致。不要自行增加或删除尾部 `/`。对于只有 host 的 issuer，如果 Provider 公布的是带尾 `/` 的值，就必须保持该 `/`。
 
+`OAUTH_ISSUER` 和 `OAUTH_JWKS_URL` 都必须是绝对 HTTPS URL；本项目不接受 HTTP OAuth 基础设施配置。
+
 ### `OAUTH_ALLOWED_SUBJECT`
 
 必填。只有 JWT `sub` 完全匹配的 Token 才会被接受，用来把这个个人 MCP 固定到自己的 Provider 账号。
@@ -463,6 +467,9 @@ python -m ruff format .
 - 7 个 MCP tools discovery/schema/annotations/structured output；
 - `tools/list` wire response 的顶层 `securitySchemes` 与 `_meta.securitySchemes` 镜像；
 - structuredContent 与短文本 content 不重复大块文件/日志；
+- path/query 数组的每个元素都有明确长度约束；
+- hash-checked overwrite 的 `expected_sha256` 条件写入 tool schema；
+- `workspaceCommand` schema 的 timeout/output maximum 来自当前运行时配置；
 - OAuth protected-resource metadata、401 challenge 和 403 scope challenge；
 - JWT 签名、issuer、canonical MCP resource/audience、expiry/nbf、subject；
 - Workspace create/reuse；
@@ -476,6 +483,8 @@ python -m ruff format .
 - 长任务 `start -> get` 增量日志；
 - 日志 offset 不重复；
 - UTF-8 中文/Emoji 即使按 1 byte 分页也不会损坏；
+- running PowerShell 即使把一个 UTF-8 code point 分多次写入 pipe，`start -> get`
+  也不会提前消费 partial bytes 或产生 replacement character；
 - `logs` 历史补读；
 - idempotency；
 - timeout；

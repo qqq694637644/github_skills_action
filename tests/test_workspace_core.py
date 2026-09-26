@@ -251,6 +251,60 @@ def test_utf8_log_pagination_never_splits_code_points() -> None:
         assert offset == len(encoded)
 
 
+def test_running_command_utf8_partial_writes_do_not_emit_replacement_characters() -> None:
+    async def scenario() -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="utf8-live-command-001", workspace_id=None
+            )
+            script = (
+                "$s=[Console]::OpenStandardOutput(); "
+                "$s.WriteByte(228); $s.Flush(); Start-Sleep -Milliseconds 300; "
+                "$s.WriteByte(189); $s.Flush(); Start-Sleep -Milliseconds 300; "
+                "$s.WriteByte(160); $s.Flush(); Start-Sleep -Milliseconds 300"
+            )
+            start = await service.command_start(
+                workspace_id=str(workspace["workspace_id"]),
+                idempotency_key="utf8-live-op-001",
+                script=script,
+                timeout_seconds=10,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=1,
+            )
+            operation_id = str(start["operation"]["operation_id"])
+            stdout_offset = int(start["next_stdout_offset"])
+            stderr_offset = int(start["next_stderr_offset"])
+            pieces = [str(start["stdout"])]
+            state = str(start["operation"]["state"])
+
+            deadline = time.monotonic() + 5
+            while state == "running" and time.monotonic() < deadline:
+                result = await service.command_get(
+                    operation_id,
+                    wait_seconds=1,
+                    stdout_offset=stdout_offset,
+                    stderr_offset=stderr_offset,
+                    max_bytes=1,
+                )
+                pieces.append(str(result["stdout"]))
+                stdout_offset = int(result["next_stdout_offset"])
+                stderr_offset = int(result["next_stderr_offset"])
+                state = str(result["operation"]["state"])
+
+            assert state == "succeeded"
+            combined = "".join(pieces)
+            assert combined == "你"
+            assert "�" not in combined
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=0):
+        _run(scenario())
+
+
 def test_command_start_returns_terminal_logs_for_fast_command() -> None:
     async def scenario() -> None:
         service = LocalWorkspaceService()

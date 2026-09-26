@@ -359,11 +359,12 @@ class WorkspaceOperationManager:
         deadline = time.monotonic() + timeout_seconds
         while True:
             record = self._require_operation(operation_id)
-            if record.get("state") in _TERMINAL_STATES:
+            terminal = record.get("state") in _TERMINAL_STATES
+            if terminal:
                 return self._public_record(record)
-            if _file_size(self._stdout_path(operation_id)) > stdout_offset:
+            if _log_has_decodable_progress(self._stdout_path(operation_id), stdout_offset):
                 return self._public_record(record)
-            if _file_size(self._stderr_path(operation_id)) > stderr_offset:
+            if _log_has_decodable_progress(self._stderr_path(operation_id), stderr_offset):
                 return self._public_record(record)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -388,12 +389,16 @@ class WorkspaceOperationManager:
         max_bytes: int,
     ) -> dict[str, Any]:
         record = self._require_operation(operation_id)
-        stdout, next_stdout = _read_log(self._stdout_path(operation_id), stdout_offset, max_bytes)
-        stderr, next_stderr = _read_log(self._stderr_path(operation_id), stderr_offset, max_bytes)
+        terminal = record.get("state") in _TERMINAL_STATES
+        stdout, next_stdout = _read_log(
+            self._stdout_path(operation_id), stdout_offset, max_bytes, final=terminal
+        )
+        stderr, next_stderr = _read_log(
+            self._stderr_path(operation_id), stderr_offset, max_bytes, final=terminal
+        )
         if record.get("plain_output"):
             stdout = _ANSI_ESCAPE_RE.sub("", stdout)
             stderr = _ANSI_ESCAPE_RE.sub("", stderr)
-        terminal = record.get("state") in _TERMINAL_STATES
         return {
             "stdout": stdout,
             "stderr": stderr,
@@ -936,7 +941,7 @@ def _script_summary(script: str) -> str:
     return " ".join(script.strip().split())[:200]
 
 
-def _read_log(path: Path, offset: int, max_bytes: int) -> tuple[str, int]:
+def _read_log(path: Path, offset: int, max_bytes: int, *, final: bool = True) -> tuple[str, int]:
     if not path.is_file():
         return "", offset
     with path.open("rb") as handle:
@@ -952,9 +957,9 @@ def _read_log(path: Path, offset: int, max_bytes: int) -> tuple[str, int]:
         while consumed == 0 and pending and len(pending) < 4:
             extra = handle.read(1)
             if not extra:
-                text += decoder.decode(b"", final=True)
-                consumed = handle.tell() - offset
-                pending = b""
+                if final:
+                    text += decoder.decode(b"", final=True)
+                    consumed = handle.tell() - offset
                 break
             emitted = decoder.decode(extra, final=False)
             pending, _ = decoder.getstate()
@@ -965,6 +970,13 @@ def _read_log(path: Path, offset: int, max_bytes: int) -> tuple[str, int]:
 
         next_offset = offset + consumed
     return text, next_offset
+
+
+def _log_has_decodable_progress(path: Path, offset: int) -> bool:
+    if not path.is_file() or _file_size(path) <= offset:
+        return False
+    _, next_offset = _read_log(path, offset, 1, final=False)
+    return next_offset > offset
 
 
 def _file_size(path: Path) -> int:

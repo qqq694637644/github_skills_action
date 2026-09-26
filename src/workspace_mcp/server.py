@@ -69,15 +69,29 @@ SERVER_INSTRUCTIONS = (
 class WorkspaceMCPServer(MCPServer):
     """Expose precise schemas and the back-compat OAuth mirror on every tool."""
 
-    def __init__(self, *args: Any, required_scope: str, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        required_scope: str,
+        command_max_timeout_seconds: int,
+        command_max_output_bytes: int,
+        **kwargs: Any,
+    ) -> None:
         self._workspace_security_schemes = [{"type": "oauth2", "scopes": [required_scope]}]
+        self._command_max_timeout_seconds = command_max_timeout_seconds
+        self._command_max_output_bytes = command_max_output_bytes
         super().__init__(*args, **kwargs)
 
     async def list_tools(self) -> list[Tool]:
         advertised: list[Tool] = []
         for tool in await super().list_tools():
             payload = tool.model_dump(by_alias=True, exclude_none=True)
-            payload["inputSchema"] = _advertised_input_schema(tool.name, payload["inputSchema"])
+            payload["inputSchema"] = _advertised_input_schema(
+                tool.name,
+                payload["inputSchema"],
+                command_max_timeout_seconds=self._command_max_timeout_seconds,
+                command_max_output_bytes=self._command_max_output_bytes,
+            )
             meta = dict(payload.get("_meta") or {})
             meta["securitySchemes"] = self._workspace_security_schemes
             payload["_meta"] = meta
@@ -113,8 +127,24 @@ class OAuthToolMetadataMiddleware:
         return {**result, "tools": patched_tools}
 
 
-def _advertised_input_schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+def _advertised_input_schema(
+    name: str,
+    schema: dict[str, Any],
+    *,
+    command_max_timeout_seconds: int,
+    command_max_output_bytes: int,
+) -> dict[str, Any]:
     result = dict(schema)
+    properties = dict(result.get("properties") or {})
+    if name == "workspaceCommand":
+        timeout_schema = dict(properties.get("timeout_seconds") or {})
+        output_schema = dict(properties.get("max_output_bytes") or {})
+        timeout_schema["maximum"] = command_max_timeout_seconds
+        output_schema["maximum"] = command_max_output_bytes
+        properties["timeout_seconds"] = timeout_schema
+        properties["max_output_bytes"] = output_schema
+        result["properties"] = properties
+
     all_of = list(result.get("allOf") or [])
     if name == "prepareWorkspace":
         all_of.append(
@@ -177,6 +207,13 @@ def _advertised_input_schema(name: str, schema: dict[str, Any]) -> dict[str, Any
                 ],
             ]
         )
+    elif name == "workspaceWriteFile":
+        all_of.append(
+            {
+                "if": {"properties": {"mode": {"const": "overwrite_if_sha256_matches"}}},
+                "then": {"required": ["expected_sha256"]},
+            }
+        )
     if all_of:
         result["allOf"] = all_of
     return result
@@ -215,6 +252,7 @@ def create_server(
 ) -> MCPServer:
     settings = settings or MCPSettings.from_env()
     service = service or LocalWorkspaceService()
+    command_limits = service.command_limits()
 
     @asynccontextmanager
     async def lifespan(_: MCPServer):
@@ -229,6 +267,8 @@ def create_server(
         description="Persistent workspace tools with arbitrary PowerShell execution.",
         version="1.0.0",
         required_scope=settings.required_scope,
+        command_max_timeout_seconds=command_limits["max_timeout_seconds"],
+        command_max_output_bytes=command_limits["max_output_bytes"],
         instructions=SERVER_INSTRUCTIONS,
         token_verifier=JWTTokenVerifier(settings),
         auth=AuthSettings(

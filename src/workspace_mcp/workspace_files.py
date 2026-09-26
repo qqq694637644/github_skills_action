@@ -18,6 +18,7 @@ from .workspace_patch import (
     describe_changes,
     normalize_line_endings,
     parse_codex_patch,
+    path_is_within_workspace,
     prepare_text_patch,
     prepare_write_change,
     sha256_hex,
@@ -64,6 +65,8 @@ class LocalWorkspaceService:
         max_bytes: int | None,
     ) -> dict[str, Any]:
         root = self.root(workspace_id)
+        for path in paths:
+            target_path(root, path)
         file_budget = max_bytes_per_file or _DEFAULT_FILE_BYTES
         response_budget = max_bytes or _DEFAULT_OUTPUT_BYTES
         files = [
@@ -200,7 +203,6 @@ class LocalWorkspaceService:
             raise WorkspaceToolError(
                 "WORKSPACE_FILE_EXISTS",
                 f"create_only target already exists: {path}",
-                status_code=409,
             )
         previous_sha = sha256_hex(previous_bytes) if previous_bytes is not None else None
         if mode == "overwrite_if_sha256_matches":
@@ -208,13 +210,11 @@ class LocalWorkspaceService:
                 raise WorkspaceToolError(
                     "WORKSPACE_FILE_NOT_FOUND",
                     f"Hash-checked overwrite target does not exist: {path}",
-                    status_code=404,
                 )
             if expected_sha256 is None or previous_sha != expected_sha256.lower():
                 raise WorkspaceToolError(
                     "WORKSPACE_SHA256_MISMATCH",
                     f"Current SHA-256 does not match expected_sha256 for {path}.",
-                    status_code=409,
                 )
         rendered = normalize_line_endings(
             content, line_ending=line_ending, previous_bytes=previous_bytes
@@ -281,7 +281,6 @@ class LocalWorkspaceService:
             raise WorkspaceToolError(
                 "WORKSPACE_TOO_MANY_CHANGED_FILES",
                 f"Patch changes too many files: {len(changed)} > {changed_limit}.",
-                status_code=413,
             )
         if not dry_run:
             commit_prepared_changes(root, prepared)
@@ -391,7 +390,6 @@ class LocalWorkspaceService:
             raise WorkspaceToolError(
                 "VALIDATION_ERROR",
                 f"max_bytes must be at least {_MIN_STRUCTURED_RESPONSE_BYTES}.",
-                status_code=422,
             )
         rg = shutil.which("rg")
         if not rg:
@@ -399,7 +397,6 @@ class LocalWorkspaceService:
                 "WORKSPACE_EXEC_FAILED",
                 "ripgrep (rg) is required for workspaceSearch/workspaceInspect but was "
                 "not found on PATH.",
-                status_code=500,
             )
         normalized_paths = self._existing_paths(root, paths)
         args = [rg, "--json", "--line-number", "--column", "--color", "never"]
@@ -420,7 +417,6 @@ class LocalWorkspaceService:
                 "VALIDATION_ERROR",
                 "ripgrep rejected the search query: "
                 + result["stderr"].decode("utf-8", errors="replace"),
-                status_code=422,
             )
         stdout = result["stdout"]
         output_truncated = bool(result["truncated"])
@@ -487,7 +483,6 @@ class LocalWorkspaceService:
                 raise WorkspaceToolError(
                     "WORKSPACE_FILE_NOT_FOUND",
                     f"Workspace file was not found: {path}",
-                    status_code=404,
                 )
             data = resolved.read_bytes()
             assert_text_bytes(data, path=path)
@@ -569,7 +564,11 @@ class LocalWorkspaceService:
                 if depth_from_base >= max_depth:
                     dirs[:] = []
                     continue
-                dirs[:] = sorted(dirs)
+                dirs[:] = [
+                    dirname
+                    for dirname in sorted(dirs)
+                    if path_is_within_workspace(root, current_path / dirname)
+                ]
                 for dirname in dirs:
                     child = current_path / dirname
                     entries.append(
@@ -584,6 +583,8 @@ class LocalWorkspaceService:
                         return entries, True
                 for filename in sorted(files):
                     child = current_path / filename
+                    if not path_is_within_workspace(root, child):
+                        continue
                     try:
                         size = child.stat().st_size
                     except OSError:
@@ -608,7 +609,6 @@ class LocalWorkspaceService:
                 raise WorkspaceToolError(
                     "WORKSPACE_FILE_NOT_FOUND",
                     f"Workspace path was not found: {path}",
-                    status_code=404,
                 )
         return normalized
 
@@ -651,7 +651,6 @@ async def _run_bounded_command(
         raise WorkspaceToolError(
             "WORKSPACE_EXEC_TIMEOUT",
             "ripgrep search timed out.",
-            status_code=504,
         ) from exc
     stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
     return {
@@ -703,7 +702,7 @@ def _json_bytes(payload: dict[str, Any]) -> int:
 
 def _fit_read_files_response(response: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     if max_bytes < _MIN_STRUCTURED_RESPONSE_BYTES:
-        raise WorkspaceToolError("VALIDATION_ERROR", "max_bytes is too small.", status_code=422)
+        raise WorkspaceToolError("VALIDATION_ERROR", "max_bytes is too small.")
     while _json_bytes(response) > max_bytes and response["files"]:
         last = response["files"][-1]
         if last["content"]:
@@ -717,7 +716,6 @@ def _fit_read_files_response(response: dict[str, Any], max_bytes: int) -> dict[s
         raise WorkspaceToolError(
             "VALIDATION_ERROR",
             "max_bytes is too small for the response envelope.",
-            status_code=422,
         )
     return response
 
@@ -737,7 +735,6 @@ def _fit_search_response(response: dict[str, Any], max_bytes: int) -> dict[str, 
         raise WorkspaceToolError(
             "VALIDATION_ERROR",
             "max_bytes is too small for the response envelope.",
-            status_code=422,
         )
     return response
 
@@ -780,6 +777,5 @@ def _fit_inspect_response(response: dict[str, Any], max_bytes: int) -> dict[str,
         raise WorkspaceToolError(
             "VALIDATION_ERROR",
             "max_bytes is too small for the response envelope.",
-            status_code=422,
         )
     return response

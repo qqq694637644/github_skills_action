@@ -59,10 +59,9 @@ def _read_dotenv_file(path: Path) -> dict[str, str]:
 class MCPSettings:
     public_url: str
     issuer: str
-    audience: str
     jwks_url: str
     required_scope: str = "workspace:execute"
-    allowed_subject: str | None = None
+    allowed_subject: str = ""
     allowed_algorithms: tuple[str, ...] = ("RS256",)
     host: str = "127.0.0.1"
     port: int = 8000
@@ -88,6 +87,10 @@ class MCPSettings:
             )
         if not self.required_scope.strip():
             raise ValueError("MCP_REQUIRED_SCOPE must not be empty.")
+        if not self.allowed_subject.strip():
+            raise ValueError(
+                "OAUTH_ALLOWED_SUBJECT is required for this personal single-user server."
+            )
         if not self.allowed_algorithms:
             raise ValueError("OAUTH_ALLOWED_ALGORITHMS must contain at least one algorithm.")
         if not 1 <= self.port <= 65535:
@@ -97,15 +100,13 @@ class MCPSettings:
     def from_env(cls) -> MCPSettings:
         public_url = _required("MCP_PUBLIC_URL")
         issuer = _required("OAUTH_ISSUER")
-        audience = env_value("OAUTH_AUDIENCE") or public_url
         jwks_url = _required("OAUTH_JWKS_URL")
         return cls(
             public_url=public_url,
             issuer=issuer,
-            audience=audience,
             jwks_url=jwks_url,
             required_scope=env_value("MCP_REQUIRED_SCOPE") or "workspace:execute",
-            allowed_subject=env_value("OAUTH_ALLOWED_SUBJECT"),
+            allowed_subject=_required("OAUTH_ALLOWED_SUBJECT"),
             allowed_algorithms=tuple(
                 part.strip()
                 for part in (env_value("OAUTH_ALLOWED_ALGORITHMS") or "RS256").split(",")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import ctypes
 import hashlib
 import json
@@ -234,13 +235,11 @@ class WorkspaceOperationManager:
             raise WorkspaceToolError(
                 "VALIDATION_ERROR",
                 f"timeout_seconds exceeds {self.settings.max_timeout_seconds}.",
-                status_code=422,
             )
         if output_limit > self.settings.max_output_bytes:
             raise WorkspaceToolError(
                 "VALIDATION_ERROR",
                 f"max_output_bytes exceeds {self.settings.max_output_bytes}.",
-                status_code=422,
             )
         request_payload = {
             "workspace_id": workspace_id,
@@ -626,7 +625,6 @@ class WorkspaceOperationManager:
                 raise WorkspaceToolError(
                     "WORKSPACE_EXEC_FAILED",
                     f"Unable to attach the PowerShell process to a Windows Job Object: {exc}",
-                    status_code=500,
                 ) from exc
             async with runtime.lock:
                 runtime.record["root_pid"] = proc.pid
@@ -837,7 +835,6 @@ class WorkspaceOperationManager:
             raise WorkspaceToolError(
                 "WORKSPACE_OPERATION_NOT_FOUND",
                 "Workspace command operation was not found.",
-                status_code=404,
             )
         return record
 
@@ -945,8 +942,29 @@ def _read_log(path: Path, offset: int, max_bytes: int) -> tuple[str, int]:
     with path.open("rb") as handle:
         handle.seek(offset)
         data = handle.read(max_bytes)
-        next_offset = handle.tell()
-    return data.decode("utf-8", errors="replace"), next_offset
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        text = decoder.decode(data, final=False)
+        pending, _ = decoder.getstate()
+        consumed = len(data) - len(pending)
+
+        # If the byte budget cuts the first UTF-8 code point, read only enough
+        # extra bytes to finish that character so pagination always makes progress.
+        while consumed == 0 and pending and len(pending) < 4:
+            extra = handle.read(1)
+            if not extra:
+                text += decoder.decode(b"", final=True)
+                consumed = handle.tell() - offset
+                pending = b""
+                break
+            emitted = decoder.decode(extra, final=False)
+            pending, _ = decoder.getstate()
+            if emitted:
+                text += emitted
+                consumed = handle.tell() - offset - len(pending)
+                break
+
+        next_offset = offset + consumed
+    return text, next_offset
 
 
 def _file_size(path: Path) -> int:

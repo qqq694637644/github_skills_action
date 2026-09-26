@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
 import jwt
+import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from mcp.server.auth.provider import AccessToken
 from mcp.types import LATEST_PROTOCOL_VERSION
@@ -16,11 +18,17 @@ from workspace_mcp.config import MCPSettings
 from workspace_mcp.server import create_app
 
 
-def _settings(*, allowed_subject: str | None = None) -> MCPSettings:
+def _sse_json(text: str) -> dict:
+    for line in text.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line[6:])
+    raise AssertionError(f"No SSE data payload found: {text[:500]}")
+
+
+def _settings(*, allowed_subject: str = "personal-user") -> MCPSettings:
     return MCPSettings(
         public_url="https://workspace.example.com/mcp",
         issuer="https://auth.example.com/",
-        audience="https://workspace.example.com/mcp",
         jwks_url="https://auth.example.com/.well-known/jwks.json",
         required_scope="workspace:execute",
         allowed_subject=allowed_subject,
@@ -68,6 +76,7 @@ def test_jwt_verifier_checks_signature_issuer_audience_and_personal_subject() ->
         )
         assert await verifier.verify_token(_token(private_key, sub="other-user")) is None
         assert await verifier.verify_token(_token(private_key, exp=int(time.time()) - 1)) is None
+        assert await verifier.verify_token(_token(private_key, nbf=int(time.time()) + 300)) is None
 
     asyncio.run(scenario())
 
@@ -109,7 +118,7 @@ def test_auth_middleware_rejects_token_without_required_scope() -> None:
                 token=token,
                 client_id="chatgpt-client",
                 scopes=[],
-                resource=self.settings.audience,
+                resource=self.settings.public_url,
                 subject="personal-user",
             )
 
@@ -133,6 +142,49 @@ def test_auth_middleware_rejects_token_without_required_scope() -> None:
     asyncio.run(scenario())
 
 
+def test_auth_middleware_rejects_token_for_another_resource() -> None:
+    class WrongResourceVerifier:
+        def __init__(self, settings: MCPSettings) -> None:
+            self.settings = settings
+
+        async def verify_token(self, token: str) -> AccessToken:
+            return AccessToken(
+                token=token,
+                client_id="chatgpt-client",
+                scopes=["workspace:execute"],
+                resource="https://other.example.com/mcp",
+                subject="personal-user",
+            )
+
+    async def scenario() -> None:
+        settings = _settings()
+        with patch("workspace_mcp.server.JWTTokenVerifier", WrongResourceVerifier):
+            app = create_app(settings)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://workspace.example.com"
+        ) as client:
+            response = await client.post(
+                "/mcp",
+                headers={"Authorization": "Bearer wrong-resource"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            )
+            assert response.status_code == 401
+            assert "resource_metadata=" in response.headers["www-authenticate"]
+
+    asyncio.run(scenario())
+
+
+def test_personal_server_requires_allowed_subject() -> None:
+    with pytest.raises(ValueError, match="OAUTH_ALLOWED_SUBJECT"):
+        MCPSettings(
+            public_url="https://workspace.example.com/mcp",
+            issuer="https://auth.example.com/",
+            jwks_url="https://auth.example.com/.well-known/jwks.json",
+            allowed_subject="",
+        )
+
+
 def test_authenticated_http_initialize_accepts_public_mcp_host() -> None:
     class FullScopeVerifier:
         def __init__(self, settings: MCPSettings) -> None:
@@ -143,7 +195,7 @@ def test_authenticated_http_initialize_accepts_public_mcp_host() -> None:
                 token=token,
                 client_id="chatgpt-client",
                 scopes=["workspace:execute"],
-                resource=self.settings.audience,
+                resource=self.settings.public_url,
                 subject="personal-user",
             )
 
@@ -175,8 +227,36 @@ def test_authenticated_http_initialize_accepts_public_mcp_host() -> None:
                     },
                 )
                 assert response.status_code == 200
-                assert response.headers.get("mcp-session-id")
+                session_id = response.headers.get("mcp-session-id")
+                assert session_id
                 assert response.headers["content-type"].startswith("text/event-stream")
                 assert '"name":"workspace-mcp"' in response.text
+
+                headers = {
+                    "Authorization": "Bearer full-scope",
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                    "Mcp-Session-Id": session_id,
+                }
+                initialized = await client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                )
+                assert initialized.status_code in {200, 202}
+
+                listed = await client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                )
+                assert listed.status_code == 200
+                payload = _sse_json(listed.text)
+                tools = payload["result"]["tools"]
+                assert len(tools) == 7
+                for tool in tools:
+                    expected = [{"type": "oauth2", "scopes": ["workspace:execute"]}]
+                    assert tool["securitySchemes"] == expected
+                    assert tool["_meta"]["securitySchemes"] == expected
 
     asyncio.run(scenario())

@@ -238,6 +238,11 @@ max_bytes
 
 本项目面向个人自用，不提供多租户隔离。
 
+这里需要明确区分两类能力：
+
+- `workspaceReadFiles` / `workspaceWriteFile` / `workspaceApplyPatch` / `workspaceSearch` / `workspaceInspect` 是 **Workspace-scoped 文件工具**，路径必须解析后仍位于对应 Workspace root 内；`..`、绝对路径以及最终指向 root 外的 symlink/junction 都会被拒绝。
+- `workspaceCommand` 是 **故意设计成 OS-account-scoped 的任意 PowerShell**，不受 Workspace 文件路径限制，可以访问运行服务的 OS 账户本来就能访问的一切。这是正式能力，不是安全漏洞或待收紧项。
+
 ## OAuth 2.1
 
 Remote MCP 不提供 `noauth` 或旧静态 Bearer Token 模式。
@@ -264,9 +269,13 @@ Workspace MCP Resource Server
 - audience/resource；
 - expiry；
 - MCP required scope；
-- 可选的固定 `sub`，用于只允许自己的账号。
+- 固定 `sub`，用于只允许自己的账号。
 
 MCP Python SDK 会根据 Resource Server 配置暴露 protected-resource metadata，并在未认证请求上返回标准 `WWW-Authenticate` challenge。
+
+本项目采用**整个 MCP Server 强制 OAuth**的模式：客户端在 `/mcp` initialize 之前就必须完成认证，缺 Token 返回 401，缺 scope 返回 403。因此不使用“匿名连接成功后，再由某个 tool 返回 `_meta["mcp/www_authenticate"]`”的工具级混合认证流程。所有 7 个 tools 继承同一个 server-level OAuth 边界。
+
+同时，`tools/list` 中每个 tool 都显式声明顶层 `securitySchemes`，并同步提供 `_meta.securitySchemes` 兼容镜像；两者都声明 `oauth2 + workspace:execute`。这样 ChatGPT 看到的 tool descriptor 与整个 server 的 OAuth 策略一致。
 
 ### OAuth Provider 要求
 
@@ -306,7 +315,6 @@ MCP_HOST
 MCP_PORT
 
 OAUTH_ISSUER
-OAUTH_AUDIENCE
 OAUTH_JWKS_URL
 OAUTH_ALLOWED_ALGORITHMS
 OAUTH_ALLOWED_SUBJECT
@@ -333,11 +341,9 @@ ChatGPT 访问的公开 MCP resource URL，例如：
 https://mcp.example.com/mcp
 ```
 
-### `OAUTH_AUDIENCE`
+### OAuth resource / audience
 
-Access Token 必须包含的 audience。默认等于 `MCP_PUBLIC_URL`。
-
-如果 Provider 使用不同的 resource identifier，需要显式配置成 Provider 实际签发的 audience，并保证它与 MCP resource 设计一致。
+`MCP_PUBLIC_URL` 就是唯一 canonical MCP resource，同时也是 JWT 必须包含的 audience。项目不提供额外的 `OAUTH_AUDIENCE` 兼容层；OAuth Provider 必须为这个 MCP resource 签发 Token。
 
 ### `OAUTH_ISSUER`
 
@@ -345,9 +351,7 @@ Access Token 必须包含的 audience。默认等于 `MCP_PUBLIC_URL`。
 
 ### `OAUTH_ALLOWED_SUBJECT`
 
-可选。设置后只有 JWT `sub` 完全匹配的 Token 才会被接受。
-
-个人部署建议配置这个字段，进一步锁定自己的账号。
+必填。只有 JWT `sub` 完全匹配的 Token 才会被接受，用来把这个个人 MCP 固定到自己的 Provider 账号。
 
 ## 安装
 
@@ -457,9 +461,13 @@ python -m ruff format .
 当前测试重点覆盖：
 
 - 7 个 MCP tools discovery/schema/annotations/structured output；
-- OAuth protected-resource metadata 和 401 challenge；
-- JWT 签名、issuer、audience、expiry、subject；
+- `tools/list` wire response 的顶层 `securitySchemes` 与 `_meta.securitySchemes` 镜像；
+- structuredContent 与短文本 content 不重复大块文件/日志；
+- OAuth protected-resource metadata、401 challenge 和 403 scope challenge；
+- JWT 签名、issuer、canonical MCP resource/audience、expiry/nbf、subject；
 - Workspace create/reuse；
+- Workspace 文件工具的 `..` / 绝对路径 / symlink-junction root containment；
+- `workspaceCommand` 仍可按设计访问 Workspace root 外的 OS-account-scoped 路径；
 - inspect/search/read；
 - write/hash/dry-run；
 - patch transaction/rollback；
@@ -467,6 +475,7 @@ python -m ruff format .
 - PowerShell quick start；
 - 长任务 `start -> get` 增量日志；
 - 日志 offset 不重复；
+- UTF-8 中文/Emoji 即使按 1 byte 分页也不会损坏；
 - `logs` 历史补读；
 - idempotency；
 - timeout；

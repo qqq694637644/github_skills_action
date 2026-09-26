@@ -28,7 +28,7 @@ class JWTTokenVerifier(TokenVerifier):
             return None
 
         subject = _string_claim(payload, "sub")
-        if self.settings.allowed_subject and subject != self.settings.allowed_subject:
+        if subject != self.settings.allowed_subject:
             LOGGER.warning("oauth_token_rejected reason=subject_not_allowed")
             return None
 
@@ -46,7 +46,7 @@ class JWTTokenVerifier(TokenVerifier):
             client_id=client_id,
             scopes=scopes,
             expires_at=int(expires_at) if isinstance(expires_at, (int, float)) else None,
-            resource=self.settings.audience,
+            resource=self.settings.public_url,
             subject=subject,
             claims={
                 "iss": payload.get("iss"),
@@ -61,7 +61,7 @@ class JWTTokenVerifier(TokenVerifier):
             signing_key.key,
             algorithms=list(self.settings.allowed_algorithms),
             issuer=self.settings.issuer,
-            audience=self.settings.audience,
+            audience=self.settings.public_url,
             options={"require": ["exp", "iss", "aud"]},
         )
         if not isinstance(payload, dict):

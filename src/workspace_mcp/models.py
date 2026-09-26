@@ -1,10 +1,31 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 OperationState = Literal["running", "succeeded", "failed", "timed_out", "canceled", "interrupted"]
+WorkspaceId = Annotated[str, Field(pattern=r"^ws_[0-9a-f]{16}$")]
+OperationId = Annotated[str, Field(pattern=r"^op_[0-9a-f]{16}$")]
+IdempotencyKey = Annotated[str, Field(min_length=8, max_length=200)]
+WorkspacePath = Annotated[str, Field(min_length=1, max_length=500)]
+QueryText = Annotated[str, Field(min_length=1, max_length=500)]
+ScriptText = Annotated[str, Field(min_length=1, max_length=20000)]
+PatchText = Annotated[str, Field(min_length=1)]
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
+Paths = Annotated[list[str], Field(min_length=1, max_length=50)]
+Queries = Annotated[list[str], Field(max_length=10)]
+PositiveInt = Annotated[int, Field(ge=1)]
+ResponseBytes = Annotated[int, Field(ge=1024)]
+LogOffset = Annotated[int, Field(ge=0)]
+LogBytes = Annotated[int, Field(ge=1, le=500_000)]
+WaitSeconds = Annotated[float, Field(ge=0, le=30)]
+MaxLines = Annotated[int, Field(ge=1, le=5000)]
+ContextLines = Annotated[int, Field(ge=0, le=20)]
+MaxMatches = Annotated[int, Field(ge=1, le=1000)]
+MaxDepth = Annotated[int, Field(ge=1, le=10)]
+MaxTreeEntries = Annotated[int, Field(ge=1, le=5000)]
+MaxReadFiles = Annotated[int, Field(ge=0, le=50)]
 
 
 class WorkspaceModel(BaseModel):
@@ -12,12 +33,12 @@ class WorkspaceModel(BaseModel):
 
 
 class WorkspaceScopedModel(WorkspaceModel):
-    workspace_id: str = Field(pattern=r"^ws_[0-9a-f]{16}$")
+    workspace_id: WorkspaceId
 
 
 class PrepareWorkspaceRequest(WorkspaceModel):
-    idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
-    workspace_id: str | None = Field(default=None, pattern=r"^ws_[0-9a-f]{16}$")
+    idempotency_key: IdempotencyKey | None = None
+    workspace_id: WorkspaceId | None = None
 
     @model_validator(mode="after")
     def validate_prepare_fields(self) -> PrepareWorkspaceRequest:
@@ -55,11 +76,11 @@ class WorkspaceFileContent(WorkspaceModel):
 
 
 class WorkspaceReadFilesRequest(WorkspaceScopedModel):
-    paths: list[str] = Field(min_length=1, max_length=50)
-    start_line: int = Field(default=1, ge=1)
-    max_lines: int = Field(default=200, ge=1, le=5000)
-    max_bytes_per_file: int | None = Field(default=None, ge=1)
-    max_bytes: int | None = Field(default=None, ge=1024)
+    paths: Paths
+    start_line: PositiveInt = 1
+    max_lines: MaxLines = 200
+    max_bytes_per_file: PositiveInt | None = None
+    max_bytes: ResponseBytes | None = None
 
 
 class WorkspaceReadFilesResponse(WorkspaceModel):
@@ -76,13 +97,13 @@ class WorkspaceSearchMatch(WorkspaceModel):
 
 
 class WorkspaceSearchRequest(WorkspaceScopedModel):
-    query: str = Field(min_length=1, max_length=500)
+    query: QueryText
     regex: bool = False
     case_sensitive: bool = False
-    paths: list[str] = Field(default_factory=lambda: ["."], min_length=1, max_length=50)
-    context_lines: int = Field(default=2, ge=0, le=20)
-    max_matches: int = Field(default=100, ge=1, le=1000)
-    max_bytes: int | None = Field(default=None, ge=1024)
+    paths: Paths = Field(default_factory=lambda: ["."])
+    context_lines: ContextLines = 2
+    max_matches: MaxMatches = 100
+    max_bytes: ResponseBytes | None = None
 
 
 class WorkspaceSearchResponse(WorkspaceModel):
@@ -101,16 +122,16 @@ class WorkspaceTreeEntry(WorkspaceModel):
 
 
 class WorkspaceInspectRequest(WorkspaceScopedModel):
-    paths: list[str] = Field(default_factory=lambda: ["."], min_length=1, max_length=50)
-    queries: list[str] = Field(default_factory=list, max_length=10)
-    max_depth: int = Field(default=2, ge=1, le=10)
-    max_tree_entries: int = Field(default=200, ge=1, le=5000)
-    context_lines: int = Field(default=2, ge=0, le=20)
-    max_search_matches: int = Field(default=50, ge=1, le=1000)
-    max_read_files: int = Field(default=10, ge=0, le=50)
-    max_file_lines: int = Field(default=120, ge=1, le=5000)
-    max_bytes_per_file: int | None = Field(default=None, ge=1)
-    max_bytes: int | None = Field(default=None, ge=1024)
+    paths: Paths = Field(default_factory=lambda: ["."])
+    queries: Queries = Field(default_factory=list)
+    max_depth: MaxDepth = 2
+    max_tree_entries: MaxTreeEntries = 200
+    context_lines: ContextLines = 2
+    max_search_matches: MaxMatches = 50
+    max_read_files: MaxReadFiles = 10
+    max_file_lines: MaxLines = 120
+    max_bytes_per_file: PositiveInt | None = None
+    max_bytes: ResponseBytes | None = None
 
 
 class WorkspaceInspectSearchResult(WorkspaceModel):
@@ -130,14 +151,14 @@ class WorkspaceInspectResponse(WorkspaceModel):
 
 
 class WorkspaceWriteFileRequest(WorkspaceScopedModel):
-    path: str = Field(min_length=1, max_length=500)
+    path: WorkspacePath
     content: str
     mode: Literal["create_only", "overwrite", "overwrite_if_sha256_matches"] = "create_only"
     encoding: Literal["utf-8"] = "utf-8"
     line_ending: Literal["preserve", "lf", "crlf"] = "preserve"
-    expected_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_sha256: Sha256 | None = None
     dry_run: bool = False
-    max_bytes: int | None = Field(default=None, ge=1)
+    max_bytes: PositiveInt | None = None
 
 
 class WorkspaceWriteFileResponse(WorkspaceModel):
@@ -153,11 +174,11 @@ class WorkspaceWriteFileResponse(WorkspaceModel):
 
 
 class WorkspaceApplyPatchRequest(WorkspaceScopedModel):
-    patch: str = Field(min_length=1)
+    patch: PatchText
     dry_run: bool = False
     allow_delete: bool = False
-    max_changed_files: int | None = Field(default=None, ge=1)
-    max_patch_bytes: int | None = Field(default=None, ge=1)
+    max_changed_files: PositiveInt | None = None
+    max_patch_bytes: PositiveInt | None = None
 
 
 class WorkspaceApplyPatchResponse(WorkspaceModel):
@@ -190,18 +211,18 @@ class WorkspaceOperationSummary(WorkspaceModel):
 
 class WorkspaceCommandRequest(WorkspaceModel):
     action: Literal["start", "get", "logs", "cancel", "list"]
-    idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
-    workspace_id: str | None = Field(default=None, pattern=r"^ws_[0-9a-f]{16}$")
-    script: str | None = Field(default=None, min_length=1, max_length=20000)
-    timeout_seconds: int | None = Field(default=None, ge=1)
-    max_output_bytes: int | None = Field(default=None, ge=1)
+    idempotency_key: IdempotencyKey | None = None
+    workspace_id: WorkspaceId | None = None
+    script: ScriptText | None = None
+    timeout_seconds: PositiveInt | None = None
+    max_output_bytes: PositiveInt | None = None
     plain_output: bool = False
     utf8_output: bool = True
-    operation_id: str | None = Field(default=None, pattern=r"^op_[0-9a-f]{16}$")
-    stdout_offset: int = Field(default=0, ge=0)
-    stderr_offset: int = Field(default=0, ge=0)
-    max_bytes: int = Field(default=50_000, ge=1, le=500_000)
-    wait_seconds: float = Field(default=5.0, ge=0, le=30)
+    operation_id: OperationId | None = None
+    stdout_offset: LogOffset = 0
+    stderr_offset: LogOffset = 0
+    max_bytes: LogBytes = 50_000
+    wait_seconds: WaitSeconds = 5.0
     state: OperationState | None = None
 
     @model_validator(mode="after")

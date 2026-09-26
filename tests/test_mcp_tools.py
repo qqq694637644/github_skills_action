@@ -17,12 +17,12 @@ def _settings() -> MCPSettings:
     return MCPSettings(
         public_url="https://workspace.example.com/mcp",
         issuer="https://auth.example.com/",
-        audience="https://workspace.example.com/mcp",
         jwks_url="https://auth.example.com/.well-known/jwks.json",
+        allowed_subject="personal-user",
     )
 
 
-def test_mcp_exposes_exact_workspace_tool_set_with_oauth_metadata() -> None:
+def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None:
     async def scenario() -> None:
         server = create_server(_settings())
         tools = await server.list_tools()
@@ -37,10 +37,10 @@ def test_mcp_exposes_exact_workspace_tool_set_with_oauth_metadata() -> None:
             "workspaceCommand",
         }
         for tool in tools:
+            assert tool.output_schema is not None
             assert tool.meta == {
                 "securitySchemes": [{"type": "oauth2", "scopes": ["workspace:execute"]}]
             }
-            assert tool.output_schema is not None
 
         command = by_name["workspaceCommand"]
         assert command.input_schema["properties"]["action"]["enum"] == [
@@ -51,6 +51,36 @@ def test_mcp_exposes_exact_workspace_tool_set_with_oauth_metadata() -> None:
             "list",
         ]
         assert "wait_seconds" in command.input_schema["properties"]
+        command_properties = command.input_schema["properties"]
+        assert command_properties["workspace_id"]["anyOf"][0]["pattern"] == "^ws_[0-9a-f]{16}$"
+        assert command_properties["script"]["anyOf"][0]["minLength"] == 1
+        assert command_properties["script"]["anyOf"][0]["maxLength"] == 20_000
+        assert command_properties["max_bytes"]["minimum"] == 1
+        assert command_properties["max_bytes"]["maximum"] == 500_000
+        assert command_properties["wait_seconds"]["minimum"] == 0
+        assert command_properties["wait_seconds"]["maximum"] == 30
+        action_conditions = command.input_schema["allOf"]
+        assert any(
+            item.get("if", {}).get("properties", {}).get("action", {}).get("const") == "start"
+            and set(item["then"]["required"]) == {"idempotency_key", "workspace_id", "script"}
+            for item in action_conditions
+        )
+        for action in ("get", "logs", "cancel"):
+            assert any(
+                item.get("if", {}).get("properties", {}).get("action", {}).get("const") == action
+                and item["then"]["required"] == ["operation_id"]
+                for item in action_conditions
+            )
+        prepare_conditions = by_name["prepareWorkspace"].input_schema["allOf"]
+        required_branches = prepare_conditions[0]["anyOf"]
+        assert {tuple(branch["required"]) for branch in required_branches} == {
+            ("workspace_id",),
+            ("idempotency_key",),
+        }
+        write_properties = by_name["workspaceWriteFile"].input_schema["properties"]
+        assert write_properties["path"]["minLength"] == 1
+        assert write_properties["path"]["maxLength"] == 500
+        assert write_properties["expected_sha256"]["anyOf"][0]["pattern"] == ("^[0-9a-fA-F]{64}$")
         assert command.annotations is not None
         assert command.annotations.destructive_hint is True
         assert command.annotations.open_world_hint is True
@@ -81,6 +111,36 @@ def test_mcp_tool_calls_return_structured_content_and_new_command_follow_shape()
         )
         assert write.is_error is False
         assert write.structured_content["written"] is True
+        assert len(write.content) == 1
+        assert "hello\n" not in write.content[0].text
+
+        await server.call_tool(
+            "workspaceWriteFile",
+            {
+                "workspace_id": workspace_id,
+                "path": "large.txt",
+                "content": "x" * 2_000,
+            },
+        )
+        read = await server.call_tool(
+            "workspaceReadFiles",
+            {"workspace_id": workspace_id, "paths": ["large.txt"]},
+        )
+        assert "x" * 100 in read.structured_content["files"][0]["content"]
+        assert len(read.content[0].text) < 200
+        assert "x" * 100 not in read.content[0].text
+
+        with pytest.raises(ToolError) as escaped:
+            await server.call_tool(
+                "workspaceWriteFile",
+                {
+                    "workspace_id": workspace_id,
+                    "path": "../escape.txt",
+                    "content": "blocked\n",
+                },
+            )
+        assert "WORKSPACE_PATH_OUTSIDE_ROOT" in str(escaped.value)
+        assert not (root / "workspaces" / "escape.txt").exists()
 
         start = await server.call_tool(
             "workspaceCommand",
@@ -96,6 +156,7 @@ def test_mcp_tool_calls_return_structured_content_and_new_command_follow_shape()
         assert start.structured_content["operation"]["state"] == "succeeded"
         assert "mcp-output" in start.structured_content["stdout"]
         assert start.structured_content["next_stdout_offset"] > 0
+        assert "mcp-output" not in start.content[0].text
 
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)

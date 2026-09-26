@@ -92,6 +92,8 @@ LocalWorkspaceService
 
 权限边界仍然是运行 MCP Server 的操作系统账户及其现有环境、凭据和 CLI 登录状态。
 
+这个权限模型只适用于 `workspaceCommand`。文件类 Workspace tools 仍然是 root-scoped：所有用户提供的文件/目录路径在解析 `..`、绝对路径、symlink/junction 后都必须位于对应 Workspace root 内。文件工具的 root containment 与任意 PowerShell 的 OS-account 权限是两条刻意不同的边界。
+
 ### 3.3 不做多租户
 
 这是个人自用服务。
@@ -614,9 +616,16 @@ MCP Server 每次请求验证 Access Token。
 - audience/resource 校验；
 - expiry/nbf 校验；
 - scope 校验；
-- 每个 MCP tool 的 `securitySchemes`；
-- 未授权时 `_meta["mcp/www_authenticate"]` challenge；
+- 整个 `/mcp` 在 initialize 前强制 OAuth；
+- 未授权时 HTTP 401 `WWW-Authenticate` challenge；
+- scope 不足时 HTTP 403 `insufficient_scope` challenge；
 - 使用 ChatGPT MCP 管理页给出的正确 redirect URI。
+
+本项目不采用“匿名 MCP 连接成功后，某个 tool 再通过 `_meta["mcp/www_authenticate"]` 触发登录”的工具级混合认证模式。7 个 Workspace tools 全部继承同一个 server-level OAuth 边界。
+
+即使整个 server 都要求 OAuth，`tools/list` 仍然为每个 tool 显式输出顶层 `securitySchemes`，并镜像到 `_meta.securitySchemes`。当前 Python MCP SDK 2.2 的核心 `Tool` 类型还没有建模 OpenAI 的顶层字段，因此实现通过 SDK 的 server middleware 在核心协议校验完成后补充该 descriptor 字段；不是字符串改写，也不修改 SDK 包。
+
+`MCP_PUBLIC_URL` 同时作为唯一 canonical MCP resource 和 Access Token audience。OAuth Provider 必须为这个 resource 签发 Token，不提供独立 `OAUTH_AUDIENCE` 兼容配置。
 
 ### 9.4 OAuth client 注册方式
 
@@ -665,9 +674,9 @@ WORKSPACE_COMMAND_TIMEOUT_SECONDS
 WORKSPACE_COMMAND_MAX_OUTPUT_BYTES
 
 MCP_PUBLIC_URL
-MCP_RESOURCE
 OAUTH_ISSUER
-OAUTH_AUDIENCE
+OAUTH_JWKS_URL
+OAUTH_ALLOWED_SUBJECT
 MCP_REQUIRED_SCOPE
 ```
 
@@ -729,6 +738,9 @@ workspace-mcp
 - cancel；
 - idempotency；
 - log offsets；
+- UTF-8 多字节字符跨分页边界时不损坏；
+- 文件工具拒绝 `..`、绝对路径和指向 root 外的 symlink/junction；
+- `workspaceCommand` 仍可按设计访问 Workspace root 外的 OS-account-scoped 路径；
 - output truncation。
 
 模块 rename 后更新 import，不为了新 transport 重写已经可靠的内核测试。
@@ -747,7 +759,10 @@ tests/test_mcp_auth.py
 - MCP initialize；
 - 7 个 tools 可发现；
 - tool input schema；
+- tool descriptor 顶层 `securitySchemes` 与 `_meta.securitySchemes`；
 - structured output；
+- 大型 structured output 不在文本 `content` 中完整复制；
+- tool schema 暴露与实际参数校验一致的长度、范围和 pattern；
 - WorkspaceToolError -> MCP error result；
 - OAuth 必须存在；
 - invalid token；
@@ -853,10 +868,11 @@ README 中全部删除：
 3. Protected Resource Metadata；
 4. Authorization Server discovery；
 5. PKCE S256；
-6. `resource` / audience；
+6. `MCP_PUBLIC_URL` 作为唯一 canonical resource / audience；
 7. token validation；
-8. tool `securitySchemes`；
-9. `_meta["mcp/www_authenticate"]`。
+8. `/mcp` 全局 OAuth 401 challenge；
+9. required scope 的 403 challenge；
+10. 固定 `sub`，限制为个人账号。
 
 ### 阶段 4：删除全部 legacy
 

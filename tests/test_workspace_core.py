@@ -7,7 +7,11 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from workspace_mcp.workspace_files import LocalWorkspaceService
+from workspace_mcp.workspace_operations import _read_log
+from workspace_mcp.workspace_patch import WorkspaceToolError
 
 
 def _run(coro):
@@ -117,6 +121,136 @@ def test_workspace_files_search_write_and_patch() -> None:
         _run(scenario(Path(temp)))
 
 
+def test_workspace_file_tools_reject_paths_outside_root() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            prepared = await service.prepare_workspace(
+                idempotency_key="workspace-boundary-001", workspace_id=None
+            )
+            workspace_id = str(prepared["workspace_id"])
+            outside = root / "escape.txt"
+            workspace_root = Path(os.environ["WORKSPACE_ROOT"]) / workspace_id
+
+            for unsafe_path in ("../escape.txt", str(outside.resolve())):
+                with pytest.raises(WorkspaceToolError) as captured:
+                    await service.write_file(
+                        workspace_id=workspace_id,
+                        path=unsafe_path,
+                        content="blocked\n",
+                        mode="create_only",
+                        line_ending="lf",
+                        expected_sha256=None,
+                        dry_run=False,
+                        max_bytes=None,
+                    )
+                assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+            assert not outside.exists()
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.read_files(
+                    workspace_id=workspace_id,
+                    paths=["../escape.txt"],
+                    start_line=1,
+                    max_lines=10,
+                    max_bytes_per_file=None,
+                    max_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.search(
+                    workspace_id=workspace_id,
+                    query="anything",
+                    regex=False,
+                    case_sensitive=False,
+                    paths=[".."],
+                    context_lines=0,
+                    max_matches=10,
+                    max_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.inspect(
+                    workspace_id=workspace_id,
+                    paths=[".."],
+                    queries=[],
+                    max_depth=2,
+                    max_tree_entries=10,
+                    context_lines=0,
+                    max_search_matches=10,
+                    max_read_files=0,
+                    max_file_lines=10,
+                    max_bytes_per_file=None,
+                    max_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.apply_patch(
+                    workspace_id=workspace_id,
+                    patch=(
+                        "*** Begin Patch\n"
+                        "*** Add File: ../escape-patch.txt\n"
+                        "+blocked\n"
+                        "*** End Patch"
+                    ),
+                    dry_run=False,
+                    allow_delete=False,
+                    max_changed_files=None,
+                    max_patch_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+            assert not (root / "escape-patch.txt").exists()
+
+            outside_dir = root / "outside-dir"
+            outside_dir.mkdir()
+            link = workspace_root / "outside-link"
+            try:
+                link.symlink_to(outside_dir, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlink/junction creation is unavailable on this test host")
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.write_file(
+                    workspace_id=workspace_id,
+                    path="outside-link/escaped.txt",
+                    content="blocked\n",
+                    mode="create_only",
+                    line_ending="lf",
+                    expected_sha256=None,
+                    dry_run=False,
+                    max_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+            assert not (outside_dir / "escaped.txt").exists()
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
+        _run(scenario(Path(temp)))
+
+
+def test_utf8_log_pagination_never_splits_code_points() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / "stdout.log"
+        expected = "你好🙂ASCII\n错误🚫\n"
+        encoded = expected.encode("utf-8")
+        path.write_bytes(encoded)
+
+        offset = 0
+        pieces: list[str] = []
+        while offset < len(encoded):
+            text, next_offset = _read_log(path, offset, 1)
+            assert next_offset > offset
+            pieces.append(text)
+            offset = next_offset
+
+        assert "".join(pieces) == expected
+        assert offset == len(encoded)
+
+
 def test_command_start_returns_terminal_logs_for_fast_command() -> None:
     async def scenario() -> None:
         service = LocalWorkspaceService()
@@ -143,6 +277,38 @@ def test_command_start_returns_terminal_logs_for_fast_command() -> None:
 
     with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=5):
         _run(scenario())
+
+
+def test_workspace_command_intentionally_has_os_account_scope_outside_workspace_root() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="os-scope-command-001", workspace_id=None
+            )
+            outside = root / "outside-workspace-command.txt"
+            escaped_path = str(outside).replace("'", "''")
+            result = await service.command_start(
+                workspace_id=str(workspace["workspace_id"]),
+                idempotency_key="os-scope-operation-001",
+                script=(
+                    f"Set-Content -LiteralPath '{escaped_path}' "
+                    "-Value 'intentional-os-account-scope' -Encoding utf8"
+                ),
+                timeout_seconds=10,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=50_000,
+            )
+            assert result["operation"]["state"] == "succeeded"
+            assert outside.is_file()
+            assert "intentional-os-account-scope" in outside.read_text(encoding="utf-8")
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=5):
+        _run(scenario(Path(temp)))
 
 
 def test_command_get_waits_for_changes_and_returns_delta_logs_without_repeating() -> None:

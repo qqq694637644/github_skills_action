@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import uvicorn
@@ -10,23 +10,44 @@ from mcp.server import MCPServer
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp_types import ToolAnnotations
-from pydantic import AnyHttpUrl, ValidationError
+from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
+from pydantic import AnyHttpUrl, BaseModel, ValidationError
 
 from .auth import JWTTokenVerifier
 from .config import MCPSettings
 from .logging import command_for_log, log_error, log_event
 from .models import (
+    ContextLines,
+    IdempotencyKey,
+    LogBytes,
+    LogOffset,
+    MaxDepth,
+    MaxLines,
+    MaxMatches,
+    MaxReadFiles,
+    MaxTreeEntries,
+    OperationId,
     OperationState,
+    PatchText,
+    Paths,
+    PositiveInt,
     PrepareWorkspaceRequest,
     PrepareWorkspaceResponse,
+    Queries,
+    QueryText,
+    ResponseBytes,
+    ScriptText,
+    Sha256,
+    WaitSeconds,
     WorkspaceApplyPatchRequest,
     WorkspaceApplyPatchResponse,
     WorkspaceCommandRequest,
     WorkspaceCommandResponse,
+    WorkspaceId,
     WorkspaceInspectRequest,
     WorkspaceInspectResponse,
     WorkspaceOperationSummary,
+    WorkspacePath,
     WorkspaceReadFilesRequest,
     WorkspaceReadFilesResponse,
     WorkspaceSearchRequest,
@@ -43,6 +64,123 @@ SERVER_INSTRUCTIONS = (
     "workspaceCommand separates PowerShell lifetime from one MCP call: start and get return "
     "incremental logs directly; use logs only to reread or page historical output."
 )
+
+
+class WorkspaceMCPServer(MCPServer):
+    """Expose precise schemas and the back-compat OAuth mirror on every tool."""
+
+    def __init__(self, *args: Any, required_scope: str, **kwargs: Any) -> None:
+        self._workspace_security_schemes = [{"type": "oauth2", "scopes": [required_scope]}]
+        super().__init__(*args, **kwargs)
+
+    async def list_tools(self) -> list[Tool]:
+        advertised: list[Tool] = []
+        for tool in await super().list_tools():
+            payload = tool.model_dump(by_alias=True, exclude_none=True)
+            payload["inputSchema"] = _advertised_input_schema(tool.name, payload["inputSchema"])
+            meta = dict(payload.get("_meta") or {})
+            meta["securitySchemes"] = self._workspace_security_schemes
+            payload["_meta"] = meta
+            advertised.append(Tool.model_validate(payload))
+        return advertised
+
+
+class OAuthToolMetadataMiddleware:
+    """Add OpenAI's top-level securitySchemes after MCP core result validation."""
+
+    def __init__(self, required_scope: str) -> None:
+        self._security_schemes = [{"type": "oauth2", "scopes": [required_scope]}]
+
+    async def __call__(self, ctx: Any, call_next: Any) -> Any:
+        result = await call_next(ctx)
+        if ctx.method != "tools/list" or not isinstance(result, dict):
+            return result
+        tools = result.get("tools")
+        if not isinstance(tools, list):
+            return result
+
+        patched_tools: list[Any] = []
+        for item in tools:
+            if not isinstance(item, dict):
+                patched_tools.append(item)
+                continue
+            patched = dict(item)
+            patched["securitySchemes"] = self._security_schemes
+            meta = dict(patched.get("_meta") or {})
+            meta["securitySchemes"] = self._security_schemes
+            patched["_meta"] = meta
+            patched_tools.append(patched)
+        return {**result, "tools": patched_tools}
+
+
+def _advertised_input_schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
+    result = dict(schema)
+    all_of = list(result.get("allOf") or [])
+    if name == "prepareWorkspace":
+        all_of.append(
+            {
+                "anyOf": [
+                    {
+                        "properties": {
+                            "workspace_id": {"type": "string", "pattern": r"^ws_[0-9a-f]{16}$"}
+                        },
+                        "required": ["workspace_id"],
+                    },
+                    {
+                        "properties": {
+                            "idempotency_key": {
+                                "type": "string",
+                                "minLength": 8,
+                                "maxLength": 200,
+                            }
+                        },
+                        "required": ["idempotency_key"],
+                    },
+                ]
+            }
+        )
+    elif name == "workspaceCommand":
+        all_of.extend(
+            [
+                {
+                    "if": {"properties": {"action": {"const": "start"}}},
+                    "then": {
+                        "properties": {
+                            "idempotency_key": {
+                                "type": "string",
+                                "minLength": 8,
+                                "maxLength": 200,
+                            },
+                            "workspace_id": {
+                                "type": "string",
+                                "pattern": r"^ws_[0-9a-f]{16}$",
+                            },
+                            "script": {"type": "string", "minLength": 1, "maxLength": 20_000},
+                        },
+                        "required": ["idempotency_key", "workspace_id", "script"],
+                    },
+                },
+                *[
+                    {
+                        "if": {"properties": {"action": {"const": action}}},
+                        "then": {
+                            "properties": {
+                                "operation_id": {
+                                    "type": "string",
+                                    "pattern": r"^op_[0-9a-f]{16}$",
+                                }
+                            },
+                            "required": ["operation_id"],
+                        },
+                    }
+                    for action in ("get", "logs", "cancel")
+                ],
+            ]
+        )
+    if all_of:
+        result["allOf"] = all_of
+    return result
+
 
 _READ_ONLY = ToolAnnotations(
     read_only_hint=True,
@@ -77,7 +215,6 @@ def create_server(
 ) -> MCPServer:
     settings = settings or MCPSettings.from_env()
     service = service or LocalWorkspaceService()
-    oauth_meta = {"securitySchemes": [{"type": "oauth2", "scopes": [settings.required_scope]}]}
 
     @asynccontextmanager
     async def lifespan(_: MCPServer):
@@ -86,21 +223,21 @@ def create_server(
         finally:
             await service.shutdown()
 
-    server = MCPServer(
+    server = WorkspaceMCPServer(
         name="workspace-mcp",
         title="Personal Remote Workspace",
         description="Persistent workspace tools with arbitrary PowerShell execution.",
         version="1.0.0",
+        required_scope=settings.required_scope,
         instructions=SERVER_INSTRUCTIONS,
         token_verifier=JWTTokenVerifier(settings),
         auth=AuthSettings(
             issuer_url=AnyHttpUrl(settings.issuer),
             resource_server_url=AnyHttpUrl(settings.public_url),
             required_scopes=[settings.required_scope],
-            # JWTTokenVerifier validates the configured audience itself. Keeping this
-            # false also supports providers whose API audience is not the public MCP URL.
-            validate_token_resource=False,
+            validate_token_resource=True,
         ),
+        middleware=[OAuthToolMetadataMiddleware(settings.required_scope)],
         lifespan=lifespan,
     )
 
@@ -109,15 +246,15 @@ def create_server(
         title="Prepare workspace",
         description=(
             "Create an empty persistent workspace or reuse an existing workspace_id. "
+            "When creating, idempotency_key is required; when reusing, workspace_id is required. "
             "Repository and branch state are not managed implicitly."
         ),
         annotations=_PREPARE,
-        meta=oauth_meta,
     )
     async def prepare_workspace(
-        idempotency_key: str | None = None,
-        workspace_id: str | None = None,
-    ) -> PrepareWorkspaceResponse:
+        idempotency_key: IdempotencyKey | None = None,
+        workspace_id: WorkspaceId | None = None,
+    ) -> Annotated[CallToolResult, PrepareWorkspaceResponse]:
         request = _validate(
             PrepareWorkspaceRequest, idempotency_key=idempotency_key, workspace_id=workspace_id
         )
@@ -131,7 +268,10 @@ def create_server(
                 created=response.created,
                 empty=response.empty,
             )
-            return response
+            state = "created" if response.created else "reused"
+            return _success(
+                response, f"Workspace {response.workspace_id} {state}; empty={response.empty}."
+            )
         except WorkspaceToolError as exc:
             raise _tool_error(exc) from exc
 
@@ -140,24 +280,24 @@ def create_server(
         title="Inspect workspace",
         description=(
             "First pass for unfamiliar workspace paths. Returns a bounded tree plus optional "
-            "literal search matches and matching file snippets."
+            "literal search matches and matching file snippets. Paths are confined to the "
+            "workspace root."
         ),
         annotations=_READ_ONLY,
-        meta=oauth_meta,
     )
     async def workspace_inspect(
-        workspace_id: str,
-        paths: list[str] | None = None,
-        queries: list[str] | None = None,
-        max_depth: int = 2,
-        max_tree_entries: int = 200,
-        context_lines: int = 2,
-        max_search_matches: int = 50,
-        max_read_files: int = 10,
-        max_file_lines: int = 120,
-        max_bytes_per_file: int | None = None,
-        max_bytes: int | None = None,
-    ) -> WorkspaceInspectResponse:
+        workspace_id: WorkspaceId,
+        paths: Paths | None = None,
+        queries: Queries | None = None,
+        max_depth: MaxDepth = 2,
+        max_tree_entries: MaxTreeEntries = 200,
+        context_lines: ContextLines = 2,
+        max_search_matches: MaxMatches = 50,
+        max_read_files: MaxReadFiles = 10,
+        max_file_lines: MaxLines = 120,
+        max_bytes_per_file: PositiveInt | None = None,
+        max_bytes: ResponseBytes | None = None,
+    ) -> Annotated[CallToolResult, WorkspaceInspectResponse]:
         request = _validate(
             WorkspaceInspectRequest,
             workspace_id=workspace_id,
@@ -173,8 +313,14 @@ def create_server(
             max_bytes=max_bytes,
         )
         try:
-            return WorkspaceInspectResponse.model_validate(
+            response = WorkspaceInspectResponse.model_validate(
                 await service.inspect(**request.model_dump())
+            )
+            return _success(
+                response,
+                "Inspected workspace: "
+                f"{len(response.tree)} tree entries, {len(response.searches)} searches, "
+                f"{len(response.files)} file snippets; truncated={response.truncated}.",
             )
         except WorkspaceToolError as exc:
             raise _tool_error(exc) from exc
@@ -184,21 +330,21 @@ def create_server(
         title="Search workspace",
         description=(
             "Primary locator for code or text when the exact file is unknown. Literal search is "
-            "the default; set regex=true for ripgrep regular expressions."
+            "the default; set regex=true for ripgrep regular expressions. Search paths are "
+            "confined to the workspace root."
         ),
         annotations=_READ_ONLY,
-        meta=oauth_meta,
     )
     async def workspace_search(
-        workspace_id: str,
-        query: str,
+        workspace_id: WorkspaceId,
+        query: QueryText,
         regex: bool = False,
         case_sensitive: bool = False,
-        paths: list[str] | None = None,
-        context_lines: int = 2,
-        max_matches: int = 100,
-        max_bytes: int | None = None,
-    ) -> WorkspaceSearchResponse:
+        paths: Paths | None = None,
+        context_lines: ContextLines = 2,
+        max_matches: MaxMatches = 100,
+        max_bytes: ResponseBytes | None = None,
+    ) -> Annotated[CallToolResult, WorkspaceSearchResponse]:
         request = _validate(
             WorkspaceSearchRequest,
             workspace_id=workspace_id,
@@ -211,8 +357,13 @@ def create_server(
             max_bytes=max_bytes,
         )
         try:
-            return WorkspaceSearchResponse.model_validate(
+            response = WorkspaceSearchResponse.model_validate(
                 await service.search(**request.model_dump())
+            )
+            return _success(
+                response,
+                f"Search returned {response.match_count} match(es); "
+                f"truncated={response.truncated}.",
             )
         except WorkspaceToolError as exc:
             raise _tool_error(exc) from exc
@@ -222,19 +373,18 @@ def create_server(
         title="Read workspace files",
         description=(
             "Read bounded UTF-8 content from exact known files. Use inspect/search first "
-            "when paths are not yet known."
+            "when paths are not yet known. Paths are confined to the workspace root."
         ),
         annotations=_READ_ONLY,
-        meta=oauth_meta,
     )
     async def workspace_read_files(
-        workspace_id: str,
-        paths: list[str],
-        start_line: int = 1,
-        max_lines: int = 200,
-        max_bytes_per_file: int | None = None,
-        max_bytes: int | None = None,
-    ) -> WorkspaceReadFilesResponse:
+        workspace_id: WorkspaceId,
+        paths: Paths,
+        start_line: PositiveInt = 1,
+        max_lines: MaxLines = 200,
+        max_bytes_per_file: PositiveInt | None = None,
+        max_bytes: ResponseBytes | None = None,
+    ) -> Annotated[CallToolResult, WorkspaceReadFilesResponse]:
         request = _validate(
             WorkspaceReadFilesRequest,
             workspace_id=workspace_id,
@@ -245,8 +395,12 @@ def create_server(
             max_bytes=max_bytes,
         )
         try:
-            return WorkspaceReadFilesResponse.model_validate(
+            response = WorkspaceReadFilesResponse.model_validate(
                 await service.read_files(**request.model_dump())
+            )
+            return _success(
+                response,
+                f"Read {len(response.files)} file result(s); truncated={response.truncated}.",
             )
         except WorkspaceToolError as exc:
             raise _tool_error(exc) from exc
@@ -256,22 +410,22 @@ def create_server(
         title="Write workspace file",
         description=(
             "Create or replace one known UTF-8 text file. Supports create-only, overwrite, "
-            "hash-checked overwrite, dry-run, and line-ending control."
+            "hash-checked overwrite, dry-run, and line-ending control. The target must remain "
+            "inside the workspace root after path and symlink/junction resolution."
         ),
         annotations=_WRITE,
-        meta=oauth_meta,
     )
     async def workspace_write_file(
-        workspace_id: str,
-        path: str,
+        workspace_id: WorkspaceId,
+        path: WorkspacePath,
         content: str,
         mode: Literal["create_only", "overwrite", "overwrite_if_sha256_matches"] = "create_only",
         encoding: Literal["utf-8"] = "utf-8",
         line_ending: Literal["preserve", "lf", "crlf"] = "preserve",
-        expected_sha256: str | None = None,
+        expected_sha256: Sha256 | None = None,
         dry_run: bool = False,
-        max_bytes: int | None = None,
-    ) -> WorkspaceWriteFileResponse:
+        max_bytes: PositiveInt | None = None,
+    ) -> Annotated[CallToolResult, WorkspaceWriteFileResponse]:
         request = _validate(
             WorkspaceWriteFileRequest,
             workspace_id=workspace_id,
@@ -294,7 +448,11 @@ def create_server(
                 path=path,
                 operation=response.operation,
             )
-            return response
+            return _success(
+                response,
+                f"File {response.path}: {response.operation}, {response.bytes} byte(s), "
+                f"dry_run={response.dry_run}.",
+            )
         except WorkspaceToolError as exc:
             raise _tool_error(exc) from exc
 
@@ -303,19 +461,19 @@ def create_server(
         title="Apply workspace patch",
         description=(
             "Apply a bounded multi-file text patch with optional dry-run and delete permission. "
-            "Changes are committed atomically with rollback on failure."
+            "Changes are committed atomically with rollback on failure. Every patch path is "
+            "confined to the workspace root."
         ),
         annotations=_WRITE,
-        meta=oauth_meta,
     )
     async def workspace_apply_patch(
-        workspace_id: str,
-        patch: str,
+        workspace_id: WorkspaceId,
+        patch: PatchText,
         dry_run: bool = False,
         allow_delete: bool = False,
-        max_changed_files: int | None = None,
-        max_patch_bytes: int | None = None,
-    ) -> WorkspaceApplyPatchResponse:
+        max_changed_files: PositiveInt | None = None,
+        max_patch_bytes: PositiveInt | None = None,
+    ) -> Annotated[CallToolResult, WorkspaceApplyPatchResponse]:
         request = _validate(
             WorkspaceApplyPatchRequest,
             workspace_id=workspace_id,
@@ -335,7 +493,11 @@ def create_server(
                 dry_run=dry_run,
                 changed_files=len(response.changed_files),
             )
-            return response
+            return _success(
+                response,
+                f"Patch affected {len(response.changed_files)} file(s); "
+                f"dry_run={response.dry_run}.",
+            )
         except WorkspaceToolError as exc:
             raise _tool_error(exc) from exc
 
@@ -343,30 +505,33 @@ def create_server(
         name="workspaceCommand",
         title="Run or manage PowerShell",
         description=(
-            "Run arbitrary PowerShell 7 work in a persistent workspace. start returns logs after a "
+            "Run arbitrary PowerShell 7 work with the full permissions of the service OS account; "
+            "this tool is intentionally not path-confined to the workspace root. start returns "
+            "logs after a "
             "short synchronous window; running operations are followed with get, which waits "
             "briefly for state/log changes and returns incremental stdout/stderr. logs rereads "
-            "historical output; cancel stops the process tree; list enumerates operations."
+            "historical output; cancel stops the process tree; list enumerates operations. "
+            "start requires idempotency_key, workspace_id, and script; get/logs/cancel require "
+            "operation_id."
         ),
         annotations=_COMMAND,
-        meta=oauth_meta,
     )
     async def workspace_command(
         action: Literal["start", "get", "logs", "cancel", "list"],
-        idempotency_key: str | None = None,
-        workspace_id: str | None = None,
-        script: str | None = None,
-        timeout_seconds: int | None = None,
-        max_output_bytes: int | None = None,
+        idempotency_key: IdempotencyKey | None = None,
+        workspace_id: WorkspaceId | None = None,
+        script: ScriptText | None = None,
+        timeout_seconds: PositiveInt | None = None,
+        max_output_bytes: PositiveInt | None = None,
         plain_output: bool = False,
         utf8_output: bool = True,
-        operation_id: str | None = None,
-        stdout_offset: int = 0,
-        stderr_offset: int = 0,
-        max_bytes: int = 50_000,
-        wait_seconds: float = 5.0,
+        operation_id: OperationId | None = None,
+        stdout_offset: LogOffset = 0,
+        stderr_offset: LogOffset = 0,
+        max_bytes: LogBytes = 50_000,
+        wait_seconds: WaitSeconds = 5.0,
         state: OperationState | None = None,
-    ) -> WorkspaceCommandResponse:
+    ) -> Annotated[CallToolResult, WorkspaceCommandResponse]:
         request = _validate(
             WorkspaceCommandRequest,
             action=action,
@@ -410,7 +575,8 @@ def create_server(
                     operation_id=operation.operation_id,
                     state=operation.state,
                 )
-                return WorkspaceCommandResponse(action="start", operation=operation, **result)
+                response = WorkspaceCommandResponse(action="start", operation=operation, **result)
+                return _command_result(response)
             if action == "get":
                 assert request.operation_id is not None
                 result = await service.command_get(
@@ -421,7 +587,8 @@ def create_server(
                     max_bytes=request.max_bytes,
                 )
                 operation = WorkspaceOperationSummary.model_validate(result.pop("operation"))
-                return WorkspaceCommandResponse(action="get", operation=operation, **result)
+                response = WorkspaceCommandResponse(action="get", operation=operation, **result)
+                return _command_result(response)
             if action == "logs":
                 assert request.operation_id is not None
                 logs = await service.command_logs(
@@ -430,18 +597,21 @@ def create_server(
                     stderr_offset=request.stderr_offset,
                     max_bytes=request.max_bytes,
                 )
-                return WorkspaceCommandResponse(action="logs", **logs)
+                response = WorkspaceCommandResponse(action="logs", **logs)
+                return _command_result(response)
             if action == "cancel":
                 assert request.operation_id is not None
                 operation = WorkspaceOperationSummary.model_validate(
                     await service.command_cancel(request.operation_id)
                 )
-                return WorkspaceCommandResponse(action="cancel", operation=operation)
+                response = WorkspaceCommandResponse(action="cancel", operation=operation)
+                return _command_result(response)
             operations = [
                 WorkspaceOperationSummary.model_validate(item)
                 for item in await service.command_list(request.state)
             ]
-            return WorkspaceCommandResponse(action="list", operations=operations)
+            response = WorkspaceCommandResponse(action="list", operations=operations)
+            return _command_result(response)
         except WorkspaceToolError as exc:
             log_error(
                 "workspace_command",
@@ -495,6 +665,31 @@ def _error_text(code: str, message: str, suggested_next_action: str) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+def _success(response: BaseModel, summary: str) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary)],
+        structuredContent=response.model_dump(mode="json", by_alias=True),
+    )
+
+
+def _command_result(response: WorkspaceCommandResponse) -> CallToolResult:
+    stdout_bytes = len(response.stdout.encode("utf-8"))
+    stderr_bytes = len(response.stderr.encode("utf-8"))
+    if response.action == "list":
+        summary = f"Listed {len(response.operations)} operation(s)."
+    elif response.operation is not None:
+        summary = (
+            f"Operation {response.operation.operation_id} is {response.operation.state}; "
+            f"returned {stdout_bytes} stdout byte(s) and {stderr_bytes} stderr byte(s)."
+        )
+    else:
+        summary = (
+            f"Returned {stdout_bytes} stdout byte(s) and {stderr_bytes} stderr byte(s) "
+            f"for action={response.action}."
+        )
+    return _success(response, summary)
 
 
 def _transport_security(settings: MCPSettings) -> TransportSecuritySettings:

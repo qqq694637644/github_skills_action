@@ -6,7 +6,6 @@ import ctypes
 import hashlib
 import json
 import os
-import re
 import secrets
 import signal
 import subprocess
@@ -30,7 +29,65 @@ OperationState = Literal[
 ]
 T = TypeVar("T")
 _TERMINAL_STATES = {"succeeded", "failed", "timed_out", "canceled", "interrupted"}
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+class _AnsiCsiStripper:
+    """Strip CSI escape sequences while preserving state across stream chunks."""
+
+    def __init__(self) -> None:
+        self._pending = bytearray()
+        self._intermediate = False
+
+    def feed(self, data: bytes, *, final: bool = False) -> bytes:
+        output = bytearray()
+        for byte in data:
+            if not self._pending:
+                if byte == 0x1B:
+                    self._pending.append(byte)
+                else:
+                    output.append(byte)
+                continue
+
+            if len(self._pending) == 1:
+                if byte == 0x5B:  # ESC [
+                    self._pending.append(byte)
+                    self._intermediate = False
+                else:
+                    output.extend(self._pending)
+                    self._pending.clear()
+                    if byte == 0x1B:
+                        self._pending.append(byte)
+                    else:
+                        output.append(byte)
+                continue
+
+            if 0x40 <= byte <= 0x7E:
+                self._pending.clear()
+                self._intermediate = False
+                continue
+
+            if not self._intermediate and 0x30 <= byte <= 0x3F:
+                self._pending.append(byte)
+                continue
+
+            if 0x20 <= byte <= 0x2F:
+                self._intermediate = True
+                self._pending.append(byte)
+                continue
+
+            output.extend(self._pending)
+            self._pending.clear()
+            self._intermediate = False
+            if byte == 0x1B:
+                self._pending.append(byte)
+            else:
+                output.append(byte)
+
+        if final and self._pending:
+            output.extend(self._pending)
+            self._pending.clear()
+            self._intermediate = False
+        return bytes(output)
 
 
 @dataclass(frozen=True)
@@ -396,9 +453,6 @@ class WorkspaceOperationManager:
         stderr, next_stderr = _read_log(
             self._stderr_path(operation_id), stderr_offset, max_bytes, final=terminal
         )
-        if record.get("plain_output"):
-            stdout = _ANSI_ESCAPE_RE.sub("", stdout)
-            stderr = _ANSI_ESCAPE_RE.sub("", stderr)
         return {
             "stdout": stdout,
             "stderr": stderr,
@@ -652,6 +706,7 @@ class WorkspaceOperationManager:
                     proc.stdout,
                     self._stdout_path(operation_id),
                     max_output_bytes,
+                    plain_output=plain_output,
                 )
             )
             stderr_task = asyncio.create_task(
@@ -661,6 +716,7 @@ class WorkspaceOperationManager:
                     proc.stderr,
                     self._stderr_path(operation_id),
                     max_output_bytes,
+                    plain_output=plain_output,
                 )
             )
             process_task = asyncio.create_task(proc.wait())
@@ -774,30 +830,42 @@ class WorkspaceOperationManager:
         stream: asyncio.StreamReader | None,
         path: Path,
         max_output_bytes: int,
+        *,
+        plain_output: bool,
     ) -> None:
         if stream is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = path.open("ab")
+        sanitizer = _AnsiCsiStripper() if plain_output else None
+
+        def store(chunk: bytes) -> None:
+            if not chunk:
+                return
+            remaining = max(0, max_output_bytes - runtime.stored_bytes)
+            accepted = chunk[:remaining]
+            if accepted:
+                handle.write(accepted)
+                handle.flush()
+                runtime.stored_bytes += len(accepted)
+            if len(accepted) < len(chunk):
+                runtime.record[f"{stream_name}_truncated"] = True
+
         try:
             while True:
                 chunk = await stream.read(64 * 1024)
                 if not chunk:
+                    if sanitizer is not None:
+                        async with runtime.lock:
+                            store(sanitizer.feed(b"", final=True))
                     return
+                stored_chunk = sanitizer.feed(chunk) if sanitizer is not None else chunk
                 async with runtime.lock:
                     byte_field = f"{stream_name}_bytes"
-                    truncated_field = f"{stream_name}_truncated"
                     runtime.record[byte_field] = int(runtime.record.get(byte_field) or 0) + len(
                         chunk
                     )
-                    remaining = max(0, max_output_bytes - runtime.stored_bytes)
-                    accepted = chunk[:remaining]
-                    if accepted:
-                        handle.write(accepted)
-                        handle.flush()
-                        runtime.stored_bytes += len(accepted)
-                    if len(accepted) < len(chunk):
-                        runtime.record[truncated_field] = True
+                    store(stored_chunk)
         finally:
             handle.close()
 

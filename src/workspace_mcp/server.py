@@ -210,7 +210,10 @@ def _advertised_input_schema(
     elif name == "workspaceWriteFile":
         all_of.append(
             {
-                "if": {"properties": {"mode": {"const": "overwrite_if_sha256_matches"}}},
+                "if": {
+                    "properties": {"mode": {"const": "overwrite_if_sha256_matches"}},
+                    "required": ["mode"],
+                },
                 "then": {"required": ["expected_sha256"]},
             }
         )

@@ -85,6 +85,7 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         assert any(
             item.get("if", {}).get("properties", {}).get("mode", {}).get("const")
             == "overwrite_if_sha256_matches"
+            and item["if"].get("required") == ["mode"]
             and item["then"]["required"] == ["expected_sha256"]
             for item in write_conditions
         )

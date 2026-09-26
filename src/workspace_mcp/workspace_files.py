@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .runtime import env_value_from_environment_or_dotenv
+from .config import env_int, env_value
 from .workspace_operations import OperationSettings, WorkspaceOperationManager
 from .workspace_patch import (
     WorkspaceToolError,
@@ -18,6 +18,7 @@ from .workspace_patch import (
     describe_changes,
     normalize_line_endings,
     parse_codex_patch,
+    path_is_within_workspace,
     prepare_text_patch,
     prepare_write_change,
     sha256_hex,
@@ -64,6 +65,8 @@ class LocalWorkspaceService:
         max_bytes: int | None,
     ) -> dict[str, Any]:
         root = self.root(workspace_id)
+        for path in paths:
+            target_path(root, path)
         file_budget = max_bytes_per_file or _DEFAULT_FILE_BYTES
         response_budget = max_bytes or _DEFAULT_OUTPUT_BYTES
         files = [
@@ -200,7 +203,6 @@ class LocalWorkspaceService:
             raise WorkspaceToolError(
                 "WORKSPACE_FILE_EXISTS",
                 f"create_only target already exists: {path}",
-                status_code=409,
             )
         previous_sha = sha256_hex(previous_bytes) if previous_bytes is not None else None
         if mode == "overwrite_if_sha256_matches":
@@ -208,13 +210,11 @@ class LocalWorkspaceService:
                 raise WorkspaceToolError(
                     "WORKSPACE_FILE_NOT_FOUND",
                     f"Hash-checked overwrite target does not exist: {path}",
-                    status_code=404,
                 )
             if expected_sha256 is None or previous_sha != expected_sha256.lower():
                 raise WorkspaceToolError(
                     "WORKSPACE_SHA256_MISMATCH",
                     f"Current SHA-256 does not match expected_sha256 for {path}.",
-                    status_code=409,
                 )
         rendered = normalize_line_endings(
             content, line_ending=line_ending, previous_bytes=previous_bytes
@@ -281,7 +281,6 @@ class LocalWorkspaceService:
             raise WorkspaceToolError(
                 "WORKSPACE_TOO_MANY_CHANGED_FILES",
                 f"Patch changes too many files: {len(changed)} > {changed_limit}.",
-                status_code=413,
             )
         if not dry_run:
             commit_prepared_changes(root, prepared)
@@ -292,17 +291,53 @@ class LocalWorkspaceService:
             "diff_stat": diff_stat,
         }
 
-    async def command_start(self, *, workspace_id: str, **kwargs: Any) -> dict[str, Any]:
+    async def command_start(
+        self,
+        *,
+        workspace_id: str,
+        stdout_offset: int = 0,
+        stderr_offset: int = 0,
+        max_bytes: int = 50_000,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         root = self.root(workspace_id)
         manager = self._operation_manager()
         operation = await manager.start(workspace_id=workspace_id, workspace_root=root, **kwargs)
-        return await manager.wait_for_terminal(
+        operation = await manager.wait_for_terminal(
             str(operation["operation_id"]),
             timeout_seconds=manager.settings.sync_wait_seconds,
         )
+        logs = await manager.logs(
+            str(operation["operation_id"]),
+            stdout_offset=stdout_offset,
+            stderr_offset=stderr_offset,
+            max_bytes=max_bytes,
+        )
+        return {"operation": operation, **logs}
 
-    async def command_get(self, operation_id: str) -> dict[str, Any]:
-        return await self._operation_manager().get(operation_id)
+    async def command_get(
+        self,
+        operation_id: str,
+        *,
+        wait_seconds: float,
+        stdout_offset: int,
+        stderr_offset: int,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        manager = self._operation_manager()
+        operation = await manager.wait_for_change(
+            operation_id,
+            stdout_offset=stdout_offset,
+            stderr_offset=stderr_offset,
+            timeout_seconds=wait_seconds,
+        )
+        logs = await manager.logs(
+            operation_id,
+            stdout_offset=stdout_offset,
+            stderr_offset=stderr_offset,
+            max_bytes=max_bytes,
+        )
+        return {"operation": operation, **logs}
 
     async def command_logs(self, operation_id: str, **kwargs: Any) -> dict[str, Any]:
         return await self._operation_manager().logs(operation_id, **kwargs)
@@ -313,12 +348,19 @@ class LocalWorkspaceService:
     async def command_list(self, state: str | None) -> list[dict[str, Any]]:
         return await self._operation_manager().list_operations(state)
 
+    def command_limits(self) -> dict[str, int]:
+        settings = self._operation_manager().settings
+        return {
+            "max_timeout_seconds": settings.max_timeout_seconds,
+            "max_output_bytes": settings.max_output_bytes,
+        }
+
     async def shutdown(self) -> None:
         if self._operations is not None:
             await self._operations.shutdown()
 
     def _operation_manager(self) -> WorkspaceOperationManager:
-        runtime_value = env_value_from_environment_or_dotenv("WORKSPACE_OPERATION_ROOT")
+        runtime_value = env_value("WORKSPACE_OPERATION_ROOT")
         runtime_root = (
             Path(runtime_value).expanduser().resolve()
             if runtime_value
@@ -328,14 +370,12 @@ class LocalWorkspaceService:
             self._operations = WorkspaceOperationManager(
                 OperationSettings(
                     root=runtime_root,
-                    shell=env_value_from_environment_or_dotenv("WORKSPACE_PWSH_PATH") or "pwsh",
-                    sync_wait_seconds=max(
-                        0, _env_int("WORKSPACE_COMMAND_SYNC_WAIT_SECONDS", 5)
-                    ),
-                    default_timeout_seconds=_env_int("WORKSPACE_COMMAND_TIMEOUT_SECONDS", 120),
-                    max_timeout_seconds=_env_int("WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS", 3600),
-                    default_output_bytes=_env_int("WORKSPACE_COMMAND_OUTPUT_BYTES", 1_000_000),
-                    max_output_bytes=_env_int("WORKSPACE_COMMAND_MAX_OUTPUT_BYTES", 10_000_000),
+                    shell=env_value("WORKSPACE_PWSH_PATH") or "pwsh",
+                    sync_wait_seconds=max(0, env_int("WORKSPACE_COMMAND_SYNC_WAIT_SECONDS", 5)),
+                    default_timeout_seconds=env_int("WORKSPACE_COMMAND_TIMEOUT_SECONDS", 120),
+                    max_timeout_seconds=env_int("WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS", 3600),
+                    default_output_bytes=env_int("WORKSPACE_COMMAND_OUTPUT_BYTES", 1_000_000),
+                    max_output_bytes=env_int("WORKSPACE_COMMAND_MAX_OUTPUT_BYTES", 10_000_000),
                 )
             )
             self._operations_root = runtime_root
@@ -357,7 +397,6 @@ class LocalWorkspaceService:
             raise WorkspaceToolError(
                 "VALIDATION_ERROR",
                 f"max_bytes must be at least {_MIN_STRUCTURED_RESPONSE_BYTES}.",
-                status_code=422,
             )
         rg = shutil.which("rg")
         if not rg:
@@ -365,7 +404,6 @@ class LocalWorkspaceService:
                 "WORKSPACE_EXEC_FAILED",
                 "ripgrep (rg) is required for workspaceSearch/workspaceInspect but was "
                 "not found on PATH.",
-                status_code=500,
             )
         normalized_paths = self._existing_paths(root, paths)
         args = [rg, "--json", "--line-number", "--column", "--color", "never"]
@@ -386,7 +424,6 @@ class LocalWorkspaceService:
                 "VALIDATION_ERROR",
                 "ripgrep rejected the search query: "
                 + result["stderr"].decode("utf-8", errors="replace"),
-                status_code=422,
             )
         stdout = result["stdout"]
         output_truncated = bool(result["truncated"])
@@ -453,7 +490,6 @@ class LocalWorkspaceService:
                 raise WorkspaceToolError(
                     "WORKSPACE_FILE_NOT_FOUND",
                     f"Workspace file was not found: {path}",
-                    status_code=404,
                 )
             data = resolved.read_bytes()
             assert_text_bytes(data, path=path)
@@ -535,7 +571,11 @@ class LocalWorkspaceService:
                 if depth_from_base >= max_depth:
                     dirs[:] = []
                     continue
-                dirs[:] = sorted(dirs)
+                dirs[:] = [
+                    dirname
+                    for dirname in sorted(dirs)
+                    if path_is_within_workspace(root, current_path / dirname)
+                ]
                 for dirname in dirs:
                     child = current_path / dirname
                     entries.append(
@@ -550,6 +590,8 @@ class LocalWorkspaceService:
                         return entries, True
                 for filename in sorted(files):
                     child = current_path / filename
+                    if not path_is_within_workspace(root, child):
+                        continue
                     try:
                         size = child.stat().st_size
                     except OSError:
@@ -574,7 +616,6 @@ class LocalWorkspaceService:
                 raise WorkspaceToolError(
                     "WORKSPACE_FILE_NOT_FOUND",
                     f"Workspace path was not found: {path}",
-                    status_code=404,
                 )
         return normalized
 
@@ -617,7 +658,6 @@ async def _run_bounded_command(
         raise WorkspaceToolError(
             "WORKSPACE_EXEC_TIMEOUT",
             "ripgrep search timed out.",
-            status_code=504,
         ) from exc
     stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
     return {
@@ -669,7 +709,7 @@ def _json_bytes(payload: dict[str, Any]) -> int:
 
 def _fit_read_files_response(response: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     if max_bytes < _MIN_STRUCTURED_RESPONSE_BYTES:
-        raise WorkspaceToolError("VALIDATION_ERROR", "max_bytes is too small.", status_code=422)
+        raise WorkspaceToolError("VALIDATION_ERROR", "max_bytes is too small.")
     while _json_bytes(response) > max_bytes and response["files"]:
         last = response["files"][-1]
         if last["content"]:
@@ -683,7 +723,6 @@ def _fit_read_files_response(response: dict[str, Any], max_bytes: int) -> dict[s
         raise WorkspaceToolError(
             "VALIDATION_ERROR",
             "max_bytes is too small for the response envelope.",
-            status_code=422,
         )
     return response
 
@@ -703,7 +742,6 @@ def _fit_search_response(response: dict[str, Any], max_bytes: int) -> dict[str, 
         raise WorkspaceToolError(
             "VALIDATION_ERROR",
             "max_bytes is too small for the response envelope.",
-            status_code=422,
         )
     return response
 
@@ -746,18 +784,5 @@ def _fit_inspect_response(response: dict[str, Any], max_bytes: int) -> dict[str,
         raise WorkspaceToolError(
             "VALIDATION_ERROR",
             "max_bytes is too small for the response envelope.",
-            status_code=422,
         )
     return response
-
-
-def _env_int(name: str, default: int) -> int:
-    value = env_value_from_environment_or_dotenv(name)
-    if not value:
-        return default
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise WorkspaceToolError(
-            "WORKSPACE_CONFIG_INVALID", f"{name} must be an integer.", status_code=503
-        ) from exc

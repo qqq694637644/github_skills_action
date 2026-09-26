@@ -15,11 +15,10 @@ _BINARY_PATCH_MARKERS = ("GIT binary patch", "Binary files ", "Binary file ")
 
 
 class WorkspaceToolError(Exception):
-    def __init__(self, code: str, message: str, *, status_code: int = 400) -> None:
+    def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
-        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -58,7 +57,29 @@ def sha256_hex(data: bytes) -> str:
 
 def target_path(root: Path, path: str) -> Path:
     candidate = Path(path).expanduser()
-    return candidate if candidate.is_absolute() else root / candidate
+    if candidate.is_absolute():
+        raise WorkspaceToolError(
+            "WORKSPACE_PATH_OUTSIDE_ROOT",
+            f"Workspace paths must be relative to the workspace root: {path}",
+        )
+
+    resolved_root = root.resolve()
+    resolved = (resolved_root / candidate).resolve(strict=False)
+    if resolved != resolved_root and not resolved.is_relative_to(resolved_root):
+        raise WorkspaceToolError(
+            "WORKSPACE_PATH_OUTSIDE_ROOT",
+            f"Workspace path resolves outside the workspace root: {path}",
+        )
+    return resolved
+
+
+def path_is_within_workspace(root: Path, path: Path) -> bool:
+    resolved_root = root.resolve()
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return False
+    return resolved == resolved_root or resolved.is_relative_to(resolved_root)
 
 
 def assert_payload_size(data: bytes, *, max_bytes: int, label: str) -> None:
@@ -66,7 +87,6 @@ def assert_payload_size(data: bytes, *, max_bytes: int, label: str) -> None:
         raise WorkspaceToolError(
             "WORKSPACE_PAYLOAD_TOO_LARGE",
             f"{label} is too large: {len(data)} bytes > {max_bytes} bytes.",
-            status_code=413,
         )
 
 
@@ -75,7 +95,6 @@ def assert_text_bytes(data: bytes, *, path: str | None = None) -> None:
         raise WorkspaceToolError(
             "WORKSPACE_BINARY_NOT_ALLOWED",
             "NUL bytes are not allowed in workspace text operations.",
-            status_code=403,
         )
     try:
         data.decode("utf-8")
@@ -84,7 +103,6 @@ def assert_text_bytes(data: bytes, *, path: str | None = None) -> None:
         raise WorkspaceToolError(
             "WORKSPACE_BINARY_NOT_ALLOWED",
             f"Only UTF-8 text files are allowed in workspace text operations.{suffix}",
-            status_code=403,
         ) from exc
 
 
@@ -101,7 +119,6 @@ def snapshot_files(root: Path, paths: list[str]) -> list[FileSnapshot]:
                 raise WorkspaceToolError(
                     "WORKSPACE_INVALID_PATH",
                     f"Workspace text operations only support files: {path}",
-                    status_code=400,
                 )
             snapshots.append(FileSnapshot(path, resolved, True, resolved.read_bytes()))
         else:
@@ -119,15 +136,9 @@ def parse_codex_patch(
     payload = patch.encode("utf-8")
     assert_text_bytes(payload)
     if any(marker in patch for marker in _BINARY_PATCH_MARKERS):
-        raise WorkspaceToolError(
-            "WORKSPACE_BINARY_NOT_ALLOWED", "Binary patches are not allowed.", status_code=403
-        )
+        raise WorkspaceToolError("WORKSPACE_BINARY_NOT_ALLOWED", "Binary patches are not allowed.")
     lines = patch.splitlines()
-    if (
-        not lines
-        or lines[0].strip() != "*** Begin Patch"
-        or lines[-1].strip() != "*** End Patch"
-    ):
+    if not lines or lines[0].strip() != "*** Begin Patch" or lines[-1].strip() != "*** End Patch":
         raise WorkspaceToolError(
             "WORKSPACE_PATCH_INVALID",
             "Patch must start with '*** Begin Patch' and end with '*** End Patch'.",
@@ -159,7 +170,6 @@ def parse_codex_patch(
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_INVALID",
                     f"Add File target already exists: {path}",
-                    status_code=409,
                 )
             body, idx = _collect_operation_body(lines, idx + 1)
             operations.append(
@@ -175,7 +185,6 @@ def parse_codex_patch(
                 raise WorkspaceToolError(
                     "WORKSPACE_DELETE_NOT_ALLOWED",
                     f"Delete File is disabled for this request: {path}",
-                    status_code=403,
                 )
             resolved = target_path(root, path)
             if not resolved.exists() or not resolved.is_file():
@@ -199,7 +208,6 @@ def parse_codex_patch(
             raise WorkspaceToolError(
                 "WORKSPACE_TOO_MANY_CHANGED_FILES",
                 f"Patch changes too many files: {len(paths_seen)} > {max_changed_files}.",
-                status_code=413,
             )
 
     if not operations:
@@ -229,12 +237,9 @@ def prepare_text_patch(
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_CONTEXT_MISMATCH",
                     f"Patch update target no longer exists: {operation.path}",
-                    status_code=409,
                 )
             assert_text_bytes(original, path=operation.path)
-            original_text = (
-                original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-            )
+            original_text = original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
             lines, trailing = _split_text_lines(original_text)
             new_lines = _apply_hunks(lines, operation.hunks, operation.path)
             current[operation.path] = _join_lines(
@@ -273,7 +278,7 @@ def prepare_write_change(
 
 
 def commit_prepared_changes(root: Path, changes: list[PreparedFileChange]) -> None:
-    transaction_parent = root.parent / ".skill-temple-workspace-transactions"
+    transaction_parent = root.parent / ".workspace-mcp-transactions"
     transaction_dir = transaction_parent / ("txn_" + secrets.token_hex(12))
     staged_dir = transaction_dir / "staged"
     backup_dir = transaction_dir / "backups"
@@ -314,9 +319,7 @@ def commit_prepared_changes(root: Path, changes: list[PreparedFileChange]) -> No
                 details.append(str(cleanup_error))
             raise WorkspaceToolError(
                 "WORKSPACE_TRANSACTION_RECOVERY_FAILED",
-                "Workspace transaction failed and cleanup was incomplete: "
-                + "; ".join(details),
-                status_code=500,
+                "Workspace transaction failed and cleanup was incomplete: " + "; ".join(details),
             ) from original
         raise
     cleanup_error = _cleanup_transaction_dir(transaction_dir, transaction_parent)
@@ -326,7 +329,6 @@ def commit_prepared_changes(root: Path, changes: list[PreparedFileChange]) -> No
             "Workspace changes were committed, but transaction cleanup failed. "
             "The committed files were left intact: "
             f"{cleanup_error}",
-            status_code=500,
         ) from cleanup_error
 
 
@@ -444,7 +446,6 @@ def normalize_line_endings(content: str, *, line_ending: str, previous_bytes: by
     raise WorkspaceToolError(
         "VALIDATION_ERROR",
         f"Unsupported line ending mode: {line_ending}",
-        status_code=422,
     )
 
 
@@ -532,7 +533,6 @@ def _apply_hunks(lines: list[str], hunks: list[TextPatchHunk], path: str) -> lis
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_CONTEXT_MISMATCH",
                     f"Patch context did not match the current file content: {path}",
-                    status_code=409,
                 )
             current = current[:idx] + hunk.new_lines + current[idx + len(hunk.old_lines) :]
             cursor = idx + len(hunk.new_lines)
@@ -566,15 +566,9 @@ def _join_lines(lines: list[str], *, trailing_newline: bool) -> str:
 
 def _line_change_counts(before: bytes | None, after: bytes | None) -> tuple[int, int]:
     old = (
-        []
-        if before is None
-        else before.decode("utf-8", errors="replace").splitlines(keepends=True)
+        [] if before is None else before.decode("utf-8", errors="replace").splitlines(keepends=True)
     )
-    new = (
-        []
-        if after is None
-        else after.decode("utf-8", errors="replace").splitlines(keepends=True)
-    )
+    new = [] if after is None else after.decode("utf-8", errors="replace").splitlines(keepends=True)
     additions = 0
     deletions = 0
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(a=old, b=new).get_opcodes():

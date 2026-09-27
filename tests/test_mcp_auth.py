@@ -210,6 +210,84 @@ def test_oauth_configuration_requires_https(issuer: str, jwks_url: str, message:
         )
 
 
+def test_noauth_configuration_requires_no_oauth_values_and_supports_subpath() -> None:
+    settings = MCPSettings(
+        public_url="https://githubaction.giize.com/mcp-app/mcp",
+        host="127.0.0.1",
+        port=8003,
+    )
+    assert settings.auth_enabled is False
+
+
+def test_partial_oauth_configuration_is_rejected() -> None:
+    with pytest.raises(ValueError, match="must all be set"):
+        MCPSettings(
+            public_url="https://workspace.example.com/mcp",
+            issuer="https://auth.example.com/",
+        )
+
+
+def test_noauth_http_initialize_and_tools_list_work_without_bearer_token() -> None:
+    async def scenario() -> None:
+        settings = MCPSettings(
+            public_url="https://githubaction.giize.com/mcp-app/mcp",
+            host="127.0.0.1",
+            port=8003,
+        )
+        app = create_app(settings)
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="https://githubaction.giize.com"
+            ) as client:
+                response = await client.post(
+                    "/mcp",
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": LATEST_PROTOCOL_VERSION,
+                            "capabilities": {},
+                            "clientInfo": {"name": "noauth-test", "version": "1"},
+                        },
+                    },
+                )
+                assert response.status_code == 200
+                session_id = response.headers["mcp-session-id"]
+
+                headers = {
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                    "Mcp-Session-Id": session_id,
+                }
+                initialized = await client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                )
+                assert initialized.status_code in {200, 202}
+
+                listed = await client.post(
+                    "/mcp",
+                    headers=headers,
+                    json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                )
+                assert listed.status_code == 200
+                tools = _sse_json(listed.text)["result"]["tools"]
+                assert len(tools) == 7
+                for tool in tools:
+                    expected = [{"type": "noauth"}]
+                    assert tool["securitySchemes"] == expected
+                    assert tool["_meta"]["securitySchemes"] == expected
+
+    asyncio.run(scenario())
+
+
 def test_authenticated_http_initialize_accepts_public_mcp_host() -> None:
     class FullScopeVerifier:
         def __init__(self, settings: MCPSettings) -> None:

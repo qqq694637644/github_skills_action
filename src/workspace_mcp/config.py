@@ -58,21 +58,35 @@ def _read_dotenv_file(path: Path) -> dict[str, str]:
 @dataclass(frozen=True)
 class MCPSettings:
     public_url: str
-    issuer: str
-    jwks_url: str
+    issuer: str | None = None
+    jwks_url: str | None = None
     required_scope: str = "workspace:execute"
-    allowed_subject: str = ""
+    allowed_subject: str | None = None
     allowed_algorithms: tuple[str, ...] = ("RS256",)
     host: str = "127.0.0.1"
     port: int = 8000
 
     def __post_init__(self) -> None:
         public = urlsplit(self.public_url)
-        if public.scheme != "https" or not public.hostname or public.path != "/mcp":
+        if public.scheme != "https" or not public.hostname or not public.path.endswith("/mcp"):
             raise ValueError("MCP_PUBLIC_URL must be an absolute HTTPS URL ending exactly in /mcp.")
         if public.query or public.fragment:
             raise ValueError("MCP_PUBLIC_URL must not contain a query string or fragment.")
 
+        oauth_values = (self.issuer, self.jwks_url, self.allowed_subject)
+        if not any(oauth_values):
+            if not 1 <= self.port <= 65535:
+                raise ValueError("MCP_PORT must be between 1 and 65535.")
+            return
+        if not all(oauth_values):
+            raise ValueError(
+                "OAuth is optional, but OAUTH_ISSUER, OAUTH_JWKS_URL, and "
+                "OAUTH_ALLOWED_SUBJECT must all be set when OAuth is enabled."
+            )
+
+        assert self.issuer is not None
+        assert self.jwks_url is not None
+        assert self.allowed_subject is not None
         issuer_parts = urlsplit(self.issuer)
         jwks_parts = urlsplit(self.jwks_url)
         if issuer_parts.scheme != "https" or not issuer_parts.hostname:
@@ -105,14 +119,12 @@ class MCPSettings:
     @classmethod
     def from_env(cls) -> MCPSettings:
         public_url = _required("MCP_PUBLIC_URL")
-        issuer = _required("OAUTH_ISSUER")
-        jwks_url = _required("OAUTH_JWKS_URL")
         return cls(
             public_url=public_url,
-            issuer=issuer,
-            jwks_url=jwks_url,
+            issuer=env_value("OAUTH_ISSUER"),
+            jwks_url=env_value("OAUTH_JWKS_URL"),
             required_scope=env_value("MCP_REQUIRED_SCOPE") or "workspace:execute",
-            allowed_subject=_required("OAUTH_ALLOWED_SUBJECT"),
+            allowed_subject=env_value("OAUTH_ALLOWED_SUBJECT"),
             allowed_algorithms=tuple(
                 part.strip()
                 for part in (env_value("OAUTH_ALLOWED_ALGORITHMS") or "RS256").split(",")
@@ -121,6 +133,10 @@ class MCPSettings:
             host=env_value("MCP_HOST") or "127.0.0.1",
             port=env_int("MCP_PORT", 8000),
         )
+
+    @property
+    def auth_enabled(self) -> bool:
+        return self.issuer is not None
 
 
 def _required(name: str) -> str:

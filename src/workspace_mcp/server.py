@@ -72,12 +72,12 @@ class WorkspaceMCPServer(MCPServer):
     def __init__(
         self,
         *args: Any,
-        required_scope: str,
+        security_schemes: list[dict[str, Any]],
         command_max_timeout_seconds: int,
         command_max_output_bytes: int,
         **kwargs: Any,
     ) -> None:
-        self._workspace_security_schemes = [{"type": "oauth2", "scopes": [required_scope]}]
+        self._workspace_security_schemes = security_schemes
         self._command_max_timeout_seconds = command_max_timeout_seconds
         self._command_max_output_bytes = command_max_output_bytes
         super().__init__(*args, **kwargs)
@@ -99,11 +99,11 @@ class WorkspaceMCPServer(MCPServer):
         return advertised
 
 
-class OAuthToolMetadataMiddleware:
+class ToolSecurityMetadataMiddleware:
     """Add OpenAI's top-level securitySchemes after MCP core result validation."""
 
-    def __init__(self, required_scope: str) -> None:
-        self._security_schemes = [{"type": "oauth2", "scopes": [required_scope]}]
+    def __init__(self, security_schemes: list[dict[str, Any]]) -> None:
+        self._security_schemes = security_schemes
 
     async def __call__(self, ctx: Any, call_next: Any) -> Any:
         result = await call_next(ctx)
@@ -256,6 +256,11 @@ def create_server(
     settings = settings or MCPSettings.from_env()
     service = service or LocalWorkspaceService()
     command_limits = service.command_limits()
+    security_schemes = (
+        [{"type": "oauth2", "scopes": [settings.required_scope]}]
+        if settings.auth_enabled
+        else [{"type": "noauth"}]
+    )
 
     @asynccontextmanager
     async def lifespan(_: MCPServer):
@@ -264,24 +269,29 @@ def create_server(
         finally:
             await service.shutdown()
 
+    server_kwargs: dict[str, Any] = {}
+    if settings.auth_enabled:
+        assert settings.issuer is not None
+        server_kwargs["token_verifier"] = JWTTokenVerifier(settings)
+        server_kwargs["auth"] = AuthSettings(
+            issuer_url=AnyHttpUrl(settings.issuer),
+            resource_server_url=AnyHttpUrl(settings.public_url),
+            required_scopes=[settings.required_scope],
+            validate_token_resource=True,
+        )
+
     server = WorkspaceMCPServer(
         name="workspace-mcp",
         title="Personal Remote Workspace",
         description="Persistent workspace tools with arbitrary PowerShell execution.",
         version="1.0.0",
-        required_scope=settings.required_scope,
+        security_schemes=security_schemes,
         command_max_timeout_seconds=command_limits["max_timeout_seconds"],
         command_max_output_bytes=command_limits["max_output_bytes"],
         instructions=SERVER_INSTRUCTIONS,
-        token_verifier=JWTTokenVerifier(settings),
-        auth=AuthSettings(
-            issuer_url=AnyHttpUrl(settings.issuer),
-            resource_server_url=AnyHttpUrl(settings.public_url),
-            required_scopes=[settings.required_scope],
-            validate_token_resource=True,
-        ),
-        middleware=[OAuthToolMetadataMiddleware(settings.required_scope)],
+        middleware=[ToolSecurityMetadataMiddleware(security_schemes)],
         lifespan=lifespan,
+        **server_kwargs,
     )
 
     @server.tool(

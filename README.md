@@ -9,7 +9,7 @@
 ```text
 ChatGPT Web
     |
-    | OAuth 2.1 + Remote MCP / Streamable HTTP
+    | Remote MCP / Streamable HTTP
     v
 https://<domain>/mcp
     |
@@ -245,9 +245,22 @@ max_bytes
 - `workspaceReadFiles` / `workspaceWriteFile` / `workspaceApplyPatch` / `workspaceSearch` / `workspaceInspect` 是 **Workspace-scoped 文件工具**，路径必须解析后仍位于对应 Workspace root 内；`..`、绝对路径以及最终指向 root 外的 symlink/junction 都会被拒绝。
 - `workspaceCommand` 是 **故意设计成 OS-account-scoped 的任意 PowerShell**，不受 Workspace 文件路径限制，可以访问运行服务的 OS 账户本来就能访问的一切。这是正式能力，不是安全漏洞或待收紧项。
 
-## OAuth 2.1
+## Authentication
 
-Remote MCP 不提供 `noauth` 或旧静态 Bearer Token 模式。
+个人部署可以先用 `noauth` 把 Remote MCP 跑通，后续再增加 OAuth。
+
+规则很简单：
+
+- **没有配置任何 `OAUTH_*` 环境变量**：服务使用 `noauth`；
+- **开始配置 OAuth 后**：`OAUTH_ISSUER`、`OAUTH_JWKS_URL`、`OAUTH_ALLOWED_SUBJECT` 必须同时存在。
+
+noauth 时，7 个 tools 会在 `tools/list` 中声明：
+
+```json
+{"securitySchemes":[{"type":"noauth"}]}
+```
+
+### OAuth 2.1（后续启用）
 
 项目采用 Resource Server 模式：登录、Authorization Code + PKCE、client registration 和 token 签发由外部 OAuth/OIDC Provider 负责；本服务负责验证 Access Token。
 
@@ -275,7 +288,7 @@ Workspace MCP Resource Server
 
 MCP Python SDK 会根据 Resource Server 配置暴露 protected-resource metadata，并在未认证请求上返回标准 `WWW-Authenticate` challenge。
 
-本项目采用**整个 MCP Server 强制 OAuth**的模式：客户端在 `/mcp` initialize 之前就必须完成认证，缺 Token 返回 401，缺 scope 返回 403。因此不使用“匿名连接成功后，再由某个 tool 返回 `_meta["mcp/www_authenticate"]`”的工具级混合认证流程。所有 7 个 tools 继承同一个 server-level OAuth 边界。
+启用 OAuth 后，整个 MCP Server 强制 OAuth：客户端在 `/mcp` initialize 之前必须完成认证，缺 Token 返回 401，缺 scope 返回 403。
 
 同时，`tools/list` 中每个 tool 都显式声明顶层 `securitySchemes`，并同步提供 `_meta.securitySchemes` 兼容镜像；两者都声明 `oauth2 + workspace:execute`。这样 ChatGPT 看到的 tool descriptor 与整个 server 的 OAuth 策略一致。
 
@@ -316,11 +329,11 @@ MCP_PUBLIC_URL
 MCP_HOST
 MCP_PORT
 
-OAUTH_ISSUER
-OAUTH_JWKS_URL
-OAUTH_ALLOWED_ALGORITHMS
-OAUTH_ALLOWED_SUBJECT
-MCP_REQUIRED_SCOPE
+OAUTH_ISSUER                 # optional, OAuth 模式才配置
+OAUTH_JWKS_URL               # optional, OAuth 模式才配置
+OAUTH_ALLOWED_ALGORITHMS     # optional, OAuth 模式才配置
+OAUTH_ALLOWED_SUBJECT        # optional, OAuth 模式才配置
+MCP_REQUIRED_SCOPE           # optional, OAuth 模式默认 workspace:execute
 ```
 
 ### `WORKSPACE_ROOT`
@@ -341,19 +354,22 @@ ChatGPT 访问的公开 MCP resource URL，例如：
 
 ```text
 https://mcp.example.com/mcp
+https://githubaction.giize.com/mcp-app/mcp
 ```
 
-### OAuth resource / audience
+允许二级路径，只要求公网 URL 是 HTTPS 且最终以 `/mcp` 结尾。后端本身仍监听 `/mcp`；可以由 Caddy `handle_path` 剥掉公网前缀。
+
+### OAuth resource / audience（OAuth 模式）
 
 `MCP_PUBLIC_URL` 就是唯一 canonical MCP resource，同时也是 JWT 必须包含的 audience。项目不提供额外的 `OAUTH_AUDIENCE` 兼容层；OAuth Provider 必须为这个 MCP resource 签发 Token。
 
-### `OAUTH_ISSUER`
+### `OAUTH_ISSUER`（OAuth 模式）
 
 必须使用 Provider discovery metadata 中公布的规范 issuer，字符串要精确一致。不要自行增加或删除尾部 `/`。对于只有 host 的 issuer，如果 Provider 公布的是带尾 `/` 的值，就必须保持该 `/`。
 
 `OAUTH_ISSUER` 和 `OAUTH_JWKS_URL` 都必须是绝对 HTTPS URL；本项目不接受 HTTP OAuth 基础设施配置。
 
-### `OAUTH_ALLOWED_SUBJECT`
+### `OAUTH_ALLOWED_SUBJECT`（OAuth 模式）
 
 必填。只有 JWT `sub` 完全匹配的 Token 才会被接受，用来把这个个人 MCP 固定到自己的 Provider 账号。
 
@@ -398,11 +414,32 @@ workspace-mcp
 
 ```text
 https://<domain>/mcp
+https://<domain>/<prefix>/mcp
 ```
 
 如果使用反向代理，需要允许 Streamable HTTP 的长连接/流式响应，不要把 `/mcp` 当普通短请求接口处理。
 
-## MCP Protected Resource Metadata
+### Caddy 二级路径示例
+
+例如公网地址：
+
+```text
+https://githubaction.giize.com/mcp-app/mcp
+```
+
+Caddy：
+
+```caddyfile
+githubaction.giize.com {
+    handle_path /mcp-app/* {
+        reverse_proxy 127.0.0.1:8003
+    }
+}
+```
+
+`handle_path` 会剥掉 `/mcp-app`，因此公网 `/mcp-app/mcp` 会转发到后端 `/mcp`。
+
+## MCP Protected Resource Metadata（OAuth 模式）
 
 当：
 
@@ -420,11 +457,11 @@ https://mcp.example.com/.well-known/oauth-protected-resource/mcp
 
 ## ChatGPT Web 连接
 
-部署和 OAuth Provider 配置完成后：
+noauth 测试时：
 
 1. 在 ChatGPT Web 打开 Developer Mode / Plugin MCP 管理；
-2. 添加 Remote MCP URL：`https://<domain>/mcp`；
-3. 按界面完成 OAuth 授权；
+2. 添加 Remote MCP URL，例如 `https://githubaction.giize.com/mcp-app/mcp`；
+3. 不需要 OAuth 授权；
 4. 确认 ChatGPT 能发现 7 个 Workspace tools；
 5. 用真实 Workspace 流程验证读、写、Patch 和 PowerShell。
 

@@ -108,6 +108,40 @@ def test_auth_routes_publish_protected_resource_metadata_and_challenge_unauthori
     asyncio.run(scenario())
 
 
+def test_oauth_subpath_publishes_matching_metadata_and_challenge_url() -> None:
+    async def scenario() -> None:
+        settings = MCPSettings(
+            public_url="https://githubaction.giize.com/mcp-app/mcp",
+            issuer="https://tenant.example.auth0.com/",
+            jwks_url="https://tenant.example.auth0.com/.well-known/jwks.json",
+            allowed_subject="auth0|personal-user",
+        )
+        app = create_app(settings)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://githubaction.giize.com"
+        ) as client:
+            metadata_path = "/.well-known/oauth-protected-resource/mcp-app/mcp"
+            metadata = await client.get(metadata_path)
+            assert metadata.status_code == 200
+            body = metadata.json()
+            assert body["resource"] == settings.public_url
+            assert body["authorization_servers"] == [settings.issuer]
+
+            unauthorized = await client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            )
+            assert unauthorized.status_code == 401
+            challenge = unauthorized.headers["www-authenticate"]
+            assert (
+                'resource_metadata="https://githubaction.giize.com/'
+                '.well-known/oauth-protected-resource/mcp-app/mcp"' in challenge
+            )
+
+    asyncio.run(scenario())
+
+
 def test_auth_middleware_rejects_token_without_required_scope() -> None:
     class NoScopeVerifier:
         def __init__(self, settings: MCPSettings) -> None:

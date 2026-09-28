@@ -305,6 +305,64 @@ Provider 至少需要满足 ChatGPT Remote MCP 的 OAuth client 接入要求，�
 
 ChatGPT 中实际使用的 redirect URI 应以 ChatGPT MCP 管理界面显示的值为准，并配置到 Provider。
 
+### Auth0 最简配置
+
+个人部署推荐直接使用 Auth0 + Dynamic Client Registration (DCR)。这样不需要手工创建 ChatGPT OAuth Application，也不需要自己维护 client secret；ChatGPT 第一次连接时会自动向 Auth0 注册客户端。
+
+Auth0 Dashboard：
+
+1. 创建一个 Auth0 tenant。
+2. `Settings -> Advanced`：
+   - 开启 **Dynamic Client Registration**；
+   - 开启 **Resource Parameter Compatibility Profile**；
+   - 如果界面有 **DCR Security Mode**，使用 `Strict`。
+3. `Applications -> APIs -> Create API`：
+   - Name: `Workspace MCP`；
+   - Identifier: **必须精确等于 `MCP_PUBLIC_URL`**，例如 `https://githubaction.giize.com/mcp-app/mcp`；
+   - Signing Algorithm: `RS256`。
+4. 在这个 API 增加 permission：
+
+   ```text
+   workspace:execute
+   ```
+
+5. 在这个 API 的 **Default Permissions for Third Party Apps** 中允许 User-Delegated Access，并授予 `workspace:execute`。DCR 创建出来的 ChatGPT client 属于 third-party application；这一步保证它实际拿到所需 scope。
+6. `Authentication -> Database -> Username-Password-Authentication`：
+   - 创建/使用你的个人登录账号；
+   - 关闭公开 Sign Ups；
+   - 开启 **Promote Connection to Domain Level**，让动态注册的第三方 client 可以使用这个登录连接。
+7. `User Management -> Users` 打开你自己的用户，复制 `user_id`。数据库用户通常类似：
+
+   ```text
+   auth0|xxxxxxxxxxxxxxxx
+   ```
+
+Auth0 不需要单独创建固定 ChatGPT Application；DCR 会在首次连接时创建并复用 client。
+
+对应 `.env`：
+
+```env
+MCP_PUBLIC_URL=https://githubaction.giize.com/mcp-app/mcp
+MCP_HOST=127.0.0.1
+MCP_PORT=8003
+
+OAUTH_ISSUER=https://YOUR_TENANT_REGION.auth0.com/
+OAUTH_JWKS_URL=https://YOUR_TENANT_REGION.auth0.com/.well-known/jwks.json
+OAUTH_ALLOWED_SUBJECT=auth0|YOUR_USER_ID
+OAUTH_ALLOWED_ALGORITHMS=RS256
+MCP_REQUIRED_SCOPE=workspace:execute
+```
+
+`OAUTH_ISSUER` 必须使用 Auth0 tenant 的 canonical issuer，并保留尾部 `/`。
+
+Auth0 使用 MCP 的 `resource` 参数。必须开启 **Resource Parameter Compatibility Profile**，这样 Auth0 才会把 ChatGPT 发送的：
+
+```text
+resource=https://githubaction.giize.com/mcp-app/mcp
+```
+
+映射成 Access Token 的 audience。
+
 ## 环境变量
 
 复制：
@@ -431,6 +489,10 @@ Caddy：
 
 ```caddyfile
 githubaction.giize.com {
+    handle /.well-known/oauth-protected-resource/mcp-app/mcp {
+        reverse_proxy 127.0.0.1:8003
+    }
+
     handle_path /mcp-app/* {
         reverse_proxy 127.0.0.1:8003
     }
@@ -438,6 +500,14 @@ githubaction.giize.com {
 ```
 
 `handle_path` 会剥掉 `/mcp-app`，因此公网 `/mcp-app/mcp` 会转发到后端 `/mcp`。
+
+OAuth 模式下还必须代理 protected-resource metadata：
+
+```text
+https://githubaction.giize.com/.well-known/oauth-protected-resource/mcp-app/mcp
+```
+
+这条路径不能放进 `/mcp-app/*` 的 `handle_path`，因为它位于域名根路径的 `/.well-known/` 下。
 
 ## MCP Protected Resource Metadata（OAuth 模式）
 
@@ -464,6 +534,16 @@ noauth 测试时：
 3. 不需要 OAuth 授权；
 4. 确认 ChatGPT 能发现 7 个 Workspace tools；
 5. 用真实 Workspace 流程验证读、写、Patch 和 PowerShell。
+
+切换 Auth0 后：
+
+1. 在 `.env` 增加 Auth0 的 `OAUTH_*` 配置并重启 `workspace-mcp`；
+2. 更新 Caddy，增加上面的 `/.well-known/oauth-protected-resource/mcp-app/mcp` 代理；
+3. 先访问该 metadata URL，确认返回的 `resource` 精确等于 `https://githubaction.giize.com/mcp-app/mcp`；
+4. ChatGPT 中删除/重新创建当前 noauth MCP connection，Authentication 选择 `OAuth`；
+5. ChatGPT 会通过 Auth0 DCR 自动注册 client，并跳转 Auth0 Universal Login；
+6. 使用你自己的 Auth0 用户登录并授权；
+7. 授权完成后确认 7 个 tools 仍然可见，并测试 `workspaceCommand`。
 
 本项目不负责网页版 Skill 注册；Skill 与后端 MCP 是两个独立层面。
 

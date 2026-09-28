@@ -18,6 +18,8 @@ class JWTTokenVerifier(TokenVerifier):
 
     def __init__(self, settings: MCPSettings) -> None:
         self.settings = settings
+        if settings.jwks_url is None or settings.audience is None:
+            raise ValueError("JWTTokenVerifier requires OAuth settings.")
         self._jwks = PyJWKClient(settings.jwks_url, cache_keys=True)
 
     async def verify_token(self, token: str) -> AccessToken | None:
@@ -46,7 +48,7 @@ class JWTTokenVerifier(TokenVerifier):
             client_id=client_id,
             scopes=scopes,
             expires_at=int(expires_at) if isinstance(expires_at, (int, float)) else None,
-            resource=self.settings.public_url,
+            resource=self.settings.audience,
             subject=subject,
             claims={
                 "iss": payload.get("iss"),
@@ -61,7 +63,7 @@ class JWTTokenVerifier(TokenVerifier):
             signing_key.key,
             algorithms=list(self.settings.allowed_algorithms),
             issuer=self.settings.issuer,
-            audience=self.settings.public_url,
+            audience=self.settings.audience,
             options={"require": ["exp", "iss", "aud"]},
         )
         if not isinstance(payload, dict):

@@ -58,6 +58,7 @@ def _read_dotenv_file(path: Path) -> dict[str, str]:
 @dataclass(frozen=True)
 class MCPSettings:
     public_url: str
+    audience: str | None = None
     issuer: str | None = None
     jwks_url: str | None = None
     required_scope: str = "workspace:execute"
@@ -73,22 +74,28 @@ class MCPSettings:
         if public.query or public.fragment:
             raise ValueError("MCP_PUBLIC_URL must not contain a query string or fragment.")
 
-        oauth_values = (self.issuer, self.jwks_url, self.allowed_subject)
+        oauth_values = (self.audience, self.issuer, self.jwks_url, self.allowed_subject)
         if not any(oauth_values):
             if not 1 <= self.port <= 65535:
                 raise ValueError("MCP_PORT must be between 1 and 65535.")
             return
         if not all(oauth_values):
             raise ValueError(
-                "OAuth is optional, but OAUTH_ISSUER, OAUTH_JWKS_URL, and "
-                "OAUTH_ALLOWED_SUBJECT must all be set when OAuth is enabled."
+                "OAuth is optional, but OAUTH_AUDIENCE, OAUTH_ISSUER, OAUTH_JWKS_URL, "
+                "and OAUTH_ALLOWED_SUBJECT must all be set when OAuth is enabled."
             )
 
+        assert self.audience is not None
         assert self.issuer is not None
         assert self.jwks_url is not None
         assert self.allowed_subject is not None
+        audience_parts = urlsplit(self.audience)
         issuer_parts = urlsplit(self.issuer)
         jwks_parts = urlsplit(self.jwks_url)
+        if audience_parts.scheme != "https" or not audience_parts.hostname:
+            raise ValueError("OAUTH_AUDIENCE must be an absolute HTTPS URL.")
+        if audience_parts.query or audience_parts.fragment:
+            raise ValueError("OAUTH_AUDIENCE must not contain a query string or fragment.")
         if issuer_parts.scheme != "https" or not issuer_parts.hostname:
             raise ValueError("OAUTH_ISSUER must be an absolute HTTPS URL.")
         if jwks_parts.scheme != "https" or not jwks_parts.hostname:
@@ -121,6 +128,7 @@ class MCPSettings:
         public_url = _required("MCP_PUBLIC_URL")
         return cls(
             public_url=public_url,
+            audience=env_value("OAUTH_AUDIENCE"),
             issuer=env_value("OAUTH_ISSUER"),
             jwks_url=env_value("OAUTH_JWKS_URL"),
             required_scope=env_value("MCP_REQUIRED_SCOPE") or "workspace:execute",
@@ -136,7 +144,7 @@ class MCPSettings:
 
     @property
     def auth_enabled(self) -> bool:
-        return self.issuer is not None
+        return self.audience is not None
 
 
 def _required(name: str) -> str:

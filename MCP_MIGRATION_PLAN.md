@@ -632,7 +632,7 @@ MCP Server 每次请求验证 Access Token。
 
 即使整个 server 都要求 OAuth，`tools/list` 仍然为每个 tool 显式输出顶层 `securitySchemes`，并镜像到 `_meta.securitySchemes`。当前 Python MCP SDK 2.2 的核心 `Tool` 类型还没有建模 OpenAI 的顶层字段，因此实现通过 SDK 的 server middleware 在核心协议校验完成后补充该 descriptor 字段；不是字符串改写，也不修改 SDK 包。
 
-`MCP_PUBLIC_URL` 同时作为唯一 canonical MCP resource 和 Access Token audience。OAuth Provider 必须为这个 resource 签发 Token，不提供独立 `OAUTH_AUDIENCE` 兼容配置。
+个人多-MCP 部署使用共享 OAuth Logical API：`MCP_PUBLIC_URL` 表示每个 MCP 自己的公网 endpoint，`OAUTH_AUDIENCE` 表示多个私人 MCP 共用的 OAuth resource / Auth0 API Identifier。JWT `aud`、protected-resource metadata 的 `resource` 和 SDK resource validation 都使用 `OAUTH_AUDIENCE`。因此同一个 Token 可以在这个共享私人信任域内跨 MCP 使用；这是刻意设计，不是 Provider 兼容兜底。
 
 ### 9.4 OAuth client 注册方式
 
@@ -681,6 +681,7 @@ WORKSPACE_COMMAND_TIMEOUT_SECONDS
 WORKSPACE_COMMAND_MAX_OUTPUT_BYTES
 
 MCP_PUBLIC_URL
+OAUTH_AUDIENCE
 OAUTH_ISSUER
 OAUTH_JWKS_URL
 OAUTH_ALLOWED_SUBJECT

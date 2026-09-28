@@ -252,7 +252,7 @@ max_bytes
 规则很简单：
 
 - **没有配置任何 `OAUTH_*` 环境变量**：服务使用 `noauth`；
-- **开始配置 OAuth 后**：`OAUTH_ISSUER`、`OAUTH_JWKS_URL`、`OAUTH_ALLOWED_SUBJECT` 必须同时存在。
+- **开始配置 OAuth 后**：`OAUTH_AUDIENCE`、`OAUTH_ISSUER`、`OAUTH_JWKS_URL`、`OAUTH_ALLOWED_SUBJECT` 必须同时存在。
 
 noauth 时，7 个 tools 会在 `tools/list` 中声明：
 
@@ -317,8 +317,8 @@ Auth0 Dashboard：
    - 开启 **Resource Parameter Compatibility Profile**；
    - 如果界面有 **DCR Security Mode**，使用 `Strict`。
 3. `Applications -> APIs -> Create API`：
-   - Name: `Workspace MCP`；
-   - Identifier: **必须精确等于 `MCP_PUBLIC_URL`**，例如 `https://githubaction.giize.com/mcp-app/mcp`；
+   - Name: `Private MCP`（名字随意）；
+   - Identifier: 作为所有私人 MCP 共用的 **Logical API / audience**。例如可以直接复用你已经创建的 `https://githubaction.giize.com/mcp-app/mcp`；
    - Signing Algorithm: `RS256`。
 4. 在这个 API 增加 permission：
 
@@ -346,6 +346,7 @@ MCP_PUBLIC_URL=https://githubaction.giize.com/mcp-app/mcp
 MCP_HOST=127.0.0.1
 MCP_PORT=8003
 
+OAUTH_AUDIENCE=https://githubaction.giize.com/mcp-app/mcp
 OAUTH_ISSUER=https://YOUR_TENANT_REGION.auth0.com/
 OAUTH_JWKS_URL=https://YOUR_TENANT_REGION.auth0.com/.well-known/jwks.json
 OAUTH_ALLOWED_SUBJECT=auth0|YOUR_USER_ID
@@ -355,13 +356,31 @@ MCP_REQUIRED_SCOPE=workspace:execute
 
 `OAUTH_ISSUER` 必须使用 Auth0 tenant 的 canonical issuer，并保留尾部 `/`。
 
-Auth0 使用 MCP 的 `resource` 参数。必须开启 **Resource Parameter Compatibility Profile**，这样 Auth0 才会把 ChatGPT 发送的：
+Auth0 使用 MCP 的 `resource` 参数。必须开启 **Resource Parameter Compatibility Profile**，这样 Auth0 才会把 ChatGPT 发送的共享 resource：
 
 ```text
 resource=https://githubaction.giize.com/mcp-app/mcp
 ```
 
 映射成 Access Token 的 audience。
+
+多个 MCP 共用时，每个项目的 `MCP_PUBLIC_URL` 可以不同，但 `OAUTH_AUDIENCE` 保持相同。例如：
+
+```env
+# MCP A
+MCP_PUBLIC_URL=https://githubaction.giize.com/mcp-app/mcp
+OAUTH_AUDIENCE=https://githubaction.giize.com/mcp-app/mcp
+
+# MCP B
+MCP_PUBLIC_URL=https://githubaction.giize.com/files-mcp/mcp
+OAUTH_AUDIENCE=https://githubaction.giize.com/mcp-app/mcp
+
+# MCP C
+MCP_PUBLIC_URL=https://githubaction.giize.com/server-mcp/mcp
+OAUTH_AUDIENCE=https://githubaction.giize.com/mcp-app/mcp
+```
+
+这样 Auth0 只需要一个 API；一个为该 shared audience 签发的 Token 可以被所有配置相同 audience、scope 和 subject 的私人 MCP 接受。这是刻意的共享信任边界。
 
 ## 环境变量
 
@@ -387,6 +406,7 @@ MCP_PUBLIC_URL
 MCP_HOST
 MCP_PORT
 
+OAUTH_AUDIENCE               # optional, OAuth 模式才配置；多个 MCP 可共用
 OAUTH_ISSUER                 # optional, OAuth 模式才配置
 OAUTH_JWKS_URL               # optional, OAuth 模式才配置
 OAUTH_ALLOWED_ALGORITHMS     # optional, OAuth 模式才配置
@@ -417,9 +437,13 @@ https://githubaction.giize.com/mcp-app/mcp
 
 允许二级路径，只要求公网 URL 是 HTTPS 且最终以 `/mcp` 结尾。后端本身仍监听 `/mcp`；可以由 Caddy `handle_path` 剥掉公网前缀。
 
-### OAuth resource / audience（OAuth 模式）
+### `OAUTH_AUDIENCE`（OAuth 模式）
 
-`MCP_PUBLIC_URL` 就是唯一 canonical MCP resource，同时也是 JWT 必须包含的 audience。项目不提供额外的 `OAUTH_AUDIENCE` 兼容层；OAuth Provider 必须为这个 MCP resource 签发 Token。
+`MCP_PUBLIC_URL` 只表示这个 MCP 自己的公网连接地址；`OAUTH_AUDIENCE` 表示共享的 OAuth resource / Auth0 API Identifier。
+
+JWT 的 `aud` 必须匹配 `OAUTH_AUDIENCE`。MCP protected-resource metadata 也会把 `OAUTH_AUDIENCE` 发布为 `resource`，让 ChatGPT 在授权流程中请求这个共享 Logical API。
+
+这允许多个个人 MCP 复用同一个 Auth0 API/audience。代价也很明确：同一个有效 Token 可以跨这些 MCP 使用，因此它们被视为同一个私人信任域。
 
 ### `OAUTH_ISSUER`（OAuth 模式）
 
@@ -514,14 +538,17 @@ https://githubaction.giize.com/.well-known/oauth-protected-resource/mcp-app/mcp
 当：
 
 ```text
-MCP_PUBLIC_URL=https://mcp.example.com/mcp
+MCP_PUBLIC_URL=https://githubaction.giize.com/files-mcp/mcp
+OAUTH_AUDIENCE=https://githubaction.giize.com/mcp-app/mcp
 ```
 
-SDK 会暴露与该 resource 对应的 protected-resource metadata，例如：
+SDK 会按共享 `OAUTH_AUDIENCE` 暴露 protected-resource metadata，例如：
 
 ```text
-https://mcp.example.com/.well-known/oauth-protected-resource/mcp
+https://githubaction.giize.com/.well-known/oauth-protected-resource/mcp-app/mcp
 ```
+
+其中 JSON 的 `resource` 也是 `https://githubaction.giize.com/mcp-app/mcp`，而不是 `files-mcp` 的公网 URL。
 
 未携带有效 Token 访问 `/mcp` 会得到 HTTP 401 和 `WWW-Authenticate` challenge，引导客户端发现 OAuth metadata。
 
@@ -539,7 +566,7 @@ noauth 测试时：
 
 1. 在 `.env` 增加 Auth0 的 `OAUTH_*` 配置并重启 `workspace-mcp`；
 2. 更新 Caddy，增加上面的 `/.well-known/oauth-protected-resource/mcp-app/mcp` 代理；
-3. 先访问该 metadata URL，确认返回的 `resource` 精确等于 `https://githubaction.giize.com/mcp-app/mcp`；
+3. 先访问共享 metadata URL，确认返回的 `resource` 精确等于 `OAUTH_AUDIENCE`；
 4. ChatGPT 中删除/重新创建当前 noauth MCP connection，Authentication 选择 `OAuth`；
 5. ChatGPT 会通过 Auth0 DCR 自动注册 client，并跳转 Auth0 Universal Login；
 6. 使用你自己的 Auth0 用户登录并授权；
@@ -588,7 +615,8 @@ python -m ruff format .
 - hash-checked overwrite 的 `expected_sha256` 条件写入 tool schema；
 - `workspaceCommand` schema 的 timeout/output maximum 来自当前运行时配置；
 - OAuth protected-resource metadata、401 challenge 和 403 scope challenge；
-- JWT 签名、issuer、canonical MCP resource/audience、expiry/nbf、subject；
+- JWT 签名、issuer、共享 audience、expiry/nbf、subject；
+- 不同 `MCP_PUBLIC_URL` 可以接受同一个 shared-audience Token；
 - Workspace create/reuse；
 - Workspace 文件工具的 `..` / 绝对路径 / symlink-junction root containment；
 - `workspaceCommand` 仍可按设计访问 Workspace root 外的 OS-account-scoped 路径；

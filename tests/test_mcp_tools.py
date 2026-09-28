@@ -16,6 +16,7 @@ from workspace_mcp.server import create_server
 def _settings() -> MCPSettings:
     return MCPSettings(
         public_url="https://workspace.example.com/mcp",
+        audience="https://workspace.example.com/private-mcp",
         issuer="https://auth.example.com/",
         jwks_url="https://auth.example.com/.well-known/jwks.json",
         allowed_subject="personal-user",

@@ -17,6 +17,8 @@ from workspace_mcp.auth import JWTTokenVerifier
 from workspace_mcp.config import MCPSettings
 from workspace_mcp.server import create_app
 
+SHARED_AUDIENCE = "https://workspace.example.com/private-mcp"
+
 
 def _sse_json(text: str) -> dict:
     for line in text.splitlines():
@@ -28,6 +30,7 @@ def _sse_json(text: str) -> dict:
 def _settings(*, allowed_subject: str = "personal-user") -> MCPSettings:
     return MCPSettings(
         public_url="https://workspace.example.com/mcp",
+        audience=SHARED_AUDIENCE,
         issuer="https://auth.example.com/",
         jwks_url="https://auth.example.com/.well-known/jwks.json",
         required_scope="workspace:execute",
@@ -40,7 +43,7 @@ def _token(private_key, **overrides):
     now = int(time.time())
     payload = {
         "iss": "https://auth.example.com/",
-        "aud": "https://workspace.example.com/mcp",
+        "aud": SHARED_AUDIENCE,
         "sub": "personal-user",
         "client_id": "chatgpt-client",
         "scope": "workspace:execute",
@@ -63,7 +66,7 @@ def test_jwt_verifier_checks_signature_issuer_audience_and_personal_subject() ->
         valid = await verifier.verify_token(_token(private_key))
         assert valid is not None
         assert valid.subject == "personal-user"
-        assert valid.resource == "https://workspace.example.com/mcp"
+        assert valid.resource == SHARED_AUDIENCE
         assert valid.scopes == ["workspace:execute"]
 
         assert (
@@ -81,6 +84,36 @@ def test_jwt_verifier_checks_signature_issuer_audience_and_personal_subject() ->
     asyncio.run(scenario())
 
 
+def test_same_shared_audience_token_is_valid_for_multiple_mcp_endpoints() -> None:
+    async def scenario() -> None:
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        token = _token(private_key)
+
+        for public_url in (
+            "https://workspace.example.com/project-a/mcp",
+            "https://workspace.example.com/project-b/mcp",
+        ):
+            settings = MCPSettings(
+                public_url=public_url,
+                audience=SHARED_AUDIENCE,
+                issuer="https://auth.example.com/",
+                jwks_url="https://auth.example.com/.well-known/jwks.json",
+                required_scope="workspace:execute",
+                allowed_subject="personal-user",
+            )
+            verifier = JWTTokenVerifier(settings)
+            verifier._jwks = SimpleNamespace(
+                get_signing_key_from_jwt=lambda _token: SimpleNamespace(
+                    key=private_key.public_key()
+                )
+            )
+            valid = await verifier.verify_token(token)
+            assert valid is not None
+            assert valid.resource == SHARED_AUDIENCE
+
+    asyncio.run(scenario())
+
+
 def test_auth_routes_publish_protected_resource_metadata_and_challenge_unauthorized_mcp() -> None:
     async def scenario() -> None:
         settings = _settings()
@@ -89,10 +122,10 @@ def test_auth_routes_publish_protected_resource_metadata_and_challenge_unauthori
         async with httpx.AsyncClient(
             transport=transport, base_url="https://workspace.example.com"
         ) as client:
-            metadata = await client.get("/.well-known/oauth-protected-resource/mcp")
+            metadata = await client.get("/.well-known/oauth-protected-resource/private-mcp")
             assert metadata.status_code == 200
             body = metadata.json()
-            assert body["resource"] == settings.public_url
+            assert body["resource"] == settings.audience
             assert body["authorization_servers"] == [settings.issuer]
             assert "workspace:execute" in body["scopes_supported"]
 
@@ -111,7 +144,8 @@ def test_auth_routes_publish_protected_resource_metadata_and_challenge_unauthori
 def test_oauth_subpath_publishes_matching_metadata_and_challenge_url() -> None:
     async def scenario() -> None:
         settings = MCPSettings(
-            public_url="https://githubaction.giize.com/mcp-app/mcp",
+            public_url="https://githubaction.giize.com/another-mcp/mcp",
+            audience="https://githubaction.giize.com/mcp-app/mcp",
             issuer="https://tenant.example.auth0.com/",
             jwks_url="https://tenant.example.auth0.com/.well-known/jwks.json",
             allowed_subject="auth0|personal-user",
@@ -125,7 +159,7 @@ def test_oauth_subpath_publishes_matching_metadata_and_challenge_url() -> None:
             metadata = await client.get(metadata_path)
             assert metadata.status_code == 200
             body = metadata.json()
-            assert body["resource"] == settings.public_url
+            assert body["resource"] == settings.audience
             assert body["authorization_servers"] == [settings.issuer]
 
             unauthorized = await client.post(
@@ -152,7 +186,7 @@ def test_auth_middleware_rejects_token_without_required_scope() -> None:
                 token=token,
                 client_id="chatgpt-client",
                 scopes=[],
-                resource=self.settings.public_url,
+                resource=self.settings.audience,
                 subject="personal-user",
             )
 
@@ -213,6 +247,7 @@ def test_personal_server_requires_allowed_subject() -> None:
     with pytest.raises(ValueError, match="OAUTH_ALLOWED_SUBJECT"):
         MCPSettings(
             public_url="https://workspace.example.com/mcp",
+            audience=SHARED_AUDIENCE,
             issuer="https://auth.example.com/",
             jwks_url="https://auth.example.com/.well-known/jwks.json",
             allowed_subject="",
@@ -220,24 +255,35 @@ def test_personal_server_requires_allowed_subject() -> None:
 
 
 @pytest.mark.parametrize(
-    ("issuer", "jwks_url", "message"),
+    ("audience", "issuer", "jwks_url", "message"),
     [
         (
+            "http://workspace.example.com/private-mcp",
+            "https://auth.example.com/",
+            "https://auth.example.com/.well-known/jwks.json",
+            "OAUTH_AUDIENCE",
+        ),
+        (
+            SHARED_AUDIENCE,
             "http://auth.example.com/",
             "https://auth.example.com/.well-known/jwks.json",
             "OAUTH_ISSUER",
         ),
         (
+            SHARED_AUDIENCE,
             "https://auth.example.com/",
             "http://auth.example.com/.well-known/jwks.json",
             "OAUTH_JWKS_URL",
         ),
     ],
 )
-def test_oauth_configuration_requires_https(issuer: str, jwks_url: str, message: str) -> None:
+def test_oauth_configuration_requires_https(
+    audience: str, issuer: str, jwks_url: str, message: str
+) -> None:
     with pytest.raises(ValueError, match=message):
         MCPSettings(
             public_url="https://workspace.example.com/mcp",
+            audience=audience,
             issuer=issuer,
             jwks_url=jwks_url,
             allowed_subject="personal-user",
@@ -257,6 +303,7 @@ def test_partial_oauth_configuration_is_rejected() -> None:
     with pytest.raises(ValueError, match="must all be set"):
         MCPSettings(
             public_url="https://workspace.example.com/mcp",
+            audience=SHARED_AUDIENCE,
             issuer="https://auth.example.com/",
         )
 
@@ -332,7 +379,7 @@ def test_authenticated_http_initialize_accepts_public_mcp_host() -> None:
                 token=token,
                 client_id="chatgpt-client",
                 scopes=["workspace:execute"],
-                resource=self.settings.public_url,
+                resource=self.settings.audience,
                 subject="personal-user",
             )
 

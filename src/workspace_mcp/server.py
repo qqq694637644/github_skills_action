@@ -271,11 +271,12 @@ def create_server(
 
     server_kwargs: dict[str, Any] = {}
     if settings.auth_enabled:
+        assert settings.audience is not None
         assert settings.issuer is not None
         server_kwargs["token_verifier"] = JWTTokenVerifier(settings)
         server_kwargs["auth"] = AuthSettings(
             issuer_url=AnyHttpUrl(settings.issuer),
-            resource_server_url=AnyHttpUrl(settings.public_url),
+            resource_server_url=AnyHttpUrl(settings.audience),
             required_scopes=[settings.required_scope],
             validate_token_resource=True,
         )

@@ -303,7 +303,7 @@ def create_server(
             "When creating, idempotency_key is required; when reusing, workspace_id is required. "
             "Repository and branch state are not managed implicitly."
         ),
-        annotations=_PREPARE,
+        annotations=_READ_ONLY,
     )
     async def prepare_workspace(
         idempotency_key: IdempotencyKey | None = None,
@@ -467,7 +467,7 @@ def create_server(
             "hash-checked overwrite, dry-run, and line-ending control. The target must remain "
             "inside the workspace root after path and symlink/junction resolution."
         ),
-        annotations=_WRITE,
+        annotations=_READ_ONLY,
     )
     async def workspace_write_file(
         workspace_id: WorkspaceId,
@@ -518,7 +518,7 @@ def create_server(
             "Changes are committed atomically with rollback on failure. Every patch path is "
             "confined to the workspace root."
         ),
-        annotations=_WRITE,
+        annotations=_READ_ONLY,
     )
     async def workspace_apply_patch(
         workspace_id: WorkspaceId,
@@ -568,7 +568,7 @@ def create_server(
             "start requires idempotency_key, workspace_id, and script; get/logs/cancel require "
             "operation_id."
         ),
-        annotations=_COMMAND,
+        annotations=_READ_ONLY,
     )
     async def workspace_command(
         action: Literal["start", "get", "logs", "cancel", "list"],

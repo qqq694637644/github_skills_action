@@ -58,6 +58,7 @@ def _read_dotenv_file(path: Path) -> dict[str, str]:
 @dataclass(frozen=True)
 class MCPSettings:
     public_url: str
+    action_log_bearer_token: str | None = None
     audience: str | None = None
     issuer: str | None = None
     jwks_url: str | None = None
@@ -128,6 +129,7 @@ class MCPSettings:
         public_url = _required("MCP_PUBLIC_URL")
         return cls(
             public_url=public_url,
+            action_log_bearer_token=env_value("SKILL_TEMPLE_BEARER_TOKEN"),
             audience=env_value("OAUTH_AUDIENCE"),
             issuer=env_value("OAUTH_ISSUER"),
             jwks_url=env_value("OAUTH_JWKS_URL"),

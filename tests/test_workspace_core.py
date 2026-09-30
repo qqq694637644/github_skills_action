@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
+import stat
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -24,6 +27,7 @@ def _environment(root: Path, *, sync_wait: int = 5):
         {
             "WORKSPACE_ROOT": str(root / "workspaces"),
             "WORKSPACE_OPERATION_ROOT": str(root / "operations"),
+            "WORKSPACE_SHELL_PATH": "/bin/bash",
             "WORKSPACE_COMMAND_SYNC_WAIT_SECONDS": str(sync_wait),
             "WORKSPACE_COMMAND_TIMEOUT_SECONDS": "10",
             "WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS": "30",
@@ -113,7 +117,7 @@ def test_workspace_files_search_write_and_patch() -> None:
             )
             assert patched["applied"] is True
             file_path = Path(os.environ["WORKSPACE_ROOT"]) / workspace_id / "src/example.txt"
-            assert file_path.read_text(encoding="utf-8") == "alpha\ngamma\n"
+            assert file_path.read_bytes() == b"alpha\ngamma\n"
         finally:
             await service.shutdown()
 
@@ -210,7 +214,7 @@ def test_workspace_file_tools_reject_paths_outside_root() -> None:
             try:
                 link.symlink_to(outside_dir, target_is_directory=True)
             except OSError:
-                pytest.skip("directory symlink/junction creation is unavailable on this test host")
+                pytest.skip("directory symlink creation is unavailable on this test host")
 
             with pytest.raises(WorkspaceToolError) as captured:
                 await service.write_file(
@@ -251,6 +255,7 @@ def test_utf8_log_pagination_never_splits_code_points() -> None:
         assert offset == len(encoded)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Linux command runner requires POSIX process groups")
 def test_running_command_utf8_partial_writes_do_not_emit_replacement_characters() -> None:
     async def scenario() -> None:
         service = LocalWorkspaceService()
@@ -258,12 +263,13 @@ def test_running_command_utf8_partial_writes_do_not_emit_replacement_characters(
             workspace = await service.prepare_workspace(
                 idempotency_key="utf8-live-command-001", workspace_id=None
             )
-            script = (
-                "$s=[Console]::OpenStandardOutput(); "
-                "$s.WriteByte(228); $s.Flush(); Start-Sleep -Milliseconds 300; "
-                "$s.WriteByte(189); $s.Flush(); Start-Sleep -Milliseconds 300; "
-                "$s.WriteByte(160); $s.Flush(); Start-Sleep -Milliseconds 300"
+            python_code = (
+                "import sys,time; s=sys.stdout.buffer; "
+                "s.write(bytes([228])); s.flush(); time.sleep(0.3); "
+                "s.write(bytes([189])); s.flush(); time.sleep(0.3); "
+                "s.write(bytes([160])); s.flush(); time.sleep(0.3)"
             )
+            script = f"{shlex.quote(sys.executable)} -c {shlex.quote(python_code)}"
             start = await service.command_start(
                 workspace_id=str(workspace["workspace_id"]),
                 idempotency_key="utf8-live-op-001",
@@ -305,6 +311,7 @@ def test_running_command_utf8_partial_writes_do_not_emit_replacement_characters(
         _run(scenario())
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Linux command runner requires POSIX process groups")
 def test_plain_output_strips_ansi_sequences_split_across_live_chunks() -> None:
     async def scenario() -> None:
         service = LocalWorkspaceService()
@@ -314,10 +321,11 @@ def test_plain_output_strips_ansi_sequences_split_across_live_chunks() -> None:
             )
             bytes_to_write = [27, 91, 51, 49, 109, 82, 69, 68, 27, 91, 48, 109]
             writes = "; ".join(
-                f"$s.WriteByte({value}); $s.Flush(); Start-Sleep -Milliseconds 80"
+                f"s.write(bytes([{value}])); s.flush(); time.sleep(0.08)"
                 for value in bytes_to_write
             )
-            script = f"$s=[Console]::OpenStandardOutput(); {writes}"
+            python_code = f"import sys,time; s=sys.stdout.buffer; {writes}"
+            script = f"{shlex.quote(sys.executable)} -c {shlex.quote(python_code)}"
             start = await service.command_start(
                 workspace_id=str(workspace["workspace_id"]),
                 idempotency_key="ansi-live-op-001",
@@ -359,6 +367,7 @@ def test_plain_output_strips_ansi_sequences_split_across_live_chunks() -> None:
         _run(scenario())
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Linux command runner requires POSIX process groups")
 def test_command_start_returns_terminal_logs_for_fast_command() -> None:
     async def scenario() -> None:
         service = LocalWorkspaceService()
@@ -369,7 +378,7 @@ def test_command_start_returns_terminal_logs_for_fast_command() -> None:
             result = await service.command_start(
                 workspace_id=str(workspace["workspace_id"]),
                 idempotency_key="fast-op-001",
-                script="Write-Output 'hello-mcp'",
+                script="printf '%s\n' 'hello-mcp'",
                 timeout_seconds=10,
                 max_output_bytes=None,
                 plain_output=True,
@@ -387,6 +396,7 @@ def test_command_start_returns_terminal_logs_for_fast_command() -> None:
         _run(scenario())
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Linux command runner requires POSIX process groups")
 def test_workspace_command_intentionally_has_os_account_scope_outside_workspace_root() -> None:
     async def scenario(root: Path) -> None:
         service = LocalWorkspaceService()
@@ -395,14 +405,11 @@ def test_workspace_command_intentionally_has_os_account_scope_outside_workspace_
                 idempotency_key="os-scope-command-001", workspace_id=None
             )
             outside = root / "outside-workspace-command.txt"
-            escaped_path = str(outside).replace("'", "''")
+            script = "printf '%s\n' 'intentional-os-account-scope' > " + shlex.quote(str(outside))
             result = await service.command_start(
                 workspace_id=str(workspace["workspace_id"]),
                 idempotency_key="os-scope-operation-001",
-                script=(
-                    f"Set-Content -LiteralPath '{escaped_path}' "
-                    "-Value 'intentional-os-account-scope' -Encoding utf8"
-                ),
+                script=script,
                 timeout_seconds=10,
                 max_output_bytes=None,
                 plain_output=True,
@@ -419,6 +426,7 @@ def test_workspace_command_intentionally_has_os_account_scope_outside_workspace_
         _run(scenario(Path(temp)))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Linux command runner requires POSIX process groups")
 def test_command_get_waits_for_changes_and_returns_delta_logs_without_repeating() -> None:
     async def scenario() -> None:
         service = LocalWorkspaceService()
@@ -429,12 +437,7 @@ def test_command_get_waits_for_changes_and_returns_delta_logs_without_repeating(
             start = await service.command_start(
                 workspace_id=str(workspace["workspace_id"]),
                 idempotency_key="follow-op-001",
-                script=(
-                    "Write-Output 'first'; "
-                    "Start-Sleep -Milliseconds 400; "
-                    "Write-Output 'second'; "
-                    "Start-Sleep -Milliseconds 400"
-                ),
+                script=("printf '%s\n' 'first'; sleep 0.4; printf '%s\n' 'second'; sleep 0.4"),
                 timeout_seconds=10,
                 max_output_bytes=None,
                 plain_output=True,
@@ -481,6 +484,7 @@ def test_command_get_waits_for_changes_and_returns_delta_logs_without_repeating(
         _run(scenario())
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Linux command runner requires POSIX process groups")
 def test_command_idempotency_list_cancel_and_timeout() -> None:
     async def scenario() -> None:
         service = LocalWorkspaceService()
@@ -492,7 +496,7 @@ def test_command_idempotency_list_cancel_and_timeout() -> None:
             first = await service.command_start(
                 workspace_id=workspace_id,
                 idempotency_key="same-op-key",
-                script="Start-Sleep -Seconds 5",
+                script="sleep 5",
                 timeout_seconds=10,
                 max_output_bytes=None,
                 plain_output=True,
@@ -502,7 +506,7 @@ def test_command_idempotency_list_cancel_and_timeout() -> None:
             duplicate = await service.command_start(
                 workspace_id=workspace_id,
                 idempotency_key="same-op-key",
-                script="Start-Sleep -Seconds 5",
+                script="sleep 5",
                 timeout_seconds=10,
                 max_output_bytes=None,
                 plain_output=True,
@@ -531,7 +535,7 @@ def test_command_idempotency_list_cancel_and_timeout() -> None:
             timed = await service.command_start(
                 workspace_id=workspace_id,
                 idempotency_key="timeout-op-key",
-                script="Start-Sleep -Seconds 2",
+                script="sleep 2",
                 timeout_seconds=1,
                 max_output_bytes=None,
                 plain_output=True,
@@ -556,3 +560,171 @@ def test_command_idempotency_list_cancel_and_timeout() -> None:
 
     with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=0):
         _run(scenario())
+
+
+def test_write_and_patch_preserve_existing_line_endings() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="line-ending-workspace-001", workspace_id=None
+            )
+            workspace_id = str(workspace["workspace_id"])
+            workspace_root = Path(os.environ["WORKSPACE_ROOT"]) / workspace_id
+            target = workspace_root / "windows.txt"
+            target.write_bytes(b"alpha\r\nbeta\r\n")
+
+            await service.write_file(
+                workspace_id=workspace_id,
+                path="windows.txt",
+                content="alpha\nbeta2\n",
+                mode="overwrite",
+                line_ending="preserve",
+                expected_sha256=None,
+                dry_run=False,
+                max_bytes=None,
+            )
+            assert target.read_bytes() == b"alpha\r\nbeta2\r\n"
+
+            await service.apply_patch(
+                workspace_id=workspace_id,
+                patch=(
+                    "*** Begin Patch\n"
+                    "*** Update File: windows.txt\n"
+                    "@@\n"
+                    "-beta2\n"
+                    "+gamma\n"
+                    "*** End Patch"
+                ),
+                dry_run=False,
+                allow_delete=False,
+                max_changed_files=None,
+                max_patch_bytes=None,
+            )
+            assert target.read_bytes() == b"alpha\r\ngamma\r\n"
+
+            await service.write_file(
+                workspace_id=workspace_id,
+                path="new.txt",
+                content="one\r\ntwo\r\n",
+                mode="create_only",
+                line_ending="preserve",
+                expected_sha256=None,
+                dry_run=False,
+                max_bytes=None,
+            )
+            assert (workspace_root / "new.txt").read_bytes() == b"one\ntwo\n"
+
+            await service.write_file(
+                workspace_id=workspace_id,
+                path="forced-crlf.txt",
+                content="one\ntwo\n",
+                mode="create_only",
+                line_ending="crlf",
+                expected_sha256=None,
+                dry_run=False,
+                max_bytes=None,
+            )
+            assert (workspace_root / "forced-crlf.txt").read_bytes() == b"one\r\ntwo\r\n"
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
+        _run(scenario(Path(temp)))
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX mode bits are a Linux/Unix file-system feature",
+)
+def test_write_and_patch_preserve_posix_mode() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="mode-workspace-001", workspace_id=None
+            )
+            workspace_id = str(workspace["workspace_id"])
+            workspace_root = Path(os.environ["WORKSPACE_ROOT"]) / workspace_id
+            target = workspace_root / "script.sh"
+            target.write_bytes(b"#!/bin/bash\necho before\n")
+            target.chmod(0o755)
+
+            await service.write_file(
+                workspace_id=workspace_id,
+                path="script.sh",
+                content="#!/bin/bash\necho after\n",
+                mode="overwrite",
+                line_ending="preserve",
+                expected_sha256=None,
+                dry_run=False,
+                max_bytes=None,
+            )
+            assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+            await service.apply_patch(
+                workspace_id=workspace_id,
+                patch=(
+                    "*** Begin Patch\n"
+                    "*** Update File: script.sh\n"
+                    "@@\n"
+                    "-echo after\n"
+                    "+echo patched\n"
+                    "*** End Patch"
+                ),
+                dry_run=False,
+                allow_delete=False,
+                max_changed_files=None,
+                max_patch_bytes=None,
+            )
+            assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+            plain = workspace_root / "plain.txt"
+            plain.write_bytes(b"before\n")
+            plain.chmod(0o644)
+            await service.write_file(
+                workspace_id=workspace_id,
+                path="plain.txt",
+                content="after\n",
+                mode="overwrite",
+                line_ending="preserve",
+                expected_sha256=None,
+                dry_run=False,
+                max_bytes=None,
+            )
+            assert stat.S_IMODE(plain.stat().st_mode) == 0o644
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
+        _run(scenario(Path(temp)))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux paths are case-sensitive")
+def test_workspace_paths_follow_linux_case_sensitive_semantics() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="case-sensitive-workspace-001", workspace_id=None
+            )
+            workspace_id = str(workspace["workspace_id"])
+            for path, content in (("Case.txt", "upper\n"), ("case.txt", "lower\n")):
+                await service.write_file(
+                    workspace_id=workspace_id,
+                    path=path,
+                    content=content,
+                    mode="create_only",
+                    line_ending="preserve",
+                    expected_sha256=None,
+                    dry_run=False,
+                    max_bytes=None,
+                )
+            workspace_root = Path(os.environ["WORKSPACE_ROOT"]) / workspace_id
+            assert (workspace_root / "Case.txt").read_bytes() == b"upper\n"
+            assert (workspace_root / "case.txt").read_bytes() == b"lower\n"
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
+        _run(scenario(Path(temp)))

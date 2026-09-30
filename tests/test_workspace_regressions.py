@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -238,7 +240,7 @@ def test_initial_operation_state_write_failure_rolls_back_all_indexes() -> None:
                         workspace_id="ws_0000000000000000",
                         workspace_root=root,
                         idempotency_key="state-write-failure",
-                        script="Write-Output unreachable",
+                        script="printf unreachable",
                         timeout_seconds=10,
                         max_output_bytes=20_000,
                         plain_output=True,
@@ -256,36 +258,40 @@ def test_command_startup_uses_end_to_end_deadline() -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             process_started = False
-            closed_jobs: list[bool] = []
+            late_cleanup: list[tuple[int, int | None]] = []
 
-            class SlowJob:
-                def __init__(self) -> None:
-                    time.sleep(0.25)
-                    self.assigned = False
-
-                def close(self) -> None:
-                    closed_jobs.append(True)
+            class FakeProcess:
+                pid = 424242
+                returncode = None
 
             async def fake_create_subprocess_exec(*args, **kwargs):
                 nonlocal process_started
                 process_started = True
-                raise AssertionError("process creation must not start after deadline")
+                await asyncio.sleep(0.25)
+                return FakeProcess()
+
+            async def fake_terminate_process_group(process, process_group_id, grace_seconds):
+                late_cleanup.append((process.pid, process_group_id))
 
             manager = WorkspaceOperationManager(OperationSettings(root=root / "operations"))
             started = time.monotonic()
             with (
-                patch.object(operations_module, "WindowsJob", SlowJob),
                 patch.object(
                     operations_module.asyncio,
                     "create_subprocess_exec",
                     fake_create_subprocess_exec,
+                ),
+                patch.object(
+                    operations_module,
+                    "_terminate_process_group",
+                    fake_terminate_process_group,
                 ),
             ):
                 operation = await manager.start(
                     workspace_id="ws_0000000000000000",
                     workspace_root=root,
                     idempotency_key="startup-timeout",
-                    script="Write-Output unreachable",
+                    script="printf unreachable",
                     timeout_seconds=0.05,
                     max_output_bytes=20_000,
                     plain_output=True,
@@ -295,9 +301,257 @@ def test_command_startup_uses_end_to_end_deadline() -> None:
                 elapsed = time.monotonic() - started
                 assert terminal["state"] == "timed_out"
                 assert elapsed < 0.2
-                assert process_started is False
+                assert process_started is True
                 await asyncio.sleep(0.3)
-                assert closed_jobs == [True]
+                assert late_cleanup == [(424242, 424242)]
+                await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
+async def _wait_for_file(path: Path, *, timeout: float = 3) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"file did not appear: {path}")
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def _wait_pid_gone(pid: int, *, timeout: float = 3) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_exists(pid):
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"process still exists: {pid}")
+
+
+def _posix_manager(root: Path, *, kill_grace_seconds: int = 1) -> WorkspaceOperationManager:
+    return WorkspaceOperationManager(
+        OperationSettings(
+            root=root / "operations",
+            shell="/bin/bash",
+            sync_wait_seconds=0,
+            default_timeout_seconds=10,
+            max_timeout_seconds=30,
+            kill_grace_seconds=kill_grace_seconds,
+            shutdown_seconds=3,
+        )
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux process-group lifecycle requires POSIX")
+def test_cancel_terminates_root_and_background_child_process_group() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manager = _posix_manager(root)
+            operation = await manager.start(
+                workspace_id="ws_0000000000000000",
+                workspace_root=root,
+                idempotency_key="cancel-process-group",
+                script="sleep 30 & echo $! > child.pid; wait",
+                timeout_seconds=10,
+                max_output_bytes=20_000,
+                plain_output=True,
+                utf8_output=True,
+            )
+            child_file = root / "child.pid"
+            await _wait_for_file(child_file)
+            child_pid = int(child_file.read_text(encoding="utf-8").strip())
+            running = await manager.get(str(operation["operation_id"]))
+            assert running["root_pid"] == running["process_group_id"]
+            await manager.cancel(str(operation["operation_id"]))
+            terminal = await _wait_terminal(manager, str(operation["operation_id"]))
+            assert terminal["state"] == "canceled"
+            await _wait_pid_gone(child_pid)
+            await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux process-group lifecycle requires POSIX")
+def test_timeout_terminates_background_child_process_group() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manager = _posix_manager(root)
+            operation = await manager.start(
+                workspace_id="ws_0000000000000000",
+                workspace_root=root,
+                idempotency_key="timeout-process-group",
+                script="sleep 30 & echo $! > child.pid; wait",
+                timeout_seconds=1,
+                max_output_bytes=20_000,
+                plain_output=True,
+                utf8_output=True,
+            )
+            child_file = root / "child.pid"
+            await _wait_for_file(child_file)
+            child_pid = int(child_file.read_text(encoding="utf-8").strip())
+            terminal = await _wait_terminal(manager, str(operation["operation_id"]), timeout=4)
+            assert terminal["state"] == "timed_out"
+            await _wait_pid_gone(child_pid)
+            await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux process-group lifecycle requires POSIX")
+def test_shutdown_terminates_background_child_process_group() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manager = _posix_manager(root)
+            operation = await manager.start(
+                workspace_id="ws_0000000000000000",
+                workspace_root=root,
+                idempotency_key="shutdown-process-group",
+                script="sleep 30 & echo $! > child.pid; wait",
+                timeout_seconds=10,
+                max_output_bytes=20_000,
+                plain_output=True,
+                utf8_output=True,
+            )
+            child_file = root / "child.pid"
+            await _wait_for_file(child_file)
+            child_pid = int(child_file.read_text(encoding="utf-8").strip())
+            await manager.shutdown()
+            terminal = await manager.get(str(operation["operation_id"]))
+            assert terminal["state"] == "interrupted"
+            await _wait_pid_gone(child_pid)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux process-group lifecycle requires POSIX")
+def test_successful_root_exit_still_cleans_same_group_background_child() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manager = _posix_manager(root)
+            operation = await manager.start(
+                workspace_id="ws_0000000000000000",
+                workspace_root=root,
+                idempotency_key="success-background-cleanup",
+                script="sleep 30 & echo $! > child.pid; disown; exit 0",
+                timeout_seconds=10,
+                max_output_bytes=20_000,
+                plain_output=True,
+                utf8_output=True,
+            )
+            child_file = root / "child.pid"
+            await _wait_for_file(child_file)
+            child_pid = int(child_file.read_text(encoding="utf-8").strip())
+            terminal = await _wait_terminal(manager, str(operation["operation_id"]))
+            assert terminal["state"] == "succeeded"
+            await _wait_pid_gone(child_pid)
+            await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux signal semantics require POSIX")
+def test_cancel_gives_sigterm_handler_a_grace_period() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manager = _posix_manager(root, kill_grace_seconds=1)
+            operation = await manager.start(
+                workspace_id="ws_0000000000000000",
+                workspace_root=root,
+                idempotency_key="sigterm-grace",
+                script=(
+                    'trap "printf term > term.txt; exit 0" TERM; '
+                    "printf '%s' $$ > root.pid; while :; do sleep 1; done"
+                ),
+                timeout_seconds=10,
+                max_output_bytes=20_000,
+                plain_output=True,
+                utf8_output=True,
+            )
+            await _wait_for_file(root / "root.pid")
+            await manager.cancel(str(operation["operation_id"]))
+            terminal = await _wait_terminal(manager, str(operation["operation_id"]))
+            assert terminal["state"] == "canceled"
+            assert (root / "term.txt").read_text(encoding="utf-8") == "term"
+            await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux signal semantics require POSIX")
+def test_cancel_escalates_to_sigkill_after_grace_period() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manager = _posix_manager(root, kill_grace_seconds=0)
+            operation = await manager.start(
+                workspace_id="ws_0000000000000000",
+                workspace_root=root,
+                idempotency_key="sigkill-escalation",
+                script="trap '' TERM; printf '%s' $$ > root.pid; while :; do sleep 1; done",
+                timeout_seconds=10,
+                max_output_bytes=20_000,
+                plain_output=True,
+                utf8_output=True,
+            )
+            await _wait_for_file(root / "root.pid")
+            await manager.cancel(str(operation["operation_id"]))
+            terminal = await _wait_terminal(manager, str(operation["operation_id"]))
+            assert terminal["state"] == "canceled"
+            assert terminal["exit_code"] == -signal.SIGKILL
+            await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="setsid boundary requires POSIX")
+def test_setsid_child_is_documented_process_group_escape_boundary() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manager = _posix_manager(root)
+            escaped_pid: int | None = None
+            python_code = (
+                "import os,pathlib,time; "
+                "os.setsid(); "
+                "pathlib.Path('escaped.pid').write_text(str(os.getpid()), encoding='utf-8'); "
+                "time.sleep(30)"
+            )
+            script = (
+                f"{shlex.quote(sys.executable)} -c {shlex.quote(python_code)} & "
+                "while [ ! -f escaped.pid ]; do sleep 0.01; done; exit 0"
+            )
+            try:
+                operation = await manager.start(
+                    workspace_id="ws_0000000000000000",
+                    workspace_root=root,
+                    idempotency_key="setsid-boundary",
+                    script=script,
+                    timeout_seconds=10,
+                    max_output_bytes=20_000,
+                    plain_output=True,
+                    utf8_output=True,
+                )
+                await _wait_for_file(root / "escaped.pid")
+                escaped_pid = int((root / "escaped.pid").read_text(encoding="utf-8").strip())
+                terminal = await _wait_terminal(manager, str(operation["operation_id"]))
+                assert terminal["state"] == "succeeded"
+                assert _pid_exists(escaped_pid)
+            finally:
+                if escaped_pid is not None and _pid_exists(escaped_pid):
+                    os.kill(escaped_pid, signal.SIGKILL)
+                    await _wait_pid_gone(escaped_pid)
                 await manager.shutdown()
 
     asyncio.run(scenario())

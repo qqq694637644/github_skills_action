@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-import ctypes
 import hashlib
 import json
 import os
 import secrets
 import signal
-import subprocess
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -93,7 +91,7 @@ class _AnsiCsiStripper:
 @dataclass(frozen=True)
 class OperationSettings:
     root: Path
-    shell: str = "pwsh"
+    shell: str = "/bin/bash"
     sync_wait_seconds: int = 5
     default_timeout_seconds: int = 120
     max_timeout_seconds: int = 3600
@@ -115,7 +113,7 @@ class OperationRuntime:
     shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
     process: asyncio.subprocess.Process | None = None
-    job: WindowsJob | None = None
+    process_group_id: int | None = None
     stored_bytes: int = 0
     log_command: str = ""
     log_secrets: tuple[str, ...] = ()
@@ -123,110 +121,6 @@ class OperationRuntime:
 
 class OperationDeadlineExceededError(Exception):
     pass
-
-
-class WindowsJob:
-    """Kill-on-close Windows Job Object used by the workspace command runner."""
-
-    def __init__(self) -> None:
-        self.handle: int | None = None
-        self.assigned = False
-        if os.name != "nt":
-            return
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
-        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
-        kernel32.SetInformationJobObject.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            wintypes.DWORD,
-        ]
-        kernel32.SetInformationJobObject.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        handle = kernel32.CreateJobObjectW(None, None)
-        if not handle:
-            raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
-
-        class IoCounters(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_ulonglong),
-                ("WriteOperationCount", ctypes.c_ulonglong),
-                ("OtherOperationCount", ctypes.c_ulonglong),
-                ("ReadTransferCount", ctypes.c_ulonglong),
-                ("WriteTransferCount", ctypes.c_ulonglong),
-                ("OtherTransferCount", ctypes.c_ulonglong),
-            ]
-
-        class BasicLimit(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_longlong),
-                ("PerJobUserTimeLimit", ctypes.c_longlong),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", wintypes.DWORD),
-                ("SchedulingClass", wintypes.DWORD),
-            ]
-
-        class ExtendedLimit(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", BasicLimit),
-                ("IoInfo", IoCounters),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        info = ExtendedLimit()
-        info.BasicLimitInformation.LimitFlags = 0x00002000
-        ok = kernel32.SetInformationJobObject(handle, 9, ctypes.byref(info), ctypes.sizeof(info))
-        if not ok:
-            error = ctypes.get_last_error()
-            kernel32.CloseHandle(ctypes.c_void_p(handle))
-            raise OSError(error, "SetInformationJobObject failed")
-        self.handle = int(handle)
-
-    def assign(self, pid: int) -> None:
-        if os.name != "nt" or self.handle is None:
-            self.assigned = True
-            return
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
-        kernel32.OpenProcess.restype = ctypes.c_void_p
-        kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        kernel32.AssignProcessToJobObject.restype = ctypes.c_bool
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        process = kernel32.OpenProcess(0x0100 | 0x0001 | 0x0400, False, pid)
-        if not process:
-            raise OSError(ctypes.get_last_error(), "OpenProcess failed")
-        try:
-            if not kernel32.AssignProcessToJobObject(ctypes.c_void_p(self.handle), process):
-                raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
-            self.assigned = True
-        finally:
-            kernel32.CloseHandle(process)
-
-    def terminate(self, exit_code: int = 1) -> None:
-        if os.name != "nt" or self.handle is None:
-            return
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-        kernel32.TerminateJobObject.restype = ctypes.c_bool
-        kernel32.TerminateJobObject(ctypes.c_void_p(self.handle), exit_code)
-
-    def close(self) -> None:
-        if os.name == "nt" and self.handle is not None:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-            kernel32.CloseHandle(ctypes.c_void_p(self.handle))
-            self.handle = None
 
 
 class WorkspaceOperationManager:
@@ -329,7 +223,7 @@ class WorkspaceOperationManager:
                 "script_summary": _script_summary(script),
                 "state": "running",
                 "root_pid": None,
-                "job_assigned": False,
+                "process_group_id": None,
                 "started_at": started_at,
                 "deadline_at": deadline_at,
                 "finished_at": None,
@@ -545,27 +439,12 @@ class WorkspaceOperationManager:
         self._background_cleanup_tasks.add(task)
         task.add_done_callback(self._background_cleanup_tasks.discard)
 
-    async def _create_job_before_deadline(self, runtime: OperationRuntime) -> WindowsJob:
-        def close_late_job(future: asyncio.Future[WindowsJob]) -> None:
-            try:
-                future.result().close()
-            except BaseException:
-                pass
-
-        return await self._await_before_deadline(
-            runtime,
-            asyncio.to_thread(WindowsJob),
-            on_late_result=close_late_job,
-        )
-
     async def _create_process_before_deadline(
         self,
         runtime: OperationRuntime,
         *args: str,
         cwd: str,
         env: dict[str, str],
-        creationflags: int,
-        preexec_fn: Callable[[], None] | None,
     ) -> asyncio.subprocess.Process:
         def terminate_late_process(
             future: asyncio.Future[asyncio.subprocess.Process],
@@ -575,9 +454,9 @@ class WorkspaceOperationManager:
             except BaseException:
                 return
             cleanup = asyncio.create_task(
-                _terminate_process_tree(
+                _terminate_process_group(
                     process,
-                    None,
+                    process.pid,
                     self.settings.kill_grace_seconds,
                 )
             )
@@ -591,40 +470,10 @@ class WorkspaceOperationManager:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                creationflags=creationflags,
-                preexec_fn=preexec_fn,
+                start_new_session=True,
             ),
             on_late_result=terminate_late_process,
         )
-
-    async def _assign_job_before_deadline(
-        self,
-        runtime: OperationRuntime,
-        job: WindowsJob,
-        process: asyncio.subprocess.Process,
-    ) -> None:
-        def finish_late_assignment(future: asyncio.Future[None]) -> None:
-            try:
-                future.result()
-            except BaseException:
-                pass
-            job.terminate(1)
-            job.close()
-
-        try:
-            await self._await_before_deadline(
-                runtime,
-                asyncio.to_thread(job.assign, process.pid),
-                on_late_result=finish_late_assignment,
-            )
-        except (OperationDeadlineExceededError, asyncio.CancelledError):
-            runtime.job = None
-            await _terminate_process_tree(
-                process,
-                job,
-                self.settings.kill_grace_seconds,
-            )
-            raise
 
     async def _run(
         self,
@@ -638,66 +487,32 @@ class WorkspaceOperationManager:
         utf8_output: bool,
     ) -> None:
         operation_id = str(runtime.record["operation_id"])
-        ready_path = self.root / operation_id / "job.ready"
-        effective_script = "\n".join(
-            [
-                (
-                    "while (-not (Test-Path -LiteralPath "
-                    "$env:WORKSPACE_MCP_JOB_READY_FILE)) { Start-Sleep -Milliseconds 10 }"
-                ),
-                (
-                    "Remove-Item -LiteralPath $env:WORKSPACE_MCP_JOB_READY_FILE -Force "
-                    "-ErrorAction SilentlyContinue"
-                ),
-                _build_pwsh_script(script, plain_output=plain_output, utf8_output=utf8_output),
-            ]
-        )
         args = [
             self.settings.shell,
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            effective_script,
+            "--noprofile",
+            "--norc",
+            "-c",
+            script,
         ]
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-        preexec_fn = getattr(os, "setsid", None) if os.name != "nt" else None
         process_env = os.environ.copy()
-        process_env["WORKSPACE_MCP_JOB_READY_FILE"] = str(ready_path)
+        if utf8_output:
+            process_env["PYTHONIOENCODING"] = "utf-8"
+            process_env["PYTHONUTF8"] = "1"
         runtime.log_secrets = sensitive_environment_values(process_env)
         try:
-            job = await self._create_job_before_deadline(runtime)
-            runtime.job = job
             proc = await self._create_process_before_deadline(
                 runtime,
                 *args,
                 cwd=str(workspace_root),
                 env=process_env,
-                creationflags=creationflags,
-                preexec_fn=preexec_fn,
             )
             runtime.process = proc
-            try:
-                await self._assign_job_before_deadline(runtime, job, proc)
-            except OSError as exc:
-                await _terminate_process_tree(proc, job, self.settings.kill_grace_seconds)
-                raise WorkspaceToolError(
-                    "WORKSPACE_EXEC_FAILED",
-                    f"Unable to attach the PowerShell process to a Windows Job Object: {exc}",
-                ) from exc
+            runtime.process_group_id = proc.pid
             async with runtime.lock:
                 runtime.record["root_pid"] = proc.pid
-                runtime.record["job_assigned"] = job.assigned
+                runtime.record["process_group_id"] = proc.pid
             if self._remaining_seconds(runtime) <= 0:
                 raise OperationDeadlineExceededError
-            await self._await_before_deadline(
-                runtime,
-                asyncio.to_thread(ready_path.parent.mkdir, parents=True, exist_ok=True),
-            )
-            await self._await_before_deadline(
-                runtime,
-                asyncio.to_thread(ready_path.write_text, "ready", encoding="utf-8"),
-            )
 
             stdout_task = asyncio.create_task(
                 self._drain_stream(
@@ -733,23 +548,40 @@ class WorkspaceOperationManager:
                 error_message = (
                     None
                     if proc.returncode == 0
-                    else f"PowerShell exited with code {proc.returncode}."
+                    else f"Shell command exited with code {proc.returncode}."
+                )
+                await _terminate_process_group(
+                    proc,
+                    runtime.process_group_id,
+                    self.settings.kill_grace_seconds,
                 )
             elif cancel_task in done and runtime.cancel_event.is_set():
                 terminal_state = "canceled"
                 error_code = "command_canceled"
                 error_message = "Command was canceled."
-                await _terminate_process_tree(proc, job, self.settings.kill_grace_seconds)
+                await _terminate_process_group(
+                    proc,
+                    runtime.process_group_id,
+                    self.settings.kill_grace_seconds,
+                )
             elif shutdown_task in done and runtime.shutdown_event.is_set():
                 terminal_state = "interrupted"
                 error_code = "mcp_server_shutdown"
                 error_message = "MCP server shutdown interrupted the command."
-                await _terminate_process_tree(proc, job, self.settings.kill_grace_seconds)
+                await _terminate_process_group(
+                    proc,
+                    runtime.process_group_id,
+                    self.settings.kill_grace_seconds,
+                )
             else:
                 terminal_state = "timed_out"
                 error_code = "command_timeout"
                 error_message = f"Command exceeded {timeout_seconds} seconds."
-                await _terminate_process_tree(proc, job, self.settings.kill_grace_seconds)
+                await _terminate_process_group(
+                    proc,
+                    runtime.process_group_id,
+                    self.settings.kill_grace_seconds,
+                )
 
             for task in pending:
                 task.cancel()
@@ -771,10 +603,10 @@ class WorkspaceOperationManager:
                 error_message=error_message,
             )
         except OperationDeadlineExceededError:
-            if runtime.process is not None and runtime.process.returncode is None:
-                await _terminate_process_tree(
+            if runtime.process is not None:
+                await _terminate_process_group(
                     runtime.process,
-                    runtime.job,
+                    runtime.process_group_id,
                     self.settings.kill_grace_seconds,
                 )
             await self._finish(
@@ -786,9 +618,9 @@ class WorkspaceOperationManager:
             )
         except asyncio.CancelledError:
             if runtime.process is not None:
-                await _terminate_process_tree(
+                await _terminate_process_group(
                     runtime.process,
-                    runtime.job,
+                    runtime.process_group_id,
                     self.settings.kill_grace_seconds,
                 )
             await self._finish(
@@ -809,18 +641,12 @@ class WorkspaceOperationManager:
                 error_message=exc.message if isinstance(exc, WorkspaceToolError) else str(exc),
             )
         finally:
-            if runtime.process is not None and runtime.process.returncode is None:
-                await _terminate_process_tree(
+            if runtime.process is not None:
+                await _terminate_process_group(
                     runtime.process,
-                    runtime.job,
+                    runtime.process_group_id,
                     self.settings.kill_grace_seconds,
                 )
-            try:
-                ready_path.unlink()
-            except FileNotFoundError:
-                pass
-            if runtime.job:
-                runtime.job.close()
             self._runtimes.pop(operation_id, None)
 
     async def _drain_stream(
@@ -937,68 +763,77 @@ class WorkspaceOperationManager:
         return {key: value for key, value in record.items() if key not in hidden}
 
 
-def _build_pwsh_script(script: str, *, plain_output: bool, utf8_output: bool) -> str:
-    prelude: list[str] = []
-    if plain_output:
-        prelude.extend(
-            [
-                "$ProgressPreference = 'SilentlyContinue'",
-                "if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }",
-            ]
-        )
-    if utf8_output:
-        prelude.extend(
-            [
-                "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
-                "$OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
-                "$env:PYTHONIOENCODING = 'utf-8'",
-                "$env:PYTHONUTF8 = '1'",
-                "$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'",
-                "$PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'",
-                "$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'",
-            ]
-        )
-    return "\n".join([*prelude, script]) if prelude else script
-
-
-async def _terminate_process_tree(
+async def _terminate_process_group(
     proc: asyncio.subprocess.Process,
-    job: WindowsJob | None,
+    process_group_id: int | None,
     grace_seconds: int,
 ) -> None:
-    if job is not None:
-        job.terminate(1)
-    if os.name == "nt" and proc.pid:
+    grace = max(0.0, float(grace_seconds))
+    group_id = process_group_id if process_group_id and process_group_id > 0 else None
+    can_signal_group = group_id is not None and group_id != os.getpgrp()
+
+    if can_signal_group:
         try:
-            killer = await asyncio.create_subprocess_exec(
-                "taskkill",
-                "/PID",
-                str(proc.pid),
-                "/T",
-                "/F",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(killer.wait(), timeout=max(1, grace_seconds))
-        except (FileNotFoundError, TimeoutError):
+            os.killpg(group_id, signal.SIGTERM)
+        except ProcessLookupError:
+            can_signal_group = False
+        except PermissionError:
             pass
-    elif proc.returncode is None:
-        try:
-            killpg = getattr(os, "killpg", None)
-            getpgid = getattr(os, "getpgid", None)
-            if callable(killpg) and callable(getpgid):
-                killpg(getpgid(proc.pid), getattr(signal, "SIGKILL", 9))
-        except (ProcessLookupError, PermissionError):
-            pass
+
+    if can_signal_group:
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            if not _process_group_exists(group_id):
+                break
+            if proc.returncode is None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=0.05)
+                except TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(0.05)
+        if _process_group_exists(group_id):
+            try:
+                os.killpg(group_id, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        await _wait_for_process_group_exit(group_id, timeout=max(1.0, grace))
+
     if proc.returncode is None:
         try:
-            proc.kill()
+            proc.terminate()
         except ProcessLookupError:
             pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=max(1.0, grace))
+        except TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=max(1.0, grace))
+            except TimeoutError:
+                pass
+
+
+def _process_group_exists(process_group_id: int) -> bool:
     try:
-        await asyncio.wait_for(proc.wait(), timeout=max(1, grace_seconds))
-    except TimeoutError:
-        pass
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _wait_for_process_group_exit(process_group_id: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while _process_group_exists(process_group_id):
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
 
 
 def _utc_now() -> str:

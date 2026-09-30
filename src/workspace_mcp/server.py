@@ -61,8 +61,8 @@ from .workspace_patch import WorkspaceToolError
 SERVER_INSTRUCTIONS = (
     "Use workspaceInspect/workspaceSearch before guessing paths. Read exact files with "
     "workspaceReadFiles and modify text with workspaceWriteFile/workspaceApplyPatch. "
-    "workspaceCommand separates PowerShell lifetime from one MCP call: start and get return "
-    "incremental logs directly; use logs only to reread or page historical output."
+    "workspaceCommand separates Linux shell command lifetime from one MCP call: start and get "
+    "return incremental logs directly; use logs only to reread or page historical output."
 )
 
 
@@ -284,7 +284,7 @@ def create_server(
     server = WorkspaceMCPServer(
         name="workspace-mcp",
         title="Personal Remote Workspace",
-        description="Persistent workspace tools with arbitrary PowerShell execution.",
+        description="Persistent workspace tools with arbitrary Linux Bash execution.",
         version="1.0.0",
         security_schemes=security_schemes,
         command_max_timeout_seconds=command_limits["max_timeout_seconds"],
@@ -303,7 +303,7 @@ def create_server(
             "When creating, idempotency_key is required; when reusing, workspace_id is required. "
             "Repository and branch state are not managed implicitly."
         ),
-        annotations=_READ_ONLY,
+        annotations=_PREPARE,
     )
     async def prepare_workspace(
         idempotency_key: IdempotencyKey | None = None,
@@ -465,9 +465,9 @@ def create_server(
         description=(
             "Create or replace one known UTF-8 text file. Supports create-only, overwrite, "
             "hash-checked overwrite, dry-run, and line-ending control. The target must remain "
-            "inside the workspace root after path and symlink/junction resolution."
+            "inside the workspace root after path and symlink resolution."
         ),
-        annotations=_READ_ONLY,
+        annotations=_WRITE,
     )
     async def workspace_write_file(
         workspace_id: WorkspaceId,
@@ -518,7 +518,7 @@ def create_server(
             "Changes are committed atomically with rollback on failure. Every patch path is "
             "confined to the workspace root."
         ),
-        annotations=_READ_ONLY,
+        annotations=_WRITE,
     )
     async def workspace_apply_patch(
         workspace_id: WorkspaceId,
@@ -557,18 +557,18 @@ def create_server(
 
     @server.tool(
         name="workspaceCommand",
-        title="Run or manage PowerShell",
+        title="Run or manage Bash",
         description=(
-            "Run arbitrary PowerShell 7 work with the full permissions of the service OS account; "
+            "Run arbitrary Bash work with the full permissions of the service OS account; "
             "this tool is intentionally not path-confined to the workspace root. start returns "
             "logs after a "
             "short synchronous window; running operations are followed with get, which waits "
             "briefly for state/log changes and returns incremental stdout/stderr. logs rereads "
-            "historical output; cancel stops the process tree; list enumerates operations. "
+            "historical output; cancel stops the POSIX process group; list enumerates operations. "
             "start requires idempotency_key, workspace_id, and script; get/logs/cancel require "
             "operation_id."
         ),
-        annotations=_READ_ONLY,
+        annotations=_COMMAND,
     )
     async def workspace_command(
         action: Literal["start", "get", "logs", "cancel", "list"],

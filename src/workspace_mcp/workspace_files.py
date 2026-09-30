@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -238,6 +239,9 @@ class LocalWorkspaceService:
                 resolved_path=resolved,
                 before=previous_bytes,
                 after=data,
+                before_mode=(
+                    stat.S_IMODE(resolved.stat().st_mode) if previous_bytes is not None else None
+                ),
             )
             changed, diff_stat = describe_changes(prepared)
             if not dry_run:
@@ -370,7 +374,7 @@ class LocalWorkspaceService:
             self._operations = WorkspaceOperationManager(
                 OperationSettings(
                     root=runtime_root,
-                    shell=env_value("WORKSPACE_PWSH_PATH") or "pwsh",
+                    shell=env_value("WORKSPACE_SHELL_PATH") or "/bin/bash",
                     sync_wait_seconds=max(0, env_int("WORKSPACE_COMMAND_SYNC_WAIT_SECONDS", 5)),
                     default_timeout_seconds=env_int("WORKSPACE_COMMAND_TIMEOUT_SECONDS", 120),
                     max_timeout_seconds=env_int("WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS", 3600),

@@ -12,7 +12,28 @@
 - 文件写入虽然支持 LF/CRLF，但 patch 路径会把已有文件统一改写成 LF；
 - 文本事务写入通过临时文件替换目标文件，在 Linux 上还需要额外关注原文件 POSIX 权限位，尤其是 executable bit。
 
-本分支的目标是先形成一份可审查的 Linux 原生改造方案。当前阶段只提交计划，不修改实现。
+本分支现已进入实现阶段：以下方案对应的 Linux 原生 runner、文件编辑语义、测试、配置和文档均在本分支落地。该文档同时作为实现依据与审查清单。
+
+### 当前实现状态
+
+已实现：
+
+- `workspaceCommand` 从 PowerShell 7 改为 `/bin/bash --noprofile --norc -c`；
+- 删除 Windows Job Object、`kernel32`、`taskkill` 和 ready-file attach 流程；
+- 使用 `start_new_session=True` 创建独立 POSIX session/process group；
+- timeout、cancel、shutdown 使用 SIGTERM -> grace -> SIGKILL；
+- root shell 正常退出后仍清理同 PGID 的普通后台 descendants；
+- operation 对外字段由 `job_assigned` 改为 `process_group_id`；
+- `workspaceWriteFile` 和 `workspaceApplyPatch` 保留已有文件的 LF/CRLF 风格；
+- 新文件在 `line_ending=preserve` 时按 Linux 语义使用 LF；
+- overwrite/patch 保留已有 POSIX mode/executable bit；
+- 增加 `.gitattributes` 固定 Linux 运行相关文本文件使用 LF；
+- 增加 POSIX process-group、SIGTERM/SIGKILL、`setsid` 边界和文件 mode 回归测试；
+- README、环境变量、MCP tool description 和项目描述均改为 Linux/Bash 语义；
+- 按审查要求删除旧的 `MCP_MIGRATION_PLAN.md`，只保留本文档作为 Linux 版本设计依据；
+- 增加 Ubuntu GitHub Actions，用真实 Linux 环境执行 Ruff 和完整测试。
+
+本地 Windows 宿主可执行的跨平台测试用于快速回归；POSIX 专属测试以 Ubuntu CI 的真实结果为最终验证依据。
 
 ---
 
@@ -633,15 +654,9 @@ WORKSPACE_SHELL_PATH=/bin/bash
 
 ### `MCP_MIGRATION_PLAN.md`
 
-现有文档多处明确写“保留任意 PowerShell”。
+旧文档基于 Windows/PowerShell 迁移目标，已按本轮审查要求删除。
 
-Linux 分支实现时需要同步改为：
-
-- arbitrary Linux shell/Bash；
-- POSIX process group；
-- Linux 验收步骤。
-
-避免设计文档与代码行为互相矛盾。
+Linux 版本只维护 `LINUX_MCP_MIGRATION_PLAN.md`，避免两份设计文档出现互相矛盾的运行时语义。
 
 ---
 
@@ -772,9 +787,11 @@ printf '%s\n' 'content' > file
 更新：
 
 - README；
-- `MCP_MIGRATION_PLAN.md`。
+- 删除旧 `MCP_MIGRATION_PLAN.md`；
+- 维护 `LINUX_MCP_MIGRATION_PLAN.md`；
+- 增加 Ubuntu GitHub Actions。
 
-然后必须在真实 Linux 主机执行：
+真实 Linux 验证执行：
 
 ```bash
 python -m pytest -q

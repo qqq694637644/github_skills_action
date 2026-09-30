@@ -1,7 +1,7 @@
 [project]
 name = "workspace-mcp"
 version = "1.0.0"
-description = "Personal Remote Workspace MCP server with persistent workspaces and PowerShell execution"
+description = "Personal Remote Workspace MCP server with persistent workspaces and Linux Bash execution"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

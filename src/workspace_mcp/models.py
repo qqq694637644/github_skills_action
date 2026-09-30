@@ -201,7 +201,7 @@ class WorkspaceOperationSummary(WorkspaceModel):
     script_summary: str
     state: OperationState
     root_pid: int | None = None
-    job_assigned: bool = False
+    process_group_id: int | None = None
     started_at: str
     deadline_at: str
     finished_at: str | None = None

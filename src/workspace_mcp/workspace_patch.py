@@ -5,6 +5,7 @@ import hashlib
 import os
 import secrets
 import shutil
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -41,6 +42,7 @@ class FileSnapshot:
     resolved_path: Path
     existed: bool
     data: bytes | None
+    mode: int | None
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,7 @@ class PreparedFileChange:
     resolved_path: Path
     before: bytes | None
     after: bytes | None
+    before_mode: int | None = None
 
 
 def sha256_hex(data: bytes) -> str:
@@ -120,9 +123,17 @@ def snapshot_files(root: Path, paths: list[str]) -> list[FileSnapshot]:
                     "WORKSPACE_INVALID_PATH",
                     f"Workspace text operations only support files: {path}",
                 )
-            snapshots.append(FileSnapshot(path, resolved, True, resolved.read_bytes()))
+            snapshots.append(
+                FileSnapshot(
+                    path,
+                    resolved,
+                    True,
+                    resolved.read_bytes(),
+                    stat.S_IMODE(resolved.stat().st_mode),
+                )
+            )
         else:
-            snapshots.append(FileSnapshot(path, resolved, False, None))
+            snapshots.append(FileSnapshot(path, resolved, False, None, None))
     return snapshots
 
 
@@ -222,6 +233,7 @@ def prepare_text_patch(
     operations: list[TextPatchOperation],
     snapshots: list[FileSnapshot],
 ) -> list[PreparedFileChange]:
+    snapshot_by_path = {snapshot.path: snapshot for snapshot in snapshots}
     current = {snapshot.path: snapshot.data for snapshot in snapshots}
     for operation in operations:
         if operation.kind == "add":
@@ -239,12 +251,18 @@ def prepare_text_patch(
                     f"Patch update target no longer exists: {operation.path}",
                 )
             assert_text_bytes(original, path=operation.path)
+            line_ending = _detect_line_ending(original)
             original_text = original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
             lines, trailing = _split_text_lines(original_text)
             new_lines = _apply_hunks(lines, operation.hunks, operation.path)
-            current[operation.path] = _join_lines(
+            rendered = _join_lines(
                 new_lines,
                 trailing_newline=trailing,
+            )
+            current[operation.path] = normalize_line_endings(
+                rendered,
+                line_ending=line_ending,
+                previous_bytes=None,
             ).encode("utf-8")
     return [
         PreparedFileChange(
@@ -252,6 +270,7 @@ def prepare_text_patch(
             resolved_path=snapshot.resolved_path,
             before=snapshot.data,
             after=current[snapshot.path],
+            before_mode=snapshot_by_path[snapshot.path].mode,
         )
         for snapshot in snapshots
         if snapshot.data != current[snapshot.path]
@@ -264,6 +283,7 @@ def prepare_write_change(
     resolved_path: Path,
     before: bytes | None,
     after: bytes,
+    before_mode: int | None = None,
 ) -> list[PreparedFileChange]:
     if before == after:
         return []
@@ -273,6 +293,7 @@ def prepare_write_change(
             resolved_path=resolved_path,
             before=before,
             after=after,
+            before_mode=before_mode,
         )
     ]
 
@@ -294,6 +315,8 @@ def commit_prepared_changes(root: Path, changes: list[PreparedFileChange]) -> No
                 temporary = staged_dir / f"{index:04d}.stage"
                 staged[change.path] = temporary
                 temporary.write_bytes(change.after)
+                if change.before_mode is not None:
+                    os.chmod(temporary, change.before_mode)
 
         for index, change in enumerate(changes):
             target = change.resolved_path
@@ -430,14 +453,7 @@ def _missing_parent_dirs(path: Path) -> set[Path]:
 
 def normalize_line_endings(content: str, *, line_ending: str, previous_bytes: bytes | None) -> str:
     if line_ending == "preserve":
-        if (
-            previous_bytes
-            and b"\r\n" in previous_bytes
-            and previous_bytes.count(b"\r\n") >= previous_bytes.count(b"\n")
-        ):
-            line_ending = "crlf"
-        else:
-            return content
+        line_ending = _detect_line_ending(previous_bytes) if previous_bytes is not None else "lf"
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     if line_ending == "lf":
         return normalized
@@ -447,6 +463,15 @@ def normalize_line_endings(content: str, *, line_ending: str, previous_bytes: by
         "VALIDATION_ERROR",
         f"Unsupported line ending mode: {line_ending}",
     )
+
+
+def _detect_line_ending(data: bytes) -> Literal["lf", "crlf"]:
+    crlf_count = data.count(b"\r\n")
+    lf_count = data.count(b"\n") - crlf_count
+    cr_count = data.count(b"\r") - crlf_count
+    if crlf_count > 0 and crlf_count >= lf_count + cr_count:
+        return "crlf"
+    return "lf"
 
 
 def _collect_operation_body(lines: list[str], start: int) -> tuple[list[str], int]:

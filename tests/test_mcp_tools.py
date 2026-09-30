@@ -139,7 +139,7 @@ def test_command_schema_advertises_runtime_configured_limits() -> None:
                         "action": "start",
                         "idempotency_key": "dynamic-limits-op-001",
                         "workspace_id": workspace_id,
-                        "script": "Write-Output unreachable",
+                        "script": "printf unreachable",
                         "timeout_seconds": 43,
                     },
                 )
@@ -218,13 +218,16 @@ def test_mcp_tool_calls_return_structured_content_and_new_command_follow_shape()
         assert "WORKSPACE_PATH_OUTSIDE_ROOT" in str(escaped.value)
         assert not (root / "workspaces" / "escape.txt").exists()
 
+        if os.name != "posix":
+            return
+
         start = await server.call_tool(
             "workspaceCommand",
             {
                 "action": "start",
                 "idempotency_key": "mcp-tool-command-001",
                 "workspace_id": workspace_id,
-                "script": "Write-Output 'mcp-output'",
+                "script": "printf '%s\n' 'mcp-output'",
                 "plain_output": True,
             },
         )

@@ -31,4 +31,4 @@ The expanded monitor renders structured backend activity as `NOW` and `RECENT` c
 
 The expanded monitor also includes a `Skills` menu. The configured backend catalog is fetched once on demand and persisted by the userscript across ChatGPT page reloads. Only `↻` explicitly refreshes that catalog. Clicking a Skill inserts `loadSkills(["<skill-id>"])` at the ChatGPT composer caret without sending the message.
 
-The backend field accepts either a service root such as `https://example.com` or an MCP endpoint such as `https://example.com/mcp`. REST side-channel requests such as `/v1/action-logs` derive their base by removing only a final `/mcp` path segment, so MCP OAuth and the userscript Bearer token remain separate concerns.
+The backend field is the REST API base URL and is used as-is. For example, with `https://githubaction.giize.com/mcp-app`, the monitor requests `https://githubaction.giize.com/mcp-app/v1/action-logs`. MCP transport paths are configured separately by the MCP client/server deployment.

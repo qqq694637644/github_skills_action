@@ -1,5 +1,3 @@
-import { apiBaseFromBackend } from '../profile/profile-store.js';
-
 export function createSkillCatalogClient({ getProfile }) {
   const cache = new Map();
   const pending = new Map();
@@ -16,7 +14,7 @@ export function createSkillCatalogClient({ getProfile }) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'GET',
-        url: `${apiBaseFromBackend(profile.backend)}/v1/skills`,
+        url: `${profile.backend}/v1/skills`,
         headers,
         timeout: 7000,
         onload(response) {

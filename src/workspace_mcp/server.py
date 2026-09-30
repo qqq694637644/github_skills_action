@@ -12,10 +12,19 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from pydantic import AnyHttpUrl, BaseModel, ValidationError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .auth import JWTTokenVerifier
 from .config import MCPSettings
-from .logging import command_for_log, log_error, log_event
+from .logging import (
+    command_for_log,
+    log_action,
+    log_action_error,
+    log_activity,
+    new_activity_id,
+    wait_for_action_events,
+)
 from .models import (
     ContextLines,
     IdempotencyKey,
@@ -316,8 +325,19 @@ def create_server(
             response = PrepareWorkspaceResponse.model_validate(
                 await service.prepare_workspace(**request.model_dump())
             )
-            log_event(
-                "prepare_workspace",
+            log_action(
+                "prepareWorkspace",
+                activity={
+                    "kind": "generic",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "prepare_workspace",
+                        "workspace_id": response.workspace_id,
+                        "created": response.created,
+                        "empty": response.empty,
+                    },
+                },
+                requested_workspace_id=request.workspace_id,
                 workspace_id=response.workspace_id,
                 created=response.created,
                 empty=response.empty,
@@ -327,6 +347,21 @@ def create_server(
                 response, f"Workspace {response.workspace_id} {state}; empty={response.empty}."
             )
         except WorkspaceToolError as exc:
+            log_action_error(
+                "prepareWorkspace",
+                workspace_id=request.workspace_id,
+                error_code=exc.code,
+                activity={
+                    "kind": "generic",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "prepare_workspace",
+                        "workspace_id": request.workspace_id,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
+            )
             raise _tool_error(exc) from exc
 
     @server.tool(
@@ -366,9 +401,50 @@ def create_server(
             max_bytes_per_file=max_bytes_per_file,
             max_bytes=max_bytes,
         )
+        activity_id = new_activity_id("exploration")
+        log_activity(
+            activity_id=activity_id,
+            kind="exploration",
+            phase="started",
+            payload={
+                "operation": "inspect",
+                "paths": request.paths,
+                "queries": request.queries,
+            },
+            legacy_action="workspaceInspect",
+            legacy_fields={"phase": "started", "paths": request.paths, "queries": request.queries},
+        )
         try:
             response = WorkspaceInspectResponse.model_validate(
                 await service.inspect(**request.model_dump())
+            )
+            log_action(
+                "workspaceInspect",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "inspect",
+                        "paths": request.paths,
+                        "queries": request.queries,
+                        "tree_entries": len(response.tree),
+                        "searches": [
+                            {"query": item.query, "match_count": item.match_count}
+                            for item in response.searches
+                        ],
+                        "files": [item.path for item in response.files],
+                        "truncated": response.truncated,
+                    },
+                },
+                workspace_id=request.workspace_id,
+                paths=request.paths,
+                queries=request.queries,
+                max_depth=request.max_depth if request.max_depth != 2 else None,
+                tree_entries=len(response.tree),
+                search_count=len(response.searches),
+                files_read=len(response.files),
+                truncated=response.truncated,
             )
             return _success(
                 response,
@@ -377,6 +453,25 @@ def create_server(
                 f"{len(response.files)} file snippets; truncated={response.truncated}.",
             )
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceInspect",
+                workspace_id=request.workspace_id,
+                paths=request.paths,
+                queries=request.queries,
+                error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "inspect",
+                        "paths": request.paths,
+                        "queries": request.queries,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
+            )
             raise _tool_error(exc) from exc
 
     @server.tool(
@@ -410,9 +505,46 @@ def create_server(
             max_matches=max_matches,
             max_bytes=max_bytes,
         )
+        activity_id = new_activity_id("exploration")
+        log_activity(
+            activity_id=activity_id,
+            kind="exploration",
+            phase="started",
+            payload={
+                "operation": "search",
+                "query": request.query,
+                "paths": request.paths,
+            },
+            legacy_action="workspaceSearch",
+            legacy_fields={"phase": "started", "query": request.query, "paths": request.paths},
+        )
         try:
             response = WorkspaceSearchResponse.model_validate(
                 await service.search(**request.model_dump())
+            )
+            log_action(
+                "workspaceSearch",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "search",
+                        "query": request.query,
+                        "paths": request.paths,
+                        "match_count": response.match_count,
+                        "truncated": response.truncated,
+                    },
+                },
+                workspace_id=request.workspace_id,
+                query=request.query,
+                regex=True if request.regex else None,
+                case_sensitive=True if request.case_sensitive else None,
+                paths=request.paths,
+                context_lines=request.context_lines if request.context_lines != 2 else None,
+                max_matches=request.max_matches if request.max_matches != 100 else None,
+                match_count=response.match_count,
+                truncated=response.truncated,
             )
             return _success(
                 response,
@@ -420,6 +552,25 @@ def create_server(
                 f"truncated={response.truncated}.",
             )
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceSearch",
+                workspace_id=request.workspace_id,
+                query=request.query,
+                paths=request.paths,
+                error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "search",
+                        "query": request.query,
+                        "paths": request.paths,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
+            )
             raise _tool_error(exc) from exc
 
     @server.tool(
@@ -448,15 +599,60 @@ def create_server(
             max_bytes_per_file=max_bytes_per_file,
             max_bytes=max_bytes,
         )
+        activity_id = new_activity_id("exploration")
+        log_activity(
+            activity_id=activity_id,
+            kind="exploration",
+            phase="started",
+            payload={"operation": "read", "paths": request.paths},
+            legacy_action="workspaceReadFiles",
+            legacy_fields={"phase": "started", "paths": request.paths},
+        )
         try:
             response = WorkspaceReadFilesResponse.model_validate(
                 await service.read_files(**request.model_dump())
+            )
+            log_action(
+                "workspaceReadFiles",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "read",
+                        "paths": [item.path for item in response.files],
+                        "truncated": response.truncated,
+                    },
+                },
+                workspace_id=request.workspace_id,
+                paths=request.paths,
+                start_line=request.start_line if request.start_line != 1 else None,
+                max_lines=request.max_lines if request.max_lines != 200 else None,
+                files=len(response.files),
+                truncated=response.truncated,
             )
             return _success(
                 response,
                 f"Read {len(response.files)} file result(s); truncated={response.truncated}.",
             )
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceReadFiles",
+                workspace_id=request.workspace_id,
+                paths=request.paths,
+                error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "exploration",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "read",
+                        "paths": request.paths,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
+            )
             raise _tool_error(exc) from exc
 
     @server.tool(
@@ -492,15 +688,45 @@ def create_server(
             dry_run=dry_run,
             max_bytes=max_bytes,
         )
+        activity_id = new_activity_id("write")
+        log_activity(
+            activity_id=activity_id,
+            kind="write",
+            phase="started",
+            payload={"path": request.path, "mode": request.mode, "dry_run": request.dry_run},
+            legacy_action="workspaceWriteFile",
+            legacy_fields={"phase": "started", "path": request.path, "mode": request.mode},
+        )
         try:
             response = WorkspaceWriteFileResponse.model_validate(
                 await service.write_file(**request.model_dump(exclude={"encoding"}))
             )
-            log_event(
-                "workspace_write_file",
-                workspace_id=workspace_id,
-                path=path,
+            log_action(
+                "workspaceWriteFile",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "write",
+                    "phase": "completed",
+                    "payload": {
+                        "path": response.path,
+                        "operation": response.operation,
+                        "written": response.written,
+                        "dry_run": response.dry_run,
+                        "changed_files": [item.model_dump() for item in response.changed_files],
+                        "diff_stat": response.diff_stat,
+                    },
+                },
+                workspace_id=request.workspace_id,
+                path=request.path,
+                mode=request.mode,
+                line_ending=request.line_ending if request.line_ending != "preserve" else None,
+                dry_run=True if request.dry_run else None,
+                content_bytes=len(request.content.encode("utf-8")),
+                expected_sha256=request.expected_sha256,
+                written=response.written,
                 operation=response.operation,
+                bytes=response.bytes,
+                diff_stat=response.diff_stat,
             )
             return _success(
                 response,
@@ -508,6 +734,25 @@ def create_server(
                 f"dry_run={response.dry_run}.",
             )
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceWriteFile",
+                workspace_id=request.workspace_id,
+                path=request.path,
+                mode=request.mode,
+                dry_run=request.dry_run,
+                error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "write",
+                    "phase": "failed",
+                    "payload": {
+                        "path": request.path,
+                        "mode": request.mode,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
+            )
             raise _tool_error(exc) from exc
 
     @server.tool(
@@ -537,15 +782,46 @@ def create_server(
             max_changed_files=max_changed_files,
             max_patch_bytes=max_patch_bytes,
         )
+        activity_id = new_activity_id("patch")
+        log_activity(
+            activity_id=activity_id,
+            kind="patch",
+            phase="started",
+            payload={
+                "dry_run": request.dry_run,
+                "allow_delete": request.allow_delete,
+                "patch_bytes": len(request.patch.encode("utf-8")),
+            },
+            legacy_action="workspaceApplyPatch",
+            legacy_fields={
+                "phase": "started",
+                "patch_bytes": len(request.patch.encode("utf-8")),
+                "dry_run": request.dry_run,
+            },
+        )
         try:
             response = WorkspaceApplyPatchResponse.model_validate(
                 await service.apply_patch(**request.model_dump())
             )
-            log_event(
-                "workspace_apply_patch",
-                workspace_id=workspace_id,
-                dry_run=dry_run,
-                changed_files=len(response.changed_files),
+            log_action(
+                "workspaceApplyPatch",
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "patch",
+                    "phase": "completed",
+                    "payload": {
+                        "dry_run": response.dry_run,
+                        "changed_files": [item.model_dump() for item in response.changed_files],
+                        "diff_stat": response.diff_stat,
+                    },
+                },
+                workspace_id=request.workspace_id,
+                patch_bytes=len(request.patch.encode("utf-8")),
+                dry_run=True if request.dry_run else None,
+                allow_delete=True if request.allow_delete else None,
+                max_changed_files=request.max_changed_files,
+                changed_files=[item.path for item in response.changed_files],
+                diff_stat=response.diff_stat,
             )
             return _success(
                 response,
@@ -553,6 +829,24 @@ def create_server(
                 f"dry_run={response.dry_run}.",
             )
         except WorkspaceToolError as exc:
+            log_action_error(
+                "workspaceApplyPatch",
+                workspace_id=request.workspace_id,
+                patch_bytes=len(request.patch.encode("utf-8")),
+                dry_run=request.dry_run,
+                allow_delete=request.allow_delete,
+                error_code=exc.code,
+                activity={
+                    "activity_id": activity_id,
+                    "kind": "patch",
+                    "phase": "failed",
+                    "payload": {
+                        "dry_run": request.dry_run,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
+            )
             raise _tool_error(exc) from exc
 
     @server.tool(
@@ -621,13 +915,20 @@ def create_server(
                     max_bytes=request.max_bytes,
                 )
                 operation = WorkspaceOperationSummary.model_validate(result.pop("operation"))
-                log_event(
-                    "workspace_command",
+                log_action(
+                    "workspaceCommand",
+                    publish=False,
                     action="start",
                     workspace_id=request.workspace_id,
                     command=command_for_log(request.script),
+                    timeout_seconds=request.timeout_seconds,
+                    max_output_bytes=request.max_output_bytes,
+                    plain_output=True if request.plain_output else None,
+                    utf8_output=False if not request.utf8_output else None,
                     operation_id=operation.operation_id,
                     state=operation.state,
+                    exit_code=operation.exit_code,
+                    duration_ms=operation.duration_ms if operation.state != "running" else None,
                 )
                 response = WorkspaceCommandResponse(action="start", operation=operation, **result)
                 return _command_result(response)
@@ -667,11 +968,32 @@ def create_server(
             response = WorkspaceCommandResponse(action="list", operations=operations)
             return _command_result(response)
         except WorkspaceToolError as exc:
-            log_error(
-                "workspace_command",
-                action=action,
-                workspace_id=workspace_id,
-                operation_id=operation_id,
+            activity = None
+            publish = False
+            if request.action == "start" and request.script:
+                activity = {
+                    "activity_id": new_activity_id("command"),
+                    "kind": "command",
+                    "phase": "failed",
+                    "payload": {
+                        "command": command_for_log(request.script),
+                        "workspace_id": request.workspace_id,
+                        "state": "failed",
+                        "exit_code": None,
+                        "error_code": exc.code,
+                        "error_message": exc.message,
+                        "stdout_preview": [],
+                        "stderr_preview": [],
+                    },
+                }
+                publish = True
+            log_action_error(
+                "workspaceCommand",
+                activity=activity,
+                publish=publish,
+                action=request.action,
+                workspace_id=request.workspace_id,
+                operation_id=request.operation_id,
                 error_code=exc.code,
             )
             raise _tool_error(exc) from exc
@@ -681,13 +1003,25 @@ def create_server(
 
 def create_app(settings: MCPSettings | None = None):
     resolved = settings or MCPSettings.from_env()
-    return create_server(resolved).streamable_http_app(
+    app = create_server(resolved).streamable_http_app(
         streamable_http_path="/mcp",
         json_response=False,
         stateless_http=False,
         transport_security=_transport_security(resolved),
         host=resolved.host,
     )
+
+    def action_logs(request: Request) -> JSONResponse:
+        return JSONResponse(
+            wait_for_action_events(
+                after=int(request.query_params.get("after", "0")),
+                timeout=float(request.query_params.get("wait", "55")),
+                limit=int(request.query_params.get("limit", "50")),
+            )
+        )
+
+    app.add_route("/v1/action-logs", action_logs, methods=["GET"])
+    return app
 
 
 def main() -> None:

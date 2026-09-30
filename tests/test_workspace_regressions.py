@@ -532,13 +532,18 @@ def test_process_group_termination_never_waits_for_pipe_eof() -> None:
                 raise AssertionError("termination must not call proc.wait()")
 
         proc = FakeProcess()
+        group_states = [True, False]
+
+        def fake_group_exists(_: int) -> bool:
+            return group_states.pop(0) if group_states else False
+
         with (
             patch.object(operations_module.os, "getpgrp", return_value=1),
             patch.object(operations_module.os, "killpg"),
             patch.object(
                 operations_module,
                 "_process_group_exists",
-                side_effect=[True, False, False],
+                side_effect=fake_group_exists,
             ),
         ):
             await operations_module._terminate_process_group(proc, 424242, grace_seconds=1)

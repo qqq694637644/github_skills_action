@@ -12,6 +12,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from pydantic import AnyHttpUrl, BaseModel, ValidationError
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -1003,7 +1004,7 @@ def create_server(
 
 def create_app(settings: MCPSettings | None = None):
     resolved = settings or MCPSettings.from_env()
-    app = create_server(resolved).streamable_http_app(
+    mcp_app = create_server(resolved).streamable_http_app(
         streamable_http_path="/mcp",
         json_response=False,
         stateless_http=False,
@@ -1025,7 +1026,15 @@ def create_app(settings: MCPSettings | None = None):
             )
         )
 
+    @asynccontextmanager
+    async def lifespan(_: Starlette):
+        async with mcp_app.router.lifespan_context(mcp_app):
+            yield
+
+    app = Starlette(lifespan=lifespan)
     app.add_route("/v1/action-logs", action_logs, methods=["GET"])
+    app.add_route("/mcp/v1/action-logs", action_logs, methods=["GET"])
+    app.mount("/", mcp_app)
     return app
 
 

@@ -14,6 +14,7 @@ from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from pydantic import AnyHttpUrl, BaseModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.applications import Starlette
 
 from .auth import JWTTokenVerifier
 from .config import MCPSettings
@@ -1003,7 +1004,7 @@ def create_server(
 
 def create_app(settings: MCPSettings | None = None):
     resolved = settings or MCPSettings.from_env()
-    app = create_server(resolved).streamable_http_app(
+    mcp_app = create_server(resolved).streamable_http_app(
         streamable_http_path="/mcp",
         json_response=False,
         stateless_http=False,
@@ -1025,7 +1026,9 @@ def create_app(settings: MCPSettings | None = None):
             )
         )
 
+    app = Starlette()
     app.add_route("/v1/action-logs", action_logs, methods=["GET"])
+    app.mount("/", mcp_app)
     return app
 
 

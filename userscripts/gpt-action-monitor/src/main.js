@@ -2,9 +2,8 @@ import { createActivityStore } from './activity/activity-store.js';
 import { compactActivity } from './activity/presentation.js';
 import { createActionLogClient } from './api/action-log-client.js';
 import { createSkillCatalogClient } from './api/skill-catalog-client.js';
-import { createChatGPTAdapter } from './adapters/chatgpt.js';
 import { createComposerAdapter, loadSkillsCall } from './adapters/composer.js';
-import { loadProfiles, saveProfiles } from './profile/profile-store.js';
+import { loadProfile, saveProfile } from './profile/profile-store.js';
 import { createMonitorPanel } from './ui/monitor-panel.js';
 import { createSettingsPanel } from './ui/settings-panel.js';
 import { createSkillsMenu } from './ui/skills-menu.js';
@@ -12,16 +11,14 @@ import { createSkillsMenu } from './ui/skills-menu.js';
 (function () {
   'use strict';
 
-  let profiles = loadProfiles();
+  let profile = loadProfile();
   let monitorActive = false;
-  let activeProfile = null;
   let actionLogClient = null;
-  let chatAdapter = null;
   let activitySessionKey = null;
   let activitySessionCursor = null;
   const composerAdapter = createComposerAdapter();
   const skillCatalogClient = createSkillCatalogClient({
-    getProfile: () => activeProfile,
+    getProfile: () => profile,
   });
 
   const activityStore = createActivityStore();
@@ -48,34 +45,28 @@ import { createSkillsMenu } from './ui/skills-menu.js';
     const cursor = actionLogClient?.getCursor?.();
     if (Number.isInteger(cursor)) activitySessionCursor = cursor;
     monitorActive = false;
-    activeProfile = null;
     actionLogClient?.stop();
     actionLogClient = null;
     skillsMenu.close();
     monitorUi.unmount();
   }
 
-  function applyProfiles(nextProfiles) {
-    profiles = saveProfiles(nextProfiles);
+  function applyProfile(nextProfile) {
+    profile = saveProfile(nextProfile);
     deactivateMonitor();
-    if (document.visibilityState === 'visible') chatAdapter?.evaluateActivation();
+    if (document.visibilityState === 'visible') activateMonitor();
   }
 
   const settingsPanel = createSettingsPanel({
-    getProfiles: () => profiles,
-    onApplyProfiles: applyProfiles,
+    getProfile: () => profile,
+    onApplyProfile: applyProfile,
   });
 
-  function activateMonitor(_titleElement, profile) {
-    if (monitorActive && activeProfile?.id === profile.id) {
-      activeProfile = profile;
-      return;
-    }
-    if (monitorActive) deactivateMonitor();
+  function activateMonitor() {
+    if (monitorActive || !profile?.backend) return;
 
     monitorActive = true;
-    activeProfile = profile;
-    const nextSessionKey = `${profile.id}\u0000${profile.backend}`;
+    const nextSessionKey = profile.backend;
     if (activitySessionKey !== nextSessionKey) {
       activityStore.clear();
       activitySessionKey = nextSessionKey;
@@ -85,7 +76,7 @@ import { createSkillsMenu } from './ui/skills-menu.js';
     monitorUi.setStatus('idle');
 
     actionLogClient = createActionLogClient({
-      getProfile: () => activeProfile,
+      getProfile: () => profile,
       initialCursor: activitySessionCursor,
       onCursor: (cursor) => { activitySessionCursor = cursor; },
       onItems(items) {
@@ -106,19 +97,16 @@ import { createSkillsMenu } from './ui/skills-menu.js';
     if (document.visibilityState === 'visible') actionLogClient.start();
   }
 
-  chatAdapter = createChatGPTAdapter({
-    getProfiles: () => profiles,
-    onActivate: activateMonitor,
-    onDeactivate: deactivateMonitor,
-  });
-
   function suspend() {
     actionLogClient?.suspend();
     monitorUi.suspendActivity();
   }
 
   function resume() {
-    if (!monitorActive) return;
+    if (!monitorActive) {
+      activateMonitor();
+      return;
+    }
     monitorUi.resumeActivity();
     const active = activityStore.snapshot().active.at(0);
     if (active) monitorUi.queueActivity(compactActivity(active));
@@ -132,14 +120,9 @@ import { createSkillsMenu } from './ui/skills-menu.js';
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      chatAdapter.start();
-      resume();
-    } else {
-      chatAdapter.stop();
-      suspend();
-    }
+    if (document.visibilityState === 'visible') resume();
+    else suspend();
   });
 
-  if (document.visibilityState === 'visible') chatAdapter.start();
+  if (document.visibilityState === 'visible') activateMonitor();
 })();

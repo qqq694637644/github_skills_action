@@ -3,7 +3,6 @@ import { createActivityStore } from './src/activity/activity-store.js';
 import { presentActivity } from './src/activity/presentation.js';
 import { createActionLogClient } from './src/api/action-log-client.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
-import { createChatGPTAdapter } from './src/adapters/chatgpt.js';
 import { createComposerAdapter, loadSkillsCall } from './src/adapters/composer.js';
 import { summarize } from './src/formatter/action-formatter.js';
 import { validateBackend } from './src/profile/profile-store.js';
@@ -12,7 +11,6 @@ import { createMonitorPanel } from './src/ui/monitor-panel.js';
 import { MONITOR_CSS } from './src/ui/styles.js';
 import {
   FakeElement,
-  FakeMutationObserver,
   installDomFixture,
 } from './test/dom-fixture.mjs';
 
@@ -591,73 +589,6 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.equal(nowList.childElementCount, 0);
   assert.equal(recentList.childElementCount, 1);
   assert.equal(recentList.children[0].children[0].children[1].textContent, 'Ran pytest -q');
-}
-
-// Keep the currently active GPT title/profile pinned while its original title
-// element remains connected and still matches that profile.
-{
-  const { document } = installDomFixture();
-  const selector = 'div[type="button"][aria-haspopup="menu"]';
-  const profileA = { id: 'a', gptName: 'Alpha', enabled: true };
-  const profileB = { id: 'b', gptName: 'Beta', enabled: true };
-  const titleA = new FakeElement('div');
-  titleA._matches = true;
-  titleA.textContent = 'Alpha';
-  titleA.isConnected = true;
-  const titleB = new FakeElement('div');
-  titleB._matches = true;
-  titleB.textContent = 'Beta';
-  titleB.isConnected = true;
-  document.setQueryResults(selector, [titleA]);
-
-  const activations = [];
-  const adapter = createChatGPTAdapter({
-    getProfiles: () => [profileA, profileB],
-    onActivate: (_element, profile) => activations.push(profile.id),
-    onDeactivate: () => activations.push('deactivated'),
-  });
-  adapter.start();
-  assert.deepEqual(activations, ['a']);
-
-  document.setQueryResults(selector, [titleA, titleB]);
-  FakeMutationObserver.latest.trigger([{ target: document.body, addedNodes: [titleB] }]);
-  assert.deepEqual(activations, ['a']);
-
-  titleA.isConnected = false;
-  document.setQueryResults(selector, [titleB]);
-  FakeMutationObserver.latest.trigger([{ target: document.body, addedNodes: [titleB] }]);
-  assert.deepEqual(activations, ['a', 'b']);
-  adapter.stop();
-}
-
-// GPT title metadata such as a model/version badge must not become part of the
-// configured GPT name. ChatGPT currently renders it as a child element next to
-// the title's direct text node (for example: github_skill <span>5.5</span>).
-{
-  const { document } = installDomFixture();
-  const selector = 'div[type="button"][aria-haspopup="menu"]';
-  const profile = { id: 'github', gptName: 'github_skill', enabled: true };
-  const title = new FakeElement('div');
-  title._matches = true;
-  title.textContent = 'github_skill5.5';
-  title.childNodes = [
-    { nodeType: Node.TEXT_NODE, textContent: 'github_skill' },
-    { nodeType: Node.ELEMENT_NODE, textContent: '5.5' },
-  ];
-  title.isConnected = true;
-  document.setQueryResults(selector, [title]);
-
-  const activations = [];
-  const adapter = createChatGPTAdapter({
-    getProfiles: () => [profile],
-    onActivate: (_element, matchedProfile) => activations.push(matchedProfile.id),
-    onDeactivate: () => activations.push('deactivated'),
-  });
-  adapter.start();
-  assert.deepEqual(activations, ['github']);
-  FakeMutationObserver.latest.trigger([{ target: title, addedNodes: [] }]);
-  assert.deepEqual(activations, ['github']);
-  adapter.stop();
 }
 
 // Deactivation/unmount must discard activity queued by the previous profile so

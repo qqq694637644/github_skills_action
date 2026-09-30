@@ -15,9 +15,8 @@
 // ==/UserScript==
 (() => {
   // src/constants.js
-  var PROFILES_KEY = "gptActionMonitorProfiles";
+  var PROFILE_KEY = "gptActionMonitorProfiles";
   var POSITION_KEY = "gptActionMonitorPosition";
-  var GPT_TITLE_SELECTOR = 'div[type="button"][aria-haspopup="menu"]';
   var POLL_WAIT_SECONDS = 55;
   var RETRY_MS = 3e3;
   var ACTIVITY_VISIBLE_MS = 4e3;
@@ -921,86 +920,6 @@
     return { list };
   }
 
-  // src/adapters/chatgpt.js
-  function createChatGPTAdapter({ getProfiles, onActivate, onDeactivate }) {
-    let observer = null;
-    let activeTitleElement = null;
-    let activeProfileId = null;
-    function titleName(element) {
-      if (!element) return "";
-      const directText = [...element.childNodes || []].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent || "").join(" ").replace(/\s+/g, " ").trim();
-      if (directText) return directText;
-      return (element.textContent || "").replace(/\s+/g, " ").trim();
-    }
-    function matchingProfile(element) {
-      if (!element || element.nodeType !== Node.ELEMENT_NODE || !element.matches(GPT_TITLE_SELECTOR)) return null;
-      return getProfiles().find((profile) => profile.enabled && profile.gptName === titleName(element)) || null;
-    }
-    function findTargetTitle(root = document) {
-      if (root.nodeType === Node.ELEMENT_NODE) {
-        const profile = matchingProfile(root);
-        if (profile) return { element: root, profile };
-      }
-      if (typeof root.querySelectorAll !== "function") return null;
-      for (const element of root.querySelectorAll(GPT_TITLE_SELECTOR)) {
-        const profile = matchingProfile(element);
-        if (profile) return { element, profile };
-      }
-      return null;
-    }
-    function evaluateActivation() {
-      const target = findTargetTitle(document);
-      if (target) activate(target.element, target.profile);
-      else deactivate();
-    }
-    function activate(element, profile) {
-      activeTitleElement = element;
-      activeProfileId = profile.id;
-      onActivate(element, profile);
-    }
-    function deactivate() {
-      activeTitleElement = null;
-      activeProfileId = null;
-      onDeactivate();
-    }
-    function targetFromMutation(mutation) {
-      const mutationElement = mutation.target.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target.parentElement;
-      const containingTitle = mutationElement?.closest?.(GPT_TITLE_SELECTOR);
-      const containingProfile = matchingProfile(containingTitle);
-      if (containingProfile) return { element: containingTitle, profile: containingProfile };
-      for (const node of mutation.addedNodes) {
-        const target = findTargetTitle(node);
-        if (target) return target;
-      }
-      return null;
-    }
-    function start() {
-      if (observer || !document.body) return;
-      observer = new MutationObserver((mutations) => {
-        if (activeProfileId) {
-          const currentProfile = activeTitleElement?.isConnected ? matchingProfile(activeTitleElement) : null;
-          if (currentProfile?.id === activeProfileId) return;
-          evaluateActivation();
-          return;
-        }
-        for (const mutation of mutations) {
-          const target = targetFromMutation(mutation);
-          if (target) {
-            activate(target.element, target.profile);
-            return;
-          }
-        }
-      });
-      observer.observe(document.body, { childList: true, characterData: true, subtree: true });
-      evaluateActivation();
-    }
-    function stop() {
-      observer?.disconnect();
-      observer = null;
-    }
-    return { start, stop, evaluateActivation };
-  }
-
   // src/adapters/composer.js
   var CONTENTEDITABLE_SELECTOR = '[data-composer-body] #prompt-textarea[contenteditable="true"], #prompt-textarea[contenteditable="true"]';
   var TEXTAREA_SELECTOR = '[data-composer-body] textarea[name="prompt-textarea"], textarea[name="prompt-textarea"]';
@@ -1092,30 +1011,24 @@
   }
 
   // src/profile/profile-store.js
-  function createProfileId() {
-    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-    return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-  }
   function normalizeBackend(value) {
     return String(value || "").trim().replace(/\/+$/, "");
   }
   function normalizeProfile(profile) {
     return {
-      id: String(profile?.id || createProfileId()),
-      gptName: String(profile?.gptName || "").trim(),
       backend: normalizeBackend(profile?.backend),
-      token: String(profile?.token || "").trim(),
-      enabled: profile?.enabled !== false
+      token: String(profile?.token || "").trim()
     };
   }
-  function loadProfiles() {
-    const stored = GM_getValue(PROFILES_KEY, null);
-    if (!Array.isArray(stored)) return [];
-    return stored.map(normalizeProfile).filter((profile) => profile.gptName && profile.backend);
+  function loadProfile() {
+    const stored = GM_getValue(PROFILE_KEY, null);
+    const source = Array.isArray(stored) ? stored.find((profile) => profile?.enabled !== false && profile?.backend) || stored.find((profile) => profile?.backend) : stored;
+    const normalized = normalizeProfile(source);
+    return normalized.backend ? normalized : null;
   }
-  function saveProfiles(profiles) {
-    const normalized = profiles.map(normalizeProfile);
-    GM_setValue(PROFILES_KEY, normalized);
+  function saveProfile(profile) {
+    const normalized = normalizeProfile(profile);
+    GM_setValue(PROFILE_KEY, normalized);
     return normalized;
   }
   function validateBackend(value) {
@@ -1587,46 +1500,6 @@
         color: color-mix(in srgb, CanvasText 62%, transparent);
         font-size: 12px;
       }
-      #gam-settings-overlay .gam-profile-list { display: grid; gap: 8px; }
-      #gam-settings-overlay .gam-profile-row {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 12px;
-        align-items: center;
-        min-height: 58px;
-        padding: 9px 10px 9px 12px;
-        border: 1px solid color-mix(in srgb, CanvasText 11%, transparent);
-        border-radius: 10px;
-      }
-      #gam-settings-overlay .gam-profile-main { min-width: 0; }
-      #gam-settings-overlay .gam-profile-name-line {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        min-width: 0;
-      }
-      #gam-settings-overlay .gam-profile-state {
-        width: 7px;
-        height: 7px;
-        flex: 0 0 7px;
-        border-radius: 50%;
-        background: #22a35a;
-      }
-      #gam-settings-overlay .gam-profile-row[data-enabled="false"] .gam-profile-state { background: #8b8b8b; }
-      #gam-settings-overlay .gam-profile-name {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-weight: 620;
-      }
-      #gam-settings-overlay .gam-profile-backend {
-        margin: 3px 0 0 14px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        color: color-mix(in srgb, CanvasText 58%, transparent);
-        font-size: 12px;
-      }
       #gam-settings-overlay .gam-button {
         min-height: 32px;
         padding: 5px 11px;
@@ -1643,21 +1516,7 @@
         color: white;
       }
       #gam-settings-overlay .gam-button-primary:hover { background: #1d6938; }
-      #gam-settings-overlay .gam-list-footer {
-        display: flex;
-        justify-content: flex-start;
-        margin-top: 12px;
-      }
-      #gam-settings-overlay .gam-empty {
-        padding: 34px 18px;
-        border: 1px dashed color-mix(in srgb, CanvasText 18%, transparent);
-        border-radius: 10px;
-        text-align: center;
-        color: color-mix(in srgb, CanvasText 58%, transparent);
-      }
       #gam-settings-overlay .gam-editor { display: grid; gap: 13px; }
-      #gam-settings-overlay .gam-editor[hidden],
-      #gam-settings-overlay .gam-list-view[hidden] { display: none; }
       #gam-settings-overlay .gam-field { display: grid; gap: 6px; }
       #gam-settings-overlay .gam-field > span { font-weight: 600; }
       #gam-settings-overlay .gam-input {
@@ -1672,7 +1531,6 @@
       }
       #gam-settings-overlay .gam-input:focus { border-color: #4f8e68; box-shadow: 0 0 0 2px rgba(35, 122, 66, .12); }
       #gam-settings-overlay .gam-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
-      #gam-settings-overlay .gam-check-row { display: flex; gap: 8px; align-items: center; }
       #gam-settings-overlay .gam-form-message { min-height: 19px; font-size: 12px; }
       #gam-settings-overlay .gam-form-message[data-state="error"] { color: #c53e3e; }
       #gam-settings-overlay .gam-form-message[data-state="success"] { color: #238349; }
@@ -1684,7 +1542,6 @@
         margin-top: 2px;
       }
       #gam-settings-overlay .gam-editor-footer .gam-spacer { flex: 1; }
-      #gam-settings-overlay .gam-delete { color: #b63c3c; }
       @media (max-width: 520px) {
         #gam-settings-overlay { padding: 8px; }
         #gam-settings-overlay .gam-settings-card { max-height: calc(100vh - 16px); }
@@ -2151,14 +2008,6 @@
   }
 
   // src/ui/settings-panel.js
-  function backendLabel(backend) {
-    try {
-      const parsed = new URL(backend);
-      return parsed.host + (parsed.pathname === "/" ? "" : parsed.pathname);
-    } catch (_) {
-      return backend;
-    }
-  }
   function testProfileConnection(profile, statusElement, button) {
     const validation = validateBackend(profile.backend);
     if (!validation.ok) {
@@ -2201,7 +2050,7 @@
       }
     });
   }
-  function createSettingsPanel({ getProfiles, onApplyProfiles }) {
+  function createSettingsPanel({ getProfile, onApplyProfile }) {
     let overlay = null;
     let style = null;
     function close() {
@@ -2223,18 +2072,8 @@
           <button class="gam-icon-button gam-settings-close" type="button" aria-label="\u5173\u95ED\u914D\u7F6E">\xD7</button>
         </div>
         <div class="gam-settings-body">
-          <section class="gam-list-view">
-            <p class="gam-settings-note">\u5F53\u524D GPT \u540D\u79F0\u4F1A\u7CBE\u786E\u5339\u914D\u4E00\u6761\u5DF2\u542F\u7528\u914D\u7F6E\uFF1B\u6CA1\u6709\u5339\u914D\u65F6\u76D1\u63A7\u4E0D\u4F1A\u8FD0\u884C\u3002</p>
-            <div class="gam-profile-list"></div>
-            <div class="gam-list-footer">
-              <button class="gam-button gam-add-profile" type="button">\uFF0B \u6DFB\u52A0\u76D1\u63A7\u76EE\u6807</button>
-            </div>
-          </section>
-          <form class="gam-editor" hidden>
-            <label class="gam-field">
-              <span>GPT \u540D\u79F0</span>
-              <input class="gam-input gam-gpt-name" type="text" autocomplete="off" placeholder="\u4F8B\u5982 github_skill" required>
-            </label>
+          <p class="gam-settings-note">\u76D1\u63A7\u59CB\u7EC8\u4F7F\u7528\u8FD9\u4E00\u7EC4\u540E\u7AEF\u914D\u7F6E\u3002</p>
+          <form class="gam-editor">
             <label class="gam-field">
               <span>\u540E\u7AEF\u5730\u5740</span>
               <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://skills.example.com" required>
@@ -2246,16 +2085,10 @@
                 <button class="gam-button gam-token-toggle" type="button">\u663E\u793A</button>
               </div>
             </label>
-            <label class="gam-check-row">
-              <input class="gam-enabled" type="checkbox" checked>
-              <span>\u542F\u7528\u6B64\u76D1\u63A7</span>
-            </label>
             <div class="gam-form-message" aria-live="polite"></div>
             <div class="gam-editor-footer">
-              <button class="gam-button gam-delete" type="button">\u5220\u9664</button>
               <span class="gam-spacer"></span>
               <button class="gam-button gam-test" type="button">\u6D4B\u8BD5\u8FDE\u63A5</button>
-              <button class="gam-button gam-cancel-edit" type="button">\u53D6\u6D88</button>
               <button class="gam-button gam-button-primary gam-save" type="submit">\u4FDD\u5B58</button>
             </div>
           </form>
@@ -2264,103 +2097,31 @@
     `;
       document.documentElement.appendChild(style);
       document.body.appendChild(overlay);
-      const listView = overlay.querySelector(".gam-list-view");
-      const list = overlay.querySelector(".gam-profile-list");
       const editor = overlay.querySelector(".gam-editor");
-      const gptNameInput = overlay.querySelector(".gam-gpt-name");
       const backendInput = overlay.querySelector(".gam-backend");
       const tokenInput = overlay.querySelector(".gam-token");
-      const enabledInput = overlay.querySelector(".gam-enabled");
       const formMessage = overlay.querySelector(".gam-form-message");
-      const deleteButton = overlay.querySelector(".gam-delete");
       const testButton = overlay.querySelector(".gam-test");
-      let editingId = null;
-      function profiles() {
-        return getProfiles();
-      }
-      function renderList() {
-        list.replaceChildren();
-        if (!profiles().length) {
-          const empty = document.createElement("div");
-          empty.className = "gam-empty";
-          empty.textContent = "\u8FD8\u6CA1\u6709\u76D1\u63A7\u914D\u7F6E\u3002\u6DFB\u52A0\u4E00\u7EC4 GPT\u3001\u540E\u7AEF\u5730\u5740\u548C Bearer Token\u3002";
-          list.appendChild(empty);
-          return;
-        }
-        for (const profile of profiles()) {
-          const row = document.createElement("div");
-          row.className = "gam-profile-row";
-          row.dataset.enabled = String(profile.enabled);
-          const main = document.createElement("div");
-          main.className = "gam-profile-main";
-          const nameLine = document.createElement("div");
-          nameLine.className = "gam-profile-name-line";
-          const dot = document.createElement("span");
-          dot.className = "gam-profile-state";
-          const name = document.createElement("span");
-          name.className = "gam-profile-name";
-          name.textContent = profile.gptName;
-          const backend = document.createElement("div");
-          backend.className = "gam-profile-backend";
-          backend.textContent = `${profile.enabled ? "\u5DF2\u542F\u7528" : "\u5DF2\u505C\u7528"} \xB7 ${backendLabel(profile.backend)}`;
-          nameLine.append(dot, name);
-          main.append(nameLine, backend);
-          const edit = document.createElement("button");
-          edit.className = "gam-button";
-          edit.type = "button";
-          edit.textContent = "\u7F16\u8F91";
-          edit.addEventListener("click", () => showEditor(profile));
-          row.append(main, edit);
-          list.appendChild(row);
-        }
-      }
+      const current = getProfile();
+      backendInput.value = current?.backend || "";
+      tokenInput.value = current?.token || "";
       function clearMessage() {
         formMessage.textContent = "";
         delete formMessage.dataset.state;
       }
-      function showEditor(profile = null) {
-        editingId = profile?.id || null;
-        gptNameInput.value = profile?.gptName || "";
-        backendInput.value = profile?.backend || "";
-        tokenInput.value = profile?.token || "";
-        tokenInput.type = "password";
-        overlay.querySelector(".gam-token-toggle").textContent = "\u663E\u793A";
-        enabledInput.checked = profile?.enabled !== false;
-        deleteButton.hidden = !profile;
-        clearMessage();
-        listView.hidden = true;
-        editor.hidden = false;
-        window.setTimeout(() => gptNameInput.focus(), 0);
-      }
-      function showList() {
-        editor.hidden = true;
-        listView.hidden = false;
-        editingId = null;
-        renderList();
-      }
       function formProfile() {
         return {
-          id: editingId || createProfileId(),
-          gptName: gptNameInput.value.trim(),
           backend: normalizeBackend(backendInput.value),
-          token: tokenInput.value.trim(),
-          enabled: enabledInput.checked
+          token: tokenInput.value.trim()
         };
       }
       function validateProfile(profile) {
-        if (!profile.gptName) return "\u8BF7\u8F93\u5165 GPT \u540D\u79F0\u3002";
-        const duplicate = profiles().find(
-          (item) => item.id !== editingId && item.gptName === profile.gptName
-        );
-        if (duplicate) return `GPT \u540D\u79F0 \u201C${profile.gptName}\u201D \u5DF2\u5B58\u5728\u3002`;
         const backendValidation = validateBackend(profile.backend);
         if (!backendValidation.ok) return backendValidation.message;
         profile.backend = backendValidation.backend;
         return "";
       }
       overlay.querySelector(".gam-settings-close").addEventListener("click", close);
-      overlay.querySelector(".gam-add-profile").addEventListener("click", () => showEditor());
-      overlay.querySelector(".gam-cancel-edit").addEventListener("click", showList);
       overlay.querySelector(".gam-token-toggle").addEventListener("click", (event) => {
         const visible = tokenInput.type === "text";
         tokenInput.type = visible ? "password" : "text";
@@ -2371,13 +2132,6 @@
         clearMessage();
         testProfileConnection(profile, formMessage, testButton);
       });
-      deleteButton.addEventListener("click", () => {
-        if (!editingId) return;
-        const profile = profiles().find((item) => item.id === editingId);
-        if (!profile || !confirm(`\u5220\u9664 \u201C${profile.gptName}\u201D \u7684\u76D1\u63A7\u914D\u7F6E\uFF1F`)) return;
-        onApplyProfiles(profiles().filter((item) => item.id !== editingId));
-        showList();
-      });
       editor.addEventListener("submit", (event) => {
         event.preventDefault();
         const profile = formProfile();
@@ -2387,21 +2141,17 @@
           formMessage.dataset.state = "error";
           return;
         }
-        const next = editingId ? profiles().map((item) => item.id === editingId ? profile : item) : [...profiles(), profile];
-        onApplyProfiles(next);
-        showList();
+        onApplyProfile(profile);
+        formMessage.textContent = "\u2713 \u5DF2\u4FDD\u5B58";
+        formMessage.dataset.state = "success";
       });
       overlay.addEventListener("click", (event) => {
         if (event.target === overlay) close();
       });
       overlay.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") {
-          if (!editor.hidden) showList();
-          else close();
-        }
+        if (event.key === "Escape") close();
       });
-      renderList();
-      overlay.querySelector(".gam-settings-close").focus();
+      window.setTimeout(() => backendInput.focus(), 0);
     }
     return { open, close };
   }
@@ -2511,16 +2261,14 @@
   // src/main.js
   (function() {
     "use strict";
-    let profiles = loadProfiles();
+    let profile = loadProfile();
     let monitorActive = false;
-    let activeProfile = null;
     let actionLogClient = null;
-    let chatAdapter = null;
     let activitySessionKey = null;
     let activitySessionCursor = null;
     const composerAdapter = createComposerAdapter();
     const skillCatalogClient = createSkillCatalogClient({
-      getProfile: () => activeProfile
+      getProfile: () => profile
     });
     const activityStore = createActivityStore();
     let monitorUi = null;
@@ -2545,30 +2293,24 @@
       const cursor = actionLogClient?.getCursor?.();
       if (Number.isInteger(cursor)) activitySessionCursor = cursor;
       monitorActive = false;
-      activeProfile = null;
       actionLogClient?.stop();
       actionLogClient = null;
       skillsMenu.close();
       monitorUi.unmount();
     }
-    function applyProfiles(nextProfiles) {
-      profiles = saveProfiles(nextProfiles);
+    function applyProfile(nextProfile) {
+      profile = saveProfile(nextProfile);
       deactivateMonitor();
-      if (document.visibilityState === "visible") chatAdapter?.evaluateActivation();
+      if (document.visibilityState === "visible") activateMonitor();
     }
     const settingsPanel = createSettingsPanel({
-      getProfiles: () => profiles,
-      onApplyProfiles: applyProfiles
+      getProfile: () => profile,
+      onApplyProfile: applyProfile
     });
-    function activateMonitor(_titleElement, profile) {
-      if (monitorActive && activeProfile?.id === profile.id) {
-        activeProfile = profile;
-        return;
-      }
-      if (monitorActive) deactivateMonitor();
+    function activateMonitor() {
+      if (monitorActive || !profile?.backend) return;
       monitorActive = true;
-      activeProfile = profile;
-      const nextSessionKey = `${profile.id}\0${profile.backend}`;
+      const nextSessionKey = profile.backend;
       if (activitySessionKey !== nextSessionKey) {
         activityStore.clear();
         activitySessionKey = nextSessionKey;
@@ -2577,7 +2319,7 @@
       monitorUi.mount();
       monitorUi.setStatus("idle");
       actionLogClient = createActionLogClient({
-        getProfile: () => activeProfile,
+        getProfile: () => profile,
         initialCursor: activitySessionCursor,
         onCursor: (cursor) => {
           activitySessionCursor = cursor;
@@ -2597,17 +2339,15 @@
       });
       if (document.visibilityState === "visible") actionLogClient.start();
     }
-    chatAdapter = createChatGPTAdapter({
-      getProfiles: () => profiles,
-      onActivate: activateMonitor,
-      onDeactivate: deactivateMonitor
-    });
     function suspend() {
       actionLogClient?.suspend();
       monitorUi.suspendActivity();
     }
     function resume() {
-      if (!monitorActive) return;
+      if (!monitorActive) {
+        activateMonitor();
+        return;
+      }
       monitorUi.resumeActivity();
       const active = activityStore.snapshot().active.at(0);
       if (active) monitorUi.queueActivity(compactActivity(active));
@@ -2618,14 +2358,9 @@
       if (monitorActive) monitorUi.keepInViewport();
     });
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        chatAdapter.start();
-        resume();
-      } else {
-        chatAdapter.stop();
-        suspend();
-      }
+      if (document.visibilityState === "visible") resume();
+      else suspend();
     });
-    if (document.visibilityState === "visible") chatAdapter.start();
+    if (document.visibilityState === "visible") activateMonitor();
   })();
 })();

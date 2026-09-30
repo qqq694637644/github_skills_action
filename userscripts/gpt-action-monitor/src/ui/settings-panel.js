@@ -1,14 +1,5 @@
-import { createProfileId, normalizeBackend, validateBackend } from '../profile/profile-store.js';
+import { normalizeBackend, validateBackend } from '../profile/profile-store.js';
 import { SETTINGS_CSS } from './styles.js';
-
-function backendLabel(backend) {
-  try {
-    const parsed = new URL(backend);
-    return parsed.host + (parsed.pathname === '/' ? '' : parsed.pathname);
-  } catch (_) {
-    return backend;
-  }
-}
 
 function testProfileConnection(profile, statusElement, button) {
   const validation = validateBackend(profile.backend);
@@ -55,7 +46,7 @@ function testProfileConnection(profile, statusElement, button) {
   });
 }
 
-export function createSettingsPanel({ getProfiles, onApplyProfiles }) {
+export function createSettingsPanel({ getProfile, onApplyProfile }) {
   let overlay = null;
   let style = null;
 
@@ -80,18 +71,8 @@ export function createSettingsPanel({ getProfiles, onApplyProfiles }) {
           <button class="gam-icon-button gam-settings-close" type="button" aria-label="关闭配置">×</button>
         </div>
         <div class="gam-settings-body">
-          <section class="gam-list-view">
-            <p class="gam-settings-note">当前 GPT 名称会精确匹配一条已启用配置；没有匹配时监控不会运行。</p>
-            <div class="gam-profile-list"></div>
-            <div class="gam-list-footer">
-              <button class="gam-button gam-add-profile" type="button">＋ 添加监控目标</button>
-            </div>
-          </section>
-          <form class="gam-editor" hidden>
-            <label class="gam-field">
-              <span>GPT 名称</span>
-              <input class="gam-input gam-gpt-name" type="text" autocomplete="off" placeholder="例如 github_skill" required>
-            </label>
+          <p class="gam-settings-note">监控始终使用这一组后端配置。</p>
+          <form class="gam-editor">
             <label class="gam-field">
               <span>后端地址</span>
               <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://skills.example.com" required>
@@ -103,16 +84,10 @@ export function createSettingsPanel({ getProfiles, onApplyProfiles }) {
                 <button class="gam-button gam-token-toggle" type="button">显示</button>
               </div>
             </label>
-            <label class="gam-check-row">
-              <input class="gam-enabled" type="checkbox" checked>
-              <span>启用此监控</span>
-            </label>
             <div class="gam-form-message" aria-live="polite"></div>
             <div class="gam-editor-footer">
-              <button class="gam-button gam-delete" type="button">删除</button>
               <span class="gam-spacer"></span>
               <button class="gam-button gam-test" type="button">测试连接</button>
-              <button class="gam-button gam-cancel-edit" type="button">取消</button>
               <button class="gam-button gam-button-primary gam-save" type="submit">保存</button>
             </div>
           </form>
@@ -123,105 +98,29 @@ export function createSettingsPanel({ getProfiles, onApplyProfiles }) {
     document.documentElement.appendChild(style);
     document.body.appendChild(overlay);
 
-    const listView = overlay.querySelector('.gam-list-view');
-    const list = overlay.querySelector('.gam-profile-list');
     const editor = overlay.querySelector('.gam-editor');
-    const gptNameInput = overlay.querySelector('.gam-gpt-name');
     const backendInput = overlay.querySelector('.gam-backend');
     const tokenInput = overlay.querySelector('.gam-token');
-    const enabledInput = overlay.querySelector('.gam-enabled');
     const formMessage = overlay.querySelector('.gam-form-message');
-    const deleteButton = overlay.querySelector('.gam-delete');
     const testButton = overlay.querySelector('.gam-test');
-    let editingId = null;
+    const current = getProfile();
 
-    function profiles() {
-      return getProfiles();
-    }
-
-    function renderList() {
-      list.replaceChildren();
-      if (!profiles().length) {
-        const empty = document.createElement('div');
-        empty.className = 'gam-empty';
-        empty.textContent = '还没有监控配置。添加一组 GPT、后端地址和 Bearer Token。';
-        list.appendChild(empty);
-        return;
-      }
-
-      for (const profile of profiles()) {
-        const row = document.createElement('div');
-        row.className = 'gam-profile-row';
-        row.dataset.enabled = String(profile.enabled);
-
-        const main = document.createElement('div');
-        main.className = 'gam-profile-main';
-        const nameLine = document.createElement('div');
-        nameLine.className = 'gam-profile-name-line';
-        const dot = document.createElement('span');
-        dot.className = 'gam-profile-state';
-        const name = document.createElement('span');
-        name.className = 'gam-profile-name';
-        name.textContent = profile.gptName;
-        const backend = document.createElement('div');
-        backend.className = 'gam-profile-backend';
-        backend.textContent = `${profile.enabled ? '已启用' : '已停用'} · ${backendLabel(profile.backend)}`;
-        nameLine.append(dot, name);
-        main.append(nameLine, backend);
-
-        const edit = document.createElement('button');
-        edit.className = 'gam-button';
-        edit.type = 'button';
-        edit.textContent = '编辑';
-        edit.addEventListener('click', () => showEditor(profile));
-        row.append(main, edit);
-        list.appendChild(row);
-      }
-    }
+    backendInput.value = current?.backend || '';
+    tokenInput.value = current?.token || '';
 
     function clearMessage() {
       formMessage.textContent = '';
       delete formMessage.dataset.state;
     }
 
-    function showEditor(profile = null) {
-      editingId = profile?.id || null;
-      gptNameInput.value = profile?.gptName || '';
-      backendInput.value = profile?.backend || '';
-      tokenInput.value = profile?.token || '';
-      tokenInput.type = 'password';
-      overlay.querySelector('.gam-token-toggle').textContent = '显示';
-      enabledInput.checked = profile?.enabled !== false;
-      deleteButton.hidden = !profile;
-      clearMessage();
-      listView.hidden = true;
-      editor.hidden = false;
-      window.setTimeout(() => gptNameInput.focus(), 0);
-    }
-
-    function showList() {
-      editor.hidden = true;
-      listView.hidden = false;
-      editingId = null;
-      renderList();
-    }
-
     function formProfile() {
       return {
-        id: editingId || createProfileId(),
-        gptName: gptNameInput.value.trim(),
         backend: normalizeBackend(backendInput.value),
         token: tokenInput.value.trim(),
-        enabled: enabledInput.checked,
       };
     }
 
     function validateProfile(profile) {
-      if (!profile.gptName) return '请输入 GPT 名称。';
-      const duplicate = profiles().find(
-        (item) => item.id !== editingId && item.gptName === profile.gptName,
-      );
-      if (duplicate) return `GPT 名称 “${profile.gptName}” 已存在。`;
       const backendValidation = validateBackend(profile.backend);
       if (!backendValidation.ok) return backendValidation.message;
       profile.backend = backendValidation.backend;
@@ -229,8 +128,6 @@ export function createSettingsPanel({ getProfiles, onApplyProfiles }) {
     }
 
     overlay.querySelector('.gam-settings-close').addEventListener('click', close);
-    overlay.querySelector('.gam-add-profile').addEventListener('click', () => showEditor());
-    overlay.querySelector('.gam-cancel-edit').addEventListener('click', showList);
     overlay.querySelector('.gam-token-toggle').addEventListener('click', (event) => {
       const visible = tokenInput.type === 'text';
       tokenInput.type = visible ? 'password' : 'text';
@@ -241,13 +138,6 @@ export function createSettingsPanel({ getProfiles, onApplyProfiles }) {
       clearMessage();
       testProfileConnection(profile, formMessage, testButton);
     });
-    deleteButton.addEventListener('click', () => {
-      if (!editingId) return;
-      const profile = profiles().find((item) => item.id === editingId);
-      if (!profile || !confirm(`删除 “${profile.gptName}” 的监控配置？`)) return;
-      onApplyProfiles(profiles().filter((item) => item.id !== editingId));
-      showList();
-    });
     editor.addEventListener('submit', (event) => {
       event.preventDefault();
       const profile = formProfile();
@@ -257,24 +147,18 @@ export function createSettingsPanel({ getProfiles, onApplyProfiles }) {
         formMessage.dataset.state = 'error';
         return;
       }
-      const next = editingId
-        ? profiles().map((item) => (item.id === editingId ? profile : item))
-        : [...profiles(), profile];
-      onApplyProfiles(next);
-      showList();
+      onApplyProfile(profile);
+      formMessage.textContent = '✓ 已保存';
+      formMessage.dataset.state = 'success';
     });
     overlay.addEventListener('click', (event) => {
       if (event.target === overlay) close();
     });
     overlay.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        if (!editor.hidden) showList();
-        else close();
-      }
+      if (event.key === 'Escape') close();
     });
 
-    renderList();
-    overlay.querySelector('.gam-settings-close').focus();
+    window.setTimeout(() => backendInput.focus(), 0);
   }
 
   return { open, close };

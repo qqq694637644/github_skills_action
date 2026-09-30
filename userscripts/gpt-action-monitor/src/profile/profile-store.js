@@ -1,9 +1,4 @@
-import { PROFILES_KEY } from '../constants.js';
-
-export function createProfileId() {
-  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
-  return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
+import { PROFILE_KEY } from '../constants.js';
 
 export function normalizeBackend(value) {
   return String(value || '').trim().replace(/\/+$/, '');
@@ -11,28 +6,24 @@ export function normalizeBackend(value) {
 
 export function normalizeProfile(profile) {
   return {
-    id: String(profile?.id || createProfileId()),
-    gptName: String(profile?.gptName || '').trim(),
     backend: normalizeBackend(profile?.backend),
     token: String(profile?.token || '').trim(),
-    enabled: profile?.enabled !== false,
   };
 }
 
-export function loadProfiles() {
-  const stored = GM_getValue(PROFILES_KEY, null);
-  if (!Array.isArray(stored)) return [];
-  return stored.map(normalizeProfile).filter((profile) => profile.gptName && profile.backend);
+export function loadProfile() {
+  const stored = GM_getValue(PROFILE_KEY, null);
+  const source = Array.isArray(stored)
+    ? stored.find((profile) => profile?.enabled !== false && profile?.backend) || stored.find((profile) => profile?.backend)
+    : stored;
+  const normalized = normalizeProfile(source);
+  return normalized.backend ? normalized : null;
 }
 
-export function saveProfiles(profiles) {
-  const normalized = profiles.map(normalizeProfile);
-  GM_setValue(PROFILES_KEY, normalized);
+export function saveProfile(profile) {
+  const normalized = normalizeProfile(profile);
+  GM_setValue(PROFILE_KEY, normalized);
   return normalized;
-}
-
-export function profileForName(profiles, name) {
-  return profiles.find((profile) => profile.enabled && profile.gptName === name) || null;
 }
 
 export function validateBackend(value) {

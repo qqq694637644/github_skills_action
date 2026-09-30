@@ -534,7 +534,7 @@ class WorkspaceOperationManager:
                     plain_output=plain_output,
                 )
             )
-            process_task = asyncio.create_task(proc.wait())
+            process_task = asyncio.create_task(_wait_for_root_process_exit(proc))
             timeout_task = asyncio.create_task(asyncio.sleep(self._remaining_seconds(runtime)))
             cancel_task = asyncio.create_task(runtime.cancel_event.wait())
             shutdown_task = asyncio.create_task(runtime.shutdown_event.wait())
@@ -815,6 +815,14 @@ async def _terminate_process_group(
                 await asyncio.wait_for(proc.wait(), timeout=max(1.0, grace))
             except TimeoutError:
                 pass
+
+
+async def _wait_for_root_process_exit(proc: asyncio.subprocess.Process) -> int:
+    """Observe the root process exit without waiting for descendant-held pipe EOF."""
+
+    while proc.returncode is None:
+        await asyncio.sleep(0.02)
+    return proc.returncode
 
 
 def _process_group_exists(process_group_id: int) -> bool:

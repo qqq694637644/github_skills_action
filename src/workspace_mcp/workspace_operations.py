@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import ctypes
 import hashlib
 import json
@@ -16,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
-from .action_logging import (
+from .logging import (
     command_for_log,
     log_activity,
     redact_text,
@@ -39,6 +40,66 @@ _ACTIVITY_OUTPUT_FLUSH_SECONDS = 0.2
 _ACTIVITY_OUTPUT_CHARS = 8_000
 _ACTIVITY_PREVIEW_CHARS = 16_384
 _ACTIVITY_PREVIEW_LINES = 3
+
+
+class _AnsiCsiStripper:
+    """Strip CSI escape sequences while preserving state across stream chunks."""
+
+    def __init__(self) -> None:
+        self._pending = bytearray()
+        self._intermediate = False
+
+    def feed(self, data: bytes, *, final: bool = False) -> bytes:
+        output = bytearray()
+        for byte in data:
+            if not self._pending:
+                if byte == 0x1B:
+                    self._pending.append(byte)
+                else:
+                    output.append(byte)
+                continue
+
+            if len(self._pending) == 1:
+                if byte == 0x5B:  # ESC [
+                    self._pending.append(byte)
+                    self._intermediate = False
+                else:
+                    output.extend(self._pending)
+                    self._pending.clear()
+                    if byte == 0x1B:
+                        self._pending.append(byte)
+                    else:
+                        output.append(byte)
+                continue
+
+            if 0x40 <= byte <= 0x7E:
+                self._pending.clear()
+                self._intermediate = False
+                continue
+
+            if not self._intermediate and 0x30 <= byte <= 0x3F:
+                self._pending.append(byte)
+                continue
+
+            if 0x20 <= byte <= 0x2F:
+                self._intermediate = True
+                self._pending.append(byte)
+                continue
+
+            output.extend(self._pending)
+            self._pending.clear()
+            self._intermediate = False
+            if byte == 0x1B:
+                self._pending.append(byte)
+            else:
+                output.append(byte)
+
+        if final and self._pending:
+            output.extend(self._pending)
+            self._pending.clear()
+            self._intermediate = False
+        return bytes(output)
+
 
 @dataclass(frozen=True)
 class OperationSettings:
@@ -83,7 +144,7 @@ class OperationDeadlineExceededError(Exception):
 
 
 class WindowsJob:
-    """Kill-on-close Windows Job Object used by the source gateway."""
+    """Kill-on-close Windows Job Object used by the workspace command runner."""
 
     def __init__(self) -> None:
         self.handle: int | None = None
@@ -143,9 +204,7 @@ class WindowsJob:
 
         info = ExtendedLimit()
         info.BasicLimitInformation.LimitFlags = 0x00002000
-        ok = kernel32.SetInformationJobObject(
-            handle, 9, ctypes.byref(info), ctypes.sizeof(info)
-        )
+        ok = kernel32.SetInformationJobObject(handle, 9, ctypes.byref(info), ctypes.sizeof(info))
         if not ok:
             error = ctypes.get_last_error()
             kernel32.CloseHandle(ctypes.c_void_p(handle))
@@ -225,9 +284,9 @@ class WorkspaceOperationManager:
                 continue
             record["state"] = "interrupted"
             record["finished_at"] = _utc_now()
-            record["error_code"] = "gateway_restarted"
+            record["error_code"] = "mcp_server_restarted"
             record["error_message"] = (
-                "Gateway restarted before the command reached a terminal state."
+                "MCP server restarted before the command reached a terminal state."
             )
             self._write_record(record)
             recovered += 1
@@ -251,13 +310,11 @@ class WorkspaceOperationManager:
             raise WorkspaceToolError(
                 "VALIDATION_ERROR",
                 f"timeout_seconds exceeds {self.settings.max_timeout_seconds}.",
-                status_code=422,
             )
         if output_limit > self.settings.max_output_bytes:
             raise WorkspaceToolError(
                 "VALIDATION_ERROR",
                 f"max_output_bytes exceeds {self.settings.max_output_bytes}.",
-                status_code=422,
             )
         request_payload = {
             "workspace_id": workspace_id,
@@ -361,9 +418,7 @@ class WorkspaceOperationManager:
     async def get(self, operation_id: str) -> dict[str, Any]:
         return self._public_record(self._require_operation(operation_id))
 
-    async def wait_for_terminal(
-        self, operation_id: str, *, timeout_seconds: int
-    ) -> dict[str, Any]:
+    async def wait_for_terminal(self, operation_id: str, *, timeout_seconds: int) -> dict[str, Any]:
         record = self._require_operation(operation_id)
         if record.get("state") in _TERMINAL_STATES or timeout_seconds <= 0:
             return self._public_record(record)
@@ -376,6 +431,34 @@ class WorkspaceOperationManager:
         except TimeoutError:
             pass
         return self._public_record(self._require_operation(operation_id))
+
+    async def wait_for_change(
+        self,
+        operation_id: str,
+        *,
+        stdout_offset: int,
+        stderr_offset: int,
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        """Wait until the operation finishes, new log bytes appear, or the wait expires."""
+
+        record = self._require_operation(operation_id)
+        if timeout_seconds <= 0:
+            return self._public_record(record)
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            record = self._require_operation(operation_id)
+            terminal = record.get("state") in _TERMINAL_STATES
+            if terminal:
+                return self._public_record(record)
+            if _log_has_decodable_progress(self._stdout_path(operation_id), stdout_offset):
+                return self._public_record(record)
+            if _log_has_decodable_progress(self._stderr_path(operation_id), stderr_offset):
+                return self._public_record(record)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self._public_record(record)
+            await asyncio.sleep(min(0.1, remaining))
 
     async def list_operations(self, state: str | None = None) -> list[dict[str, Any]]:
         records = [
@@ -395,12 +478,13 @@ class WorkspaceOperationManager:
         max_bytes: int,
     ) -> dict[str, Any]:
         record = self._require_operation(operation_id)
-        stdout, next_stdout = _read_log(self._stdout_path(operation_id), stdout_offset, max_bytes)
-        stderr, next_stderr = _read_log(self._stderr_path(operation_id), stderr_offset, max_bytes)
-        if record.get("plain_output"):
-            stdout = _ANSI_ESCAPE_RE.sub("", stdout)
-            stderr = _ANSI_ESCAPE_RE.sub("", stderr)
         terminal = record.get("state") in _TERMINAL_STATES
+        stdout, next_stdout = _read_log(
+            self._stdout_path(operation_id), stdout_offset, max_bytes, final=terminal
+        )
+        stderr, next_stderr = _read_log(
+            self._stderr_path(operation_id), stderr_offset, max_bytes, final=terminal
+        )
         return {
             "stdout": stdout,
             "stderr": stderr,
@@ -591,10 +675,10 @@ class WorkspaceOperationManager:
             [
                 (
                     "while (-not (Test-Path -LiteralPath "
-                    "$env:GATEWAY_JOB_READY_FILE)) { Start-Sleep -Milliseconds 10 }"
+                    "$env:WORKSPACE_MCP_JOB_READY_FILE)) { Start-Sleep -Milliseconds 10 }"
                 ),
                 (
-                    "Remove-Item -LiteralPath $env:GATEWAY_JOB_READY_FILE -Force "
+                    "Remove-Item -LiteralPath $env:WORKSPACE_MCP_JOB_READY_FILE -Force "
                     "-ErrorAction SilentlyContinue"
                 ),
                 _build_pwsh_script(script, plain_output=plain_output, utf8_output=utf8_output),
@@ -611,7 +695,7 @@ class WorkspaceOperationManager:
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         preexec_fn = getattr(os, "setsid", None) if os.name != "nt" else None
         process_env = os.environ.copy()
-        process_env["GATEWAY_JOB_READY_FILE"] = str(ready_path)
+        process_env["WORKSPACE_MCP_JOB_READY_FILE"] = str(ready_path)
         runtime.activity_secrets = sensitive_environment_values(process_env)
         try:
             job = await self._create_job_before_deadline(runtime)
@@ -632,7 +716,6 @@ class WorkspaceOperationManager:
                 raise WorkspaceToolError(
                     "WORKSPACE_EXEC_FAILED",
                     f"Unable to attach the PowerShell process to a Windows Job Object: {exc}",
-                    status_code=500,
                 ) from exc
             async with runtime.lock:
                 runtime.record["root_pid"] = proc.pid
@@ -655,6 +738,7 @@ class WorkspaceOperationManager:
                     proc.stdout,
                     self._stdout_path(operation_id),
                     max_output_bytes,
+                    plain_output=plain_output,
                 )
             )
             stderr_task = asyncio.create_task(
@@ -664,12 +748,11 @@ class WorkspaceOperationManager:
                     proc.stderr,
                     self._stderr_path(operation_id),
                     max_output_bytes,
+                    plain_output=plain_output,
                 )
             )
             process_task = asyncio.create_task(proc.wait())
-            timeout_task = asyncio.create_task(
-                asyncio.sleep(self._remaining_seconds(runtime))
-            )
+            timeout_task = asyncio.create_task(asyncio.sleep(self._remaining_seconds(runtime)))
             cancel_task = asyncio.create_task(runtime.cancel_event.wait())
             shutdown_task = asyncio.create_task(runtime.shutdown_event.wait())
             done, pending = await asyncio.wait(
@@ -691,8 +774,8 @@ class WorkspaceOperationManager:
                 await _terminate_process_tree(proc, job, self.settings.kill_grace_seconds)
             elif shutdown_task in done and runtime.shutdown_event.is_set():
                 terminal_state = "interrupted"
-                error_code = "gateway_shutdown"
-                error_message = "Gateway shutdown interrupted the command."
+                error_code = "mcp_server_shutdown"
+                error_message = "MCP server shutdown interrupted the command."
                 await _terminate_process_tree(proc, job, self.settings.kill_grace_seconds)
             else:
                 terminal_state = "timed_out"
@@ -753,9 +836,7 @@ class WorkspaceOperationManager:
                 state="failed",
                 exit_code=runtime.process.returncode if runtime.process else None,
                 error_code=(
-                    exc.code
-                    if isinstance(exc, WorkspaceToolError)
-                    else "command_start_failed"
+                    exc.code if isinstance(exc, WorkspaceToolError) else "command_start_failed"
                 ),
                 error_message=exc.message if isinstance(exc, WorkspaceToolError) else str(exc),
             )
@@ -781,30 +862,42 @@ class WorkspaceOperationManager:
         stream: asyncio.StreamReader | None,
         path: Path,
         max_output_bytes: int,
+        *,
+        plain_output: bool,
     ) -> None:
         if stream is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = path.open("ab")
+        sanitizer = _AnsiCsiStripper() if plain_output else None
+
+        def store(chunk: bytes) -> None:
+            if not chunk:
+                return
+            remaining = max(0, max_output_bytes - runtime.stored_bytes)
+            accepted = chunk[:remaining]
+            if accepted:
+                handle.write(accepted)
+                handle.flush()
+                runtime.stored_bytes += len(accepted)
+            if len(accepted) < len(chunk):
+                runtime.record[f"{stream_name}_truncated"] = True
+
         try:
             while True:
                 chunk = await stream.read(64 * 1024)
                 if not chunk:
+                    if sanitizer is not None:
+                        async with runtime.lock:
+                            store(sanitizer.feed(b"", final=True))
                     return
+                stored_chunk = sanitizer.feed(chunk) if sanitizer is not None else chunk
                 async with runtime.lock:
                     byte_field = f"{stream_name}_bytes"
-                    truncated_field = f"{stream_name}_truncated"
-                    runtime.record[byte_field] = (
-                        int(runtime.record.get(byte_field) or 0) + len(chunk)
+                    runtime.record[byte_field] = int(runtime.record.get(byte_field) or 0) + len(
+                        chunk
                     )
-                    remaining = max(0, max_output_bytes - runtime.stored_bytes)
-                    accepted = chunk[:remaining]
-                    if accepted:
-                        handle.write(accepted)
-                        handle.flush()
-                        runtime.stored_bytes += len(accepted)
-                    if len(accepted) < len(chunk):
-                        runtime.record[truncated_field] = True
+                    store(stored_chunk)
                 self._queue_activity_output(runtime, stream_name, chunk)
         finally:
             handle.close()
@@ -926,7 +1019,6 @@ class WorkspaceOperationManager:
             raise WorkspaceToolError(
                 "WORKSPACE_OPERATION_NOT_FOUND",
                 "Workspace command operation was not found.",
-                status_code=404,
             )
         return record
 
@@ -1028,14 +1120,42 @@ def _script_summary(script: str) -> str:
     return " ".join(script.strip().split())[:200]
 
 
-def _read_log(path: Path, offset: int, max_bytes: int) -> tuple[str, int]:
+def _read_log(path: Path, offset: int, max_bytes: int, *, final: bool = True) -> tuple[str, int]:
     if not path.is_file():
         return "", offset
     with path.open("rb") as handle:
         handle.seek(offset)
         data = handle.read(max_bytes)
-        next_offset = handle.tell()
-    return data.decode("utf-8", errors="replace"), next_offset
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        text = decoder.decode(data, final=False)
+        pending, _ = decoder.getstate()
+        consumed = len(data) - len(pending)
+
+        # If the byte budget cuts the first UTF-8 code point, read only enough
+        # extra bytes to finish that character so pagination always makes progress.
+        while consumed == 0 and pending and len(pending) < 4:
+            extra = handle.read(1)
+            if not extra:
+                if final:
+                    text += decoder.decode(b"", final=True)
+                    consumed = handle.tell() - offset
+                break
+            emitted = decoder.decode(extra, final=False)
+            pending, _ = decoder.getstate()
+            if emitted:
+                text += emitted
+                consumed = handle.tell() - offset - len(pending)
+                break
+
+        next_offset = offset + consumed
+    return text, next_offset
+
+
+def _log_has_decodable_progress(path: Path, offset: int) -> bool:
+    if not path.is_file() or _file_size(path) <= offset:
+        return False
+    _, next_offset = _read_log(path, offset, 1, final=False)
+    return next_offset > offset
 
 
 def _file_size(path: Path) -> int:

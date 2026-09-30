@@ -1,0 +1,558 @@
+from __future__ import annotations
+
+import asyncio
+import os
+import tempfile
+import time
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from workspace_mcp.workspace_files import LocalWorkspaceService
+from workspace_mcp.workspace_operations import _read_log
+from workspace_mcp.workspace_patch import WorkspaceToolError
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def _environment(root: Path, *, sync_wait: int = 5):
+    return patch.dict(
+        os.environ,
+        {
+            "WORKSPACE_ROOT": str(root / "workspaces"),
+            "WORKSPACE_OPERATION_ROOT": str(root / "operations"),
+            "WORKSPACE_COMMAND_SYNC_WAIT_SECONDS": str(sync_wait),
+            "WORKSPACE_COMMAND_TIMEOUT_SECONDS": "10",
+            "WORKSPACE_COMMAND_MAX_TIMEOUT_SECONDS": "30",
+        },
+        clear=False,
+    )
+
+
+def test_workspace_files_search_write_and_patch() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            first = await service.prepare_workspace(
+                idempotency_key="workspace-core-001", workspace_id=None
+            )
+            second = await service.prepare_workspace(
+                idempotency_key="workspace-core-001", workspace_id=None
+            )
+            assert first["workspace_id"] == second["workspace_id"]
+            assert first["created"] is True
+            assert second["created"] is False
+            workspace_id = str(first["workspace_id"])
+
+            written = await service.write_file(
+                workspace_id=workspace_id,
+                path="src/example.txt",
+                content="alpha\nbeta\n",
+                mode="create_only",
+                line_ending="lf",
+                expected_sha256=None,
+                dry_run=False,
+                max_bytes=None,
+            )
+            assert written["written"] is True
+
+            read = await service.read_files(
+                workspace_id=workspace_id,
+                paths=["src/example.txt"],
+                start_line=1,
+                max_lines=10,
+                max_bytes_per_file=None,
+                max_bytes=None,
+            )
+            assert "1: alpha" in read["files"][0]["content"]
+
+            search = await service.search(
+                workspace_id=workspace_id,
+                query="beta",
+                regex=False,
+                case_sensitive=False,
+                paths=["."],
+                context_lines=1,
+                max_matches=10,
+                max_bytes=None,
+            )
+            assert search["match_count"] == 1
+
+            inspected = await service.inspect(
+                workspace_id=workspace_id,
+                paths=["."],
+                queries=["alpha"],
+                max_depth=3,
+                max_tree_entries=50,
+                context_lines=1,
+                max_search_matches=10,
+                max_read_files=5,
+                max_file_lines=20,
+                max_bytes_per_file=None,
+                max_bytes=None,
+            )
+            assert any(item["path"] == "src/example.txt" for item in inspected["tree"])
+
+            patched = await service.apply_patch(
+                workspace_id=workspace_id,
+                patch=(
+                    "*** Begin Patch\n"
+                    "*** Update File: src/example.txt\n"
+                    "@@\n"
+                    "-beta\n"
+                    "+gamma\n"
+                    "*** End Patch"
+                ),
+                dry_run=False,
+                allow_delete=False,
+                max_changed_files=None,
+                max_patch_bytes=None,
+            )
+            assert patched["applied"] is True
+            file_path = Path(os.environ["WORKSPACE_ROOT"]) / workspace_id / "src/example.txt"
+            assert file_path.read_text(encoding="utf-8") == "alpha\ngamma\n"
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
+        _run(scenario(Path(temp)))
+
+
+def test_workspace_file_tools_reject_paths_outside_root() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            prepared = await service.prepare_workspace(
+                idempotency_key="workspace-boundary-001", workspace_id=None
+            )
+            workspace_id = str(prepared["workspace_id"])
+            outside = root / "escape.txt"
+            workspace_root = Path(os.environ["WORKSPACE_ROOT"]) / workspace_id
+
+            for unsafe_path in ("../escape.txt", str(outside.resolve())):
+                with pytest.raises(WorkspaceToolError) as captured:
+                    await service.write_file(
+                        workspace_id=workspace_id,
+                        path=unsafe_path,
+                        content="blocked\n",
+                        mode="create_only",
+                        line_ending="lf",
+                        expected_sha256=None,
+                        dry_run=False,
+                        max_bytes=None,
+                    )
+                assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+            assert not outside.exists()
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.read_files(
+                    workspace_id=workspace_id,
+                    paths=["../escape.txt"],
+                    start_line=1,
+                    max_lines=10,
+                    max_bytes_per_file=None,
+                    max_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.search(
+                    workspace_id=workspace_id,
+                    query="anything",
+                    regex=False,
+                    case_sensitive=False,
+                    paths=[".."],
+                    context_lines=0,
+                    max_matches=10,
+                    max_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.inspect(
+                    workspace_id=workspace_id,
+                    paths=[".."],
+                    queries=[],
+                    max_depth=2,
+                    max_tree_entries=10,
+                    context_lines=0,
+                    max_search_matches=10,
+                    max_read_files=0,
+                    max_file_lines=10,
+                    max_bytes_per_file=None,
+                    max_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.apply_patch(
+                    workspace_id=workspace_id,
+                    patch=(
+                        "*** Begin Patch\n"
+                        "*** Add File: ../escape-patch.txt\n"
+                        "+blocked\n"
+                        "*** End Patch"
+                    ),
+                    dry_run=False,
+                    allow_delete=False,
+                    max_changed_files=None,
+                    max_patch_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+            assert not (root / "escape-patch.txt").exists()
+
+            outside_dir = root / "outside-dir"
+            outside_dir.mkdir()
+            link = workspace_root / "outside-link"
+            try:
+                link.symlink_to(outside_dir, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlink/junction creation is unavailable on this test host")
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.write_file(
+                    workspace_id=workspace_id,
+                    path="outside-link/escaped.txt",
+                    content="blocked\n",
+                    mode="create_only",
+                    line_ending="lf",
+                    expected_sha256=None,
+                    dry_run=False,
+                    max_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_PATH_OUTSIDE_ROOT"
+            assert not (outside_dir / "escaped.txt").exists()
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
+        _run(scenario(Path(temp)))
+
+
+def test_utf8_log_pagination_never_splits_code_points() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / "stdout.log"
+        expected = "你好🙂ASCII\n错误🚫\n"
+        encoded = expected.encode("utf-8")
+        path.write_bytes(encoded)
+
+        offset = 0
+        pieces: list[str] = []
+        while offset < len(encoded):
+            text, next_offset = _read_log(path, offset, 1)
+            assert next_offset > offset
+            pieces.append(text)
+            offset = next_offset
+
+        assert "".join(pieces) == expected
+        assert offset == len(encoded)
+
+
+def test_running_command_utf8_partial_writes_do_not_emit_replacement_characters() -> None:
+    async def scenario() -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="utf8-live-command-001", workspace_id=None
+            )
+            script = (
+                "$s=[Console]::OpenStandardOutput(); "
+                "$s.WriteByte(228); $s.Flush(); Start-Sleep -Milliseconds 300; "
+                "$s.WriteByte(189); $s.Flush(); Start-Sleep -Milliseconds 300; "
+                "$s.WriteByte(160); $s.Flush(); Start-Sleep -Milliseconds 300"
+            )
+            start = await service.command_start(
+                workspace_id=str(workspace["workspace_id"]),
+                idempotency_key="utf8-live-op-001",
+                script=script,
+                timeout_seconds=10,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=1,
+            )
+            operation_id = str(start["operation"]["operation_id"])
+            stdout_offset = int(start["next_stdout_offset"])
+            stderr_offset = int(start["next_stderr_offset"])
+            pieces = [str(start["stdout"])]
+            state = str(start["operation"]["state"])
+
+            deadline = time.monotonic() + 5
+            while state == "running" and time.monotonic() < deadline:
+                result = await service.command_get(
+                    operation_id,
+                    wait_seconds=1,
+                    stdout_offset=stdout_offset,
+                    stderr_offset=stderr_offset,
+                    max_bytes=1,
+                )
+                pieces.append(str(result["stdout"]))
+                stdout_offset = int(result["next_stdout_offset"])
+                stderr_offset = int(result["next_stderr_offset"])
+                state = str(result["operation"]["state"])
+
+            assert state == "succeeded"
+            combined = "".join(pieces)
+            assert combined == "你"
+            assert "�" not in combined
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=0):
+        _run(scenario())
+
+
+def test_plain_output_strips_ansi_sequences_split_across_live_chunks() -> None:
+    async def scenario() -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="ansi-live-command-001", workspace_id=None
+            )
+            bytes_to_write = [27, 91, 51, 49, 109, 82, 69, 68, 27, 91, 48, 109]
+            writes = "; ".join(
+                f"$s.WriteByte({value}); $s.Flush(); Start-Sleep -Milliseconds 80"
+                for value in bytes_to_write
+            )
+            script = f"$s=[Console]::OpenStandardOutput(); {writes}"
+            start = await service.command_start(
+                workspace_id=str(workspace["workspace_id"]),
+                idempotency_key="ansi-live-op-001",
+                script=script,
+                timeout_seconds=10,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=1,
+            )
+            operation_id = str(start["operation"]["operation_id"])
+            stdout_offset = int(start["next_stdout_offset"])
+            stderr_offset = int(start["next_stderr_offset"])
+            pieces = [str(start["stdout"])]
+            state = str(start["operation"]["state"])
+
+            deadline = time.monotonic() + 5
+            while state == "running" and time.monotonic() < deadline:
+                result = await service.command_get(
+                    operation_id,
+                    wait_seconds=1,
+                    stdout_offset=stdout_offset,
+                    stderr_offset=stderr_offset,
+                    max_bytes=1,
+                )
+                pieces.append(str(result["stdout"]))
+                stdout_offset = int(result["next_stdout_offset"])
+                stderr_offset = int(result["next_stderr_offset"])
+                state = str(result["operation"]["state"])
+
+            assert state == "succeeded"
+            combined = "".join(pieces)
+            assert combined == "RED"
+            assert "\x1b" not in combined
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=0):
+        _run(scenario())
+
+
+def test_command_start_returns_terminal_logs_for_fast_command() -> None:
+    async def scenario() -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="fast-command-001", workspace_id=None
+            )
+            result = await service.command_start(
+                workspace_id=str(workspace["workspace_id"]),
+                idempotency_key="fast-op-001",
+                script="Write-Output 'hello-mcp'",
+                timeout_seconds=10,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=50_000,
+            )
+            assert result["operation"]["state"] == "succeeded"
+            assert "hello-mcp" in result["stdout"]
+            assert result["next_stdout_offset"] > 0
+            assert result["stdout_eof"] is True
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=5):
+        _run(scenario())
+
+
+def test_workspace_command_intentionally_has_os_account_scope_outside_workspace_root() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="os-scope-command-001", workspace_id=None
+            )
+            outside = root / "outside-workspace-command.txt"
+            escaped_path = str(outside).replace("'", "''")
+            result = await service.command_start(
+                workspace_id=str(workspace["workspace_id"]),
+                idempotency_key="os-scope-operation-001",
+                script=(
+                    f"Set-Content -LiteralPath '{escaped_path}' "
+                    "-Value 'intentional-os-account-scope' -Encoding utf8"
+                ),
+                timeout_seconds=10,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=50_000,
+            )
+            assert result["operation"]["state"] == "succeeded"
+            assert outside.is_file()
+            assert "intentional-os-account-scope" in outside.read_text(encoding="utf-8")
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=5):
+        _run(scenario(Path(temp)))
+
+
+def test_command_get_waits_for_changes_and_returns_delta_logs_without_repeating() -> None:
+    async def scenario() -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="follow-command-001", workspace_id=None
+            )
+            start = await service.command_start(
+                workspace_id=str(workspace["workspace_id"]),
+                idempotency_key="follow-op-001",
+                script=(
+                    "Write-Output 'first'; "
+                    "Start-Sleep -Milliseconds 400; "
+                    "Write-Output 'second'; "
+                    "Start-Sleep -Milliseconds 400"
+                ),
+                timeout_seconds=10,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=50_000,
+            )
+            operation_id = str(start["operation"]["operation_id"])
+            stdout_offset = int(start["next_stdout_offset"])
+            stderr_offset = int(start["next_stderr_offset"])
+            pieces = [str(start["stdout"])]
+
+            deadline = time.monotonic() + 5
+            state = str(start["operation"]["state"])
+            while state == "running" and time.monotonic() < deadline:
+                result = await service.command_get(
+                    operation_id,
+                    wait_seconds=1,
+                    stdout_offset=stdout_offset,
+                    stderr_offset=stderr_offset,
+                    max_bytes=50_000,
+                )
+                pieces.append(str(result["stdout"]))
+                stdout_offset = int(result["next_stdout_offset"])
+                stderr_offset = int(result["next_stderr_offset"])
+                state = str(result["operation"]["state"])
+
+            assert state == "succeeded"
+            combined = "".join(pieces)
+            assert combined.count("first") == 1
+            assert combined.count("second") == 1
+
+            replay = await service.command_logs(
+                operation_id,
+                stdout_offset=0,
+                stderr_offset=0,
+                max_bytes=50_000,
+            )
+            assert "first" in replay["stdout"]
+            assert "second" in replay["stdout"]
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=0):
+        _run(scenario())
+
+
+def test_command_idempotency_list_cancel_and_timeout() -> None:
+    async def scenario() -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="command-admin-001", workspace_id=None
+            )
+            workspace_id = str(workspace["workspace_id"])
+            first = await service.command_start(
+                workspace_id=workspace_id,
+                idempotency_key="same-op-key",
+                script="Start-Sleep -Seconds 5",
+                timeout_seconds=10,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=50_000,
+            )
+            duplicate = await service.command_start(
+                workspace_id=workspace_id,
+                idempotency_key="same-op-key",
+                script="Start-Sleep -Seconds 5",
+                timeout_seconds=10,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=50_000,
+            )
+            assert first["operation"]["operation_id"] == duplicate["operation"]["operation_id"]
+            operation_id = str(first["operation"]["operation_id"])
+            listed = await service.command_list("running")
+            assert any(item["operation_id"] == operation_id for item in listed)
+            await service.command_cancel(operation_id)
+
+            deadline = time.monotonic() + 5
+            state = "running"
+            while state == "running" and time.monotonic() < deadline:
+                result = await service.command_get(
+                    operation_id,
+                    wait_seconds=0.2,
+                    stdout_offset=0,
+                    stderr_offset=0,
+                    max_bytes=50_000,
+                )
+                state = str(result["operation"]["state"])
+            assert state == "canceled"
+
+            timed = await service.command_start(
+                workspace_id=workspace_id,
+                idempotency_key="timeout-op-key",
+                script="Start-Sleep -Seconds 2",
+                timeout_seconds=1,
+                max_output_bytes=None,
+                plain_output=True,
+                utf8_output=True,
+                max_bytes=50_000,
+            )
+            timed_id = str(timed["operation"]["operation_id"])
+            state = str(timed["operation"]["state"])
+            deadline = time.monotonic() + 4
+            while state == "running" and time.monotonic() < deadline:
+                result = await service.command_get(
+                    timed_id,
+                    wait_seconds=0.5,
+                    stdout_offset=0,
+                    stderr_offset=0,
+                    max_bytes=50_000,
+                )
+                state = str(result["operation"]["state"])
+            assert state == "timed_out"
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp), sync_wait=0):
+        _run(scenario())

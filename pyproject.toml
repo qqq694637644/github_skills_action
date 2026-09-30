@@ -1,18 +1,18 @@
 [project]
-name = "skill-temple"
-version = "0.3.1"
-description = "Codex-style compiled Skill catalogs for Custom GPT Actions"
+name = "workspace-mcp"
+version = "1.0.0"
+description = "Personal Remote Workspace MCP server with persistent workspaces and PowerShell execution"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
-    { name = "skill-temple contributors" },
+    { name = "workspace-mcp contributors" },
 ]
 dependencies = [
-    "fastapi>=0.115.0",
-    "uvicorn>=0.30.0",
+    "mcp==2.2.0",
     "pydantic>=2.0.0",
-    "PyYAML>=6.0.0",
+    "PyJWT[crypto]>=2.10.0",
+    "uvicorn>=0.30.0",
 ]
 
 [project.optional-dependencies]
@@ -23,10 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-skill-temple = "skill_temple.app:main"
-skill-temple-eval = "skill_temple.evals:main"
-skill-temple-build-prompt = "skill_temple.prompt_builder:main"
-skill-temple-build-openapi = "skill_temple.openapi_builder:main"
+workspace-mcp = "workspace_mcp.server:main"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
@@ -38,12 +35,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-skill_temple = [
-    "example_skills/*/*.md",
-    "example_skills/*/docs/*.md",
-]
+include = ["workspace_mcp*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

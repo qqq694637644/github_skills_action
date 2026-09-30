@@ -1,4 +1,4 @@
-"""Concise, redacted logs for GPT Action calls."""
+"""Concise, redacted logs for Workspace MCP calls."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal, TypedDict
 
-LOGGER = logging.getLogger("uvicorn.error")
+LOGGER = logging.getLogger("workspace_mcp")
 COMMAND_LOG_LIMIT = 2_400
 ACTION_EVENT_LIMIT = 1_000
 

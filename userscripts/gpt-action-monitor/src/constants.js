@@ -1,9 +1,0 @@
-export const PROFILES_KEY = 'gptActionMonitorProfiles';
-export const POSITION_KEY = 'gptActionMonitorPosition';
-export const GPT_TITLE_SELECTOR = 'div[type="button"][aria-haspopup="menu"]';
-export const POLL_WAIT_SECONDS = 55;
-export const RETRY_MS = 3000;
-export const ACTIVITY_VISIBLE_MS = 4000;
-export const UI_COALESCE_MS = 200;
-export const MAX_HISTORY = 100;
-export const COMPACT_WIDTH = 30;

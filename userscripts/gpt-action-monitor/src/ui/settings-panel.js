@@ -1,4 +1,4 @@
-import { normalizeBackend, validateBackend } from '../profile/profile-store.js';
+import { apiBaseFromBackend, normalizeBackend, validateBackend } from '../profile/profile-store.js';
 import { SETTINGS_CSS } from './styles.js';
 
 function testProfileConnection(profile, statusElement, button) {
@@ -17,7 +17,7 @@ function testProfileConnection(profile, statusElement, button) {
 
   GM_xmlhttpRequest({
     method: 'GET',
-    url: `${validation.backend}/v1/action-logs?after=${Number.MAX_SAFE_INTEGER}&wait=0&limit=1`,
+    url: `${apiBaseFromBackend(validation.backend)}/v1/action-logs?after=${Number.MAX_SAFE_INTEGER}&wait=0&limit=1`,
     headers,
     timeout: 7000,
     onload(response) {
@@ -71,11 +71,11 @@ export function createSettingsPanel({ getProfile, onApplyProfile }) {
           <button class="gam-icon-button gam-settings-close" type="button" aria-label="关闭配置">×</button>
         </div>
         <div class="gam-settings-body">
-          <p class="gam-settings-note">监控始终使用这一组后端配置。</p>
+          <p class="gam-settings-note">可填写服务根地址或以 /mcp 结尾的 MCP 地址；监控接口会自动使用同一服务的 REST 根路径。</p>
           <form class="gam-editor">
             <label class="gam-field">
               <span>后端地址</span>
-              <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://skills.example.com" required>
+              <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://skills.example.com/mcp" required>
             </label>
             <label class="gam-field">
               <span>Bearer Token</span>

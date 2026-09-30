@@ -1,4 +1,5 @@
 import { POLL_WAIT_SECONDS, RETRY_MS } from '../constants.js';
+import { apiBaseFromBackend } from '../profile/profile-store.js';
 
 export function createActionLogClient({
   getProfile,
@@ -80,7 +81,7 @@ export function createActionLogClient({
 
     requestHandle = GM_xmlhttpRequest({
       method: 'GET',
-      url: `${profile.backend}/v1/action-logs?after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
+      url: `${apiBaseFromBackend(profile.backend)}/v1/action-logs?after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
       headers,
       timeout: (wait + 5) * 1000,
       onload(response) {

@@ -713,6 +713,55 @@
     };
   }
 
+  // src/profile/profile-store.js
+  function normalizeBackend(value) {
+    return String(value || "").trim().replace(/\/+$/, "");
+  }
+  function apiBaseFromBackend(value) {
+    const backend = normalizeBackend(value);
+    if (!backend) return "";
+    try {
+      const parsed = new URL(backend);
+      const pathname = parsed.pathname.replace(/\/+$/, "");
+      parsed.pathname = pathname.replace(/\/mcp$/i, "") || "/";
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString().replace(/\/$/, "");
+    } catch (_) {
+      return backend.replace(/\/mcp$/i, "");
+    }
+  }
+  function normalizeProfile(profile) {
+    return {
+      backend: normalizeBackend(profile?.backend),
+      token: String(profile?.token || "").trim()
+    };
+  }
+  function loadProfile() {
+    const stored = GM_getValue(PROFILE_KEY, null);
+    const source = Array.isArray(stored) ? stored.find((profile) => profile?.enabled !== false && profile?.backend) || stored.find((profile) => profile?.backend) : stored;
+    const normalized = normalizeProfile(source);
+    return normalized.backend ? normalized : null;
+  }
+  function saveProfile(profile) {
+    const normalized = normalizeProfile(profile);
+    GM_setValue(PROFILE_KEY, normalized);
+    return normalized;
+  }
+  function validateBackend(value) {
+    const backend = normalizeBackend(value);
+    let parsed;
+    try {
+      parsed = new URL(backend);
+    } catch (_) {
+      return { ok: false, message: "\u8BF7\u8F93\u5165\u6709\u6548\u7684\u540E\u7AEF URL\u3002" };
+    }
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return { ok: false, message: "\u540E\u7AEF\u5730\u5740\u4EC5\u652F\u6301 http:// \u6216 https://\u3002" };
+    }
+    return { ok: true, backend };
+  }
+
   // src/api/action-log-client.js
   function createActionLogClient({
     getProfile,
@@ -786,7 +835,7 @@
       const after = priming ? Number.MAX_SAFE_INTEGER : lastId;
       requestHandle = GM_xmlhttpRequest({
         method: "GET",
-        url: `${profile.backend}/v1/action-logs?after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
+        url: `${apiBaseFromBackend(profile.backend)}/v1/action-logs?after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
         headers,
         timeout: (wait + 5) * 1e3,
         onload(response) {
@@ -858,7 +907,7 @@
       return new Promise((resolve, reject) => {
         GM_xmlhttpRequest({
           method: "GET",
-          url: `${profile.backend}/v1/skills`,
+          url: `${apiBaseFromBackend(profile.backend)}/v1/skills`,
           headers,
           timeout: 7e3,
           onload(response) {
@@ -1008,41 +1057,6 @@
   }
   function loadSkillsCall(skillId) {
     return `loadSkills(${JSON.stringify([skillId])})`;
-  }
-
-  // src/profile/profile-store.js
-  function normalizeBackend(value) {
-    return String(value || "").trim().replace(/\/+$/, "");
-  }
-  function normalizeProfile(profile) {
-    return {
-      backend: normalizeBackend(profile?.backend),
-      token: String(profile?.token || "").trim()
-    };
-  }
-  function loadProfile() {
-    const stored = GM_getValue(PROFILE_KEY, null);
-    const source = Array.isArray(stored) ? stored.find((profile) => profile?.enabled !== false && profile?.backend) || stored.find((profile) => profile?.backend) : stored;
-    const normalized = normalizeProfile(source);
-    return normalized.backend ? normalized : null;
-  }
-  function saveProfile(profile) {
-    const normalized = normalizeProfile(profile);
-    GM_setValue(PROFILE_KEY, normalized);
-    return normalized;
-  }
-  function validateBackend(value) {
-    const backend = normalizeBackend(value);
-    let parsed;
-    try {
-      parsed = new URL(backend);
-    } catch (_) {
-      return { ok: false, message: "\u8BF7\u8F93\u5165\u6709\u6548\u7684\u540E\u7AEF URL\u3002" };
-    }
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      return { ok: false, message: "\u540E\u7AEF\u5730\u5740\u4EC5\u652F\u6301 http:// \u6216 https://\u3002" };
-    }
-    return { ok: true, backend };
   }
 
   // src/ui/styles.js
@@ -2022,7 +2036,7 @@
     if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
     GM_xmlhttpRequest({
       method: "GET",
-      url: `${validation.backend}/v1/action-logs?after=${Number.MAX_SAFE_INTEGER}&wait=0&limit=1`,
+      url: `${apiBaseFromBackend(validation.backend)}/v1/action-logs?after=${Number.MAX_SAFE_INTEGER}&wait=0&limit=1`,
       headers,
       timeout: 7e3,
       onload(response) {
@@ -2072,11 +2086,11 @@
           <button class="gam-icon-button gam-settings-close" type="button" aria-label="\u5173\u95ED\u914D\u7F6E">\xD7</button>
         </div>
         <div class="gam-settings-body">
-          <p class="gam-settings-note">\u76D1\u63A7\u59CB\u7EC8\u4F7F\u7528\u8FD9\u4E00\u7EC4\u540E\u7AEF\u914D\u7F6E\u3002</p>
+          <p class="gam-settings-note">\u53EF\u586B\u5199\u670D\u52A1\u6839\u5730\u5740\u6216\u4EE5 /mcp \u7ED3\u5C3E\u7684 MCP \u5730\u5740\uFF1B\u76D1\u63A7\u63A5\u53E3\u4F1A\u81EA\u52A8\u4F7F\u7528\u540C\u4E00\u670D\u52A1\u7684 REST \u6839\u8DEF\u5F84\u3002</p>
           <form class="gam-editor">
             <label class="gam-field">
               <span>\u540E\u7AEF\u5730\u5740</span>
-              <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://skills.example.com" required>
+              <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://skills.example.com/mcp" required>
             </label>
             <label class="gam-field">
               <span>Bearer Token</span>

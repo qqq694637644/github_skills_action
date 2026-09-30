@@ -4,6 +4,22 @@ export function normalizeBackend(value) {
   return String(value || '').trim().replace(/\/+$/, '');
 }
 
+export function apiBaseFromBackend(value) {
+  const backend = normalizeBackend(value);
+  if (!backend) return '';
+
+  try {
+    const parsed = new URL(backend);
+    const pathname = parsed.pathname.replace(/\/+$/, '');
+    parsed.pathname = pathname.replace(/\/mcp$/i, '') || '/';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch (_) {
+    return backend.replace(/\/mcp$/i, '');
+  }
+}
+
 export function normalizeProfile(profile) {
   return {
     backend: normalizeBackend(profile?.backend),

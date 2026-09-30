@@ -785,13 +785,7 @@ async def _terminate_process_group(
         while time.monotonic() < deadline:
             if not _process_group_exists(group_id):
                 break
-            if proc.returncode is None:
-                try:
-                    await asyncio.wait_for(asyncio.shield(proc.wait()), timeout=0.05)
-                except TimeoutError:
-                    pass
-            else:
-                await asyncio.sleep(0.05)
+            await asyncio.sleep(0.05)
         if _process_group_exists(group_id):
             try:
                 os.killpg(group_id, signal.SIGKILL)
@@ -805,14 +799,20 @@ async def _terminate_process_group(
         except ProcessLookupError:
             pass
         try:
-            await asyncio.wait_for(proc.wait(), timeout=max(1.0, grace))
+            await asyncio.wait_for(
+                _wait_for_root_process_exit(proc),
+                timeout=max(1.0, grace),
+            )
         except TimeoutError:
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
             try:
-                await asyncio.wait_for(proc.wait(), timeout=max(1.0, grace))
+                await asyncio.wait_for(
+                    _wait_for_root_process_exit(proc),
+                    timeout=max(1.0, grace),
+                )
             except TimeoutError:
                 pass
 

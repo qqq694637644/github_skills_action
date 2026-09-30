@@ -626,10 +626,13 @@ Windows 文档中的 `symlink/junction` 在 Linux 版本中统一描述为 `syml
 改为 Linux 示例，例如：
 
 ```text
-WORKSPACE_ROOT=/var/lib/workspace-mcp/workspaces
-WORKSPACE_OPERATION_ROOT=/var/lib/workspace-mcp/operations
+WORKSPACE_ROOT=~/.local/share/workspace-mcp/workspaces
+WORKSPACE_OPERATION_ROOT=~/.local/state/workspace-mcp/operations
 WORKSPACE_SHELL_PATH=/bin/bash
 ```
+
+当前部署目标是个人 OS 账户直接运行，不使用 systemd/service，因此示例默认路径必须
+对普通用户可写，不使用 `/var/lib`。
 
 ### `pyproject.toml`
 

@@ -728,3 +728,92 @@ def test_workspace_paths_follow_linux_case_sensitive_semantics() -> None:
 
     with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
         _run(scenario(Path(temp)))
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="Linux user-home expansion is POSIX deployment behavior",
+)
+def test_user_local_storage_paths_expand_home() -> None:
+    async def scenario(root: Path) -> None:
+        home = root / "home"
+        home.mkdir()
+        with patch.dict(
+            os.environ,
+            {
+                "HOME": str(home),
+                "WORKSPACE_ROOT": "~/.local/share/workspace-mcp/workspaces",
+                "WORKSPACE_OPERATION_ROOT": "~/.local/state/workspace-mcp/operations",
+            },
+            clear=False,
+        ):
+            service = LocalWorkspaceService()
+            try:
+                workspace = await service.prepare_workspace(
+                    idempotency_key="user-local-paths-001", workspace_id=None
+                )
+                workspace_id = str(workspace["workspace_id"])
+                assert (home / ".local/share/workspace-mcp/workspaces" / workspace_id).is_dir()
+                service.command_limits()
+                assert (home / ".local/state/workspace-mcp/operations").is_dir()
+            finally:
+                await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp:
+        _run(scenario(Path(temp)))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Backslash is a literal filename character on Linux")
+def test_workspace_search_preserves_literal_backslash_in_linux_filename() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            workspace = await service.prepare_workspace(
+                idempotency_key="backslash-workspace-001", workspace_id=None
+            )
+            workspace_id = str(workspace["workspace_id"])
+            literal_path = "foo\\bar.txt"
+            await service.write_file(
+                workspace_id=workspace_id,
+                path=literal_path,
+                content="literal-backslash-needle\n",
+                mode="create_only",
+                line_ending="preserve",
+                expected_sha256=None,
+                dry_run=False,
+                max_bytes=None,
+            )
+
+            search = await service.search(
+                workspace_id=workspace_id,
+                query="literal-backslash-needle",
+                regex=False,
+                case_sensitive=True,
+                paths=[literal_path],
+                context_lines=0,
+                max_matches=10,
+                max_bytes=None,
+            )
+            assert search["match_count"] == 1
+            assert search["matches"][0]["path"] == literal_path
+            assert "literal-backslash-needle" in search["matches"][0]["snippet"]
+
+            inspected = await service.inspect(
+                workspace_id=workspace_id,
+                paths=[literal_path],
+                queries=[],
+                max_depth=2,
+                max_tree_entries=20,
+                context_lines=0,
+                max_search_matches=10,
+                max_read_files=0,
+                max_file_lines=10,
+                max_bytes_per_file=None,
+                max_bytes=None,
+            )
+            assert any(item["path"] == literal_path for item in inspected["tree"])
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
+        _run(scenario(Path(temp)))

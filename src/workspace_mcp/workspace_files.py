@@ -442,7 +442,7 @@ class LocalWorkspaceService:
             if event.get("type") != "match":
                 continue
             data = event.get("data") or {}
-            raw_path = str((data.get("path") or {}).get("text") or "").replace("\\", "/")
+            raw_path = str((data.get("path") or {}).get("text") or "")
             line_number = int(data.get("line_number") or 0)
             line_text = str((data.get("lines") or {}).get("text") or "").rstrip("\r\n")
             submatches = data.get("submatches") or []
@@ -556,7 +556,7 @@ class LocalWorkspaceService:
             if base_path.is_file():
                 entries.append(
                     {
-                        "path": base.replace("\\", "/"),
+                        "path": _display_path(root, base_path),
                         "type": "file",
                         "depth": 0,
                         "bytes": base_path.stat().st_size,
@@ -625,10 +625,7 @@ class LocalWorkspaceService:
 
 
 def _display_path(root: Path, path: Path) -> str:
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        return str(path).replace("\\", "/")
+    return path.relative_to(root).as_posix()
 
 
 async def _run_bounded_command(

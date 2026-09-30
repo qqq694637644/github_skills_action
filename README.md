@@ -265,6 +265,7 @@ timeout 和 MCP shutdown 使用相同的 process-group cleanup 机制。
 
 - `workspaceReadFiles` / `workspaceWriteFile` / `workspaceApplyPatch` / `workspaceSearch` / `workspaceInspect` 是 **Workspace-scoped 文件工具**，`..`、绝对路径和最终指向 root 外的 symlink 都会被拒绝。
 - `workspaceCommand` 是 **OS-account-scoped 任意 Bash**，故意不受 Workspace 文件路径限制。
+- Linux 中反斜杠 `\` 是合法文件名字符，不会被当成路径分隔符或自动改写成 `/`。
 
 ## Process Group 的已知边界
 
@@ -421,19 +422,34 @@ MCP_REQUIRED_SCOPE
 
 持久 Workspace 根目录。服务会在其中创建 `ws_*` 目录。
 
-示例：
+个人直接运行时建议使用当前用户可写的数据目录：
 
 ```env
-WORKSPACE_ROOT=/var/lib/workspace-mcp/workspaces
+WORKSPACE_ROOT=~/.local/share/workspace-mcp/workspaces
 ```
 
 ### `WORKSPACE_OPERATION_ROOT`
 
-operation 状态和 stdout/stderr 日志目录。未配置时默认：
+operation 状态和 stdout/stderr 日志目录。个人直接运行建议：
+
+```env
+WORKSPACE_OPERATION_ROOT=~/.local/state/workspace-mcp/operations
+```
+
+代码在未配置该变量时仍使用：
 
 ```text
 .runtime/workspace-operations
 ```
+
+### Windows 版本升级到 Linux
+
+Linux 版本首次部署时不要复用旧 Windows runner 的 operation state/log 数据。
+如果之前把旧 `WORKSPACE_OPERATION_ROOT` 复制到了 Linux，请先删除该旧 operation
+目录内容，再启动 Linux 版本。旧 operation 记录包含 Windows 专属状态字段，不属于
+Linux 版本的持久兼容范围。
+
+Workspace 数据目录可以继续保留或迁移；需要清理的只是旧 operation state/log。
 
 ### `WORKSPACE_SHELL_PATH`
 

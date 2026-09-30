@@ -515,6 +515,39 @@ def test_cancel_escalates_to_sigkill_after_grace_period() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Linux process termination requires POSIX")
+def test_process_group_termination_never_waits_for_pipe_eof() -> None:
+    async def scenario() -> None:
+        class FakeProcess:
+            pid = 424242
+            returncode: int | None = None
+
+            def terminate(self) -> None:
+                self.returncode = -signal.SIGTERM
+
+            def kill(self) -> None:
+                self.returncode = -signal.SIGKILL
+
+            async def wait(self) -> int:
+                raise AssertionError("termination must not call proc.wait()")
+
+        proc = FakeProcess()
+        with (
+            patch.object(operations_module.os, "getpgrp", return_value=1),
+            patch.object(operations_module.os, "killpg"),
+            patch.object(
+                operations_module,
+                "_process_group_exists",
+                side_effect=[True, False, False],
+            ),
+        ):
+            await operations_module._terminate_process_group(proc, 424242, grace_seconds=1)
+
+        assert proc.returncode == -signal.SIGTERM
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.skipif(os.name != "posix", reason="setsid boundary requires POSIX")
 def test_setsid_child_is_documented_process_group_escape_boundary() -> None:
     async def scenario() -> None:

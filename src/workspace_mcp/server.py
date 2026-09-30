@@ -1026,8 +1026,14 @@ def create_app(settings: MCPSettings | None = None):
             )
         )
 
-    app = Starlette()
+    @asynccontextmanager
+    async def lifespan(_: Starlette):
+        async with mcp_app.router.lifespan_context(mcp_app):
+            yield
+
+    app = Starlette(lifespan=lifespan)
     app.add_route("/v1/action-logs", action_logs, methods=["GET"])
+    app.add_route("/mcp/v1/action-logs", action_logs, methods=["GET"])
     app.mount("/", mcp_app)
     return app
 

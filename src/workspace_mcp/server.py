@@ -1012,6 +1012,11 @@ def create_app(settings: MCPSettings | None = None):
     )
 
     def action_logs(request: Request) -> JSONResponse:
+        expected_token = resolved.action_log_bearer_token
+        if expected_token:
+            authorization = request.headers.get("authorization", "")
+            if authorization != f"Bearer {expected_token}":
+                return JSONResponse({"detail": "invalid bearer token"}, status_code=401)
         return JSONResponse(
             wait_for_action_events(
                 after=int(request.query_params.get("after", "0")),

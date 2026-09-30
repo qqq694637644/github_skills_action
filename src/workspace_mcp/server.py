@@ -1033,7 +1033,6 @@ def create_app(settings: MCPSettings | None = None):
 
     app = Starlette(lifespan=lifespan)
     app.add_route("/v1/action-logs", action_logs, methods=["GET"])
-    app.add_route("/mcp/v1/action-logs", action_logs, methods=["GET"])
     app.mount("/", mcp_app)
     return app
 

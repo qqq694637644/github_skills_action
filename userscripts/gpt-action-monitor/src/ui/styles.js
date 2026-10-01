@@ -431,7 +431,8 @@ export const SETTINGS_CSS = `
       }
       #gam-settings-overlay .gam-settings-title { font-size: 15px; font-weight: 650; }
       #gam-settings-overlay button,
-      #gam-settings-overlay input { font: inherit; }
+      #gam-settings-overlay input,
+      #gam-settings-overlay select { font: inherit; }
       #gam-settings-overlay button { color: inherit; }
       #gam-settings-overlay .gam-icon-button {
         width: 30px;
@@ -483,7 +484,37 @@ export const SETTINGS_CSS = `
         outline: none;
       }
       #gam-settings-overlay .gam-input:focus { border-color: #4f8e68; box-shadow: 0 0 0 2px rgba(35, 122, 66, .12); }
+      #gam-settings-overlay .gam-endpoint-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 7px;
+      }
       #gam-settings-overlay .gam-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+      #gam-settings-overlay .gam-scope-group {
+        display: grid;
+        gap: 8px;
+        margin: 0;
+        padding: 10px 11px;
+        border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+        border-radius: 9px;
+      }
+      #gam-settings-overlay .gam-scope-group legend {
+        padding: 0 5px;
+        font-weight: 600;
+      }
+      #gam-settings-overlay .gam-scope-option {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 8px;
+        align-items: start;
+        cursor: pointer;
+      }
+      #gam-settings-overlay .gam-scope-option input { margin-top: 3px; }
+      #gam-settings-overlay .gam-scope-option span { display: grid; gap: 1px; }
+      #gam-settings-overlay .gam-scope-option small {
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 12px;
+      }
       #gam-settings-overlay .gam-form-message { min-height: 19px; font-size: 12px; }
       #gam-settings-overlay .gam-form-message[data-state="error"] { color: #c53e3e; }
       #gam-settings-overlay .gam-form-message[data-state="success"] { color: #238349; }
@@ -498,6 +529,8 @@ export const SETTINGS_CSS = `
       @media (max-width: 520px) {
         #gam-settings-overlay { padding: 8px; }
         #gam-settings-overlay .gam-settings-card { max-height: calc(100vh - 16px); }
+        #gam-settings-overlay .gam-endpoint-row { grid-template-columns: 1fr 1fr; }
+        #gam-settings-overlay .gam-endpoint-select { grid-column: 1 / -1; }
         #gam-settings-overlay .gam-editor-footer { flex-wrap: wrap; }
       }
     `;

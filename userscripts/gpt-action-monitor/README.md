@@ -32,3 +32,5 @@ The expanded monitor renders structured backend activity as `NOW` and `RECENT` c
 The expanded monitor also includes a `Skills` menu. The configured backend catalog is fetched once on demand and persisted by the userscript across ChatGPT page reloads. Only `↻` explicitly refreshes that catalog. Clicking a Skill inserts `loadSkills(["<skill-id>"])` at the ChatGPT composer caret without sending the message.
 
 The backend field is the REST API base URL and is used as-is. For example, with `https://githubaction.giize.com/mcp-app`, the monitor requests `https://githubaction.giize.com/mcp-app/v1/action-logs`. MCP transport paths are configured separately by the MCP client/server deployment.
+
+Monitor settings can keep multiple named backend endpoints while polling only one at a time. Choosing an endpoint with **全局** makes it the persistent default in userscript storage. Choosing **局部** switches only the current loaded page in memory; it is not written to browser/session storage, so a page refresh immediately restores the global default.

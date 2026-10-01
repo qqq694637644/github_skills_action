@@ -1014,22 +1014,52 @@
   function normalizeBackend(value) {
     return String(value || "").trim().replace(/\/+$/, "");
   }
-  function normalizeProfile(profile) {
+  function nextEndpointId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `endpoint-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+  function normalizeEndpoint(endpoint, index = 0) {
     return {
-      backend: normalizeBackend(profile?.backend),
-      token: String(profile?.token || "").trim()
+      id: String(endpoint?.id || "").trim() || nextEndpointId(),
+      name: String(endpoint?.name || endpoint?.gptName || "").trim() || `\u63A5\u53E3 ${index + 1}`,
+      backend: normalizeBackend(endpoint?.backend),
+      token: String(endpoint?.token || "").trim()
     };
   }
-  function loadProfile() {
-    const stored = GM_getValue(PROFILE_KEY, null);
-    const source = Array.isArray(stored) ? stored.find((profile) => profile?.enabled !== false && profile?.backend) || stored.find((profile) => profile?.backend) : stored;
-    const normalized = normalizeProfile(source);
-    return normalized.backend ? normalized : null;
+  function normalizeConfig(value) {
+    let endpoints = [];
+    let selectedEndpointId = "";
+    if (Array.isArray(value)) {
+      endpoints = value.filter((endpoint) => endpoint?.backend).map((endpoint, index) => normalizeEndpoint(endpoint, index));
+    } else if (Array.isArray(value?.endpoints)) {
+      endpoints = value.endpoints.map((endpoint, index) => normalizeEndpoint(endpoint, index));
+      selectedEndpointId = String(value.selectedEndpointId || "").trim();
+    } else if (value?.backend) {
+      endpoints = [normalizeEndpoint({ ...value, name: value.name || "\u9ED8\u8BA4\u63A5\u53E3" }, 0)];
+    }
+    endpoints = endpoints.filter((endpoint) => endpoint.backend);
+    if (!endpoints.some((endpoint) => endpoint.id === selectedEndpointId)) {
+      selectedEndpointId = endpoints[0]?.id || "";
+    }
+    return {
+      version: 2,
+      endpoints,
+      selectedEndpointId
+    };
   }
-  function saveProfile(profile) {
-    const normalized = normalizeProfile(profile);
+  function loadConfig() {
+    return normalizeConfig(GM_getValue(PROFILE_KEY, null));
+  }
+  function saveConfig(config) {
+    const normalized = normalizeConfig(config);
     GM_setValue(PROFILE_KEY, normalized);
     return normalized;
+  }
+  function createEndpoint(index = 0) {
+    return normalizeEndpoint({ name: `\u63A5\u53E3 ${index + 1}` }, index);
+  }
+  function getEndpoint(config, endpointId) {
+    return config?.endpoints?.find((endpoint) => endpoint.id === endpointId) || null;
   }
   function validateBackend(value) {
     const backend = normalizeBackend(value);
@@ -1478,7 +1508,8 @@
       }
       #gam-settings-overlay .gam-settings-title { font-size: 15px; font-weight: 650; }
       #gam-settings-overlay button,
-      #gam-settings-overlay input { font: inherit; }
+      #gam-settings-overlay input,
+      #gam-settings-overlay select { font: inherit; }
       #gam-settings-overlay button { color: inherit; }
       #gam-settings-overlay .gam-icon-button {
         width: 30px;
@@ -1530,7 +1561,37 @@
         outline: none;
       }
       #gam-settings-overlay .gam-input:focus { border-color: #4f8e68; box-shadow: 0 0 0 2px rgba(35, 122, 66, .12); }
+      #gam-settings-overlay .gam-endpoint-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 7px;
+      }
       #gam-settings-overlay .gam-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+      #gam-settings-overlay .gam-scope-group {
+        display: grid;
+        gap: 8px;
+        margin: 0;
+        padding: 10px 11px;
+        border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+        border-radius: 9px;
+      }
+      #gam-settings-overlay .gam-scope-group legend {
+        padding: 0 5px;
+        font-weight: 600;
+      }
+      #gam-settings-overlay .gam-scope-option {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 8px;
+        align-items: start;
+        cursor: pointer;
+      }
+      #gam-settings-overlay .gam-scope-option input { margin-top: 3px; }
+      #gam-settings-overlay .gam-scope-option span { display: grid; gap: 1px; }
+      #gam-settings-overlay .gam-scope-option small {
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 12px;
+      }
       #gam-settings-overlay .gam-form-message { min-height: 19px; font-size: 12px; }
       #gam-settings-overlay .gam-form-message[data-state="error"] { color: #c53e3e; }
       #gam-settings-overlay .gam-form-message[data-state="success"] { color: #238349; }
@@ -1545,6 +1606,8 @@
       @media (max-width: 520px) {
         #gam-settings-overlay { padding: 8px; }
         #gam-settings-overlay .gam-settings-card { max-height: calc(100vh - 16px); }
+        #gam-settings-overlay .gam-endpoint-row { grid-template-columns: 1fr 1fr; }
+        #gam-settings-overlay .gam-endpoint-select { grid-column: 1 / -1; }
         #gam-settings-overlay .gam-editor-footer { flex-wrap: wrap; }
       }
     `;
@@ -2050,7 +2113,14 @@
       }
     });
   }
-  function createSettingsPanel({ getProfile, onApplyProfile }) {
+  function cloneConfig(config) {
+    return {
+      version: 2,
+      selectedEndpointId: config?.selectedEndpointId || "",
+      endpoints: (config?.endpoints || []).map((endpoint) => ({ ...endpoint }))
+    };
+  }
+  function createSettingsPanel({ getState, onApplySettings }) {
     let overlay = null;
     let style = null;
     function close() {
@@ -2061,6 +2131,14 @@
     }
     function open() {
       if (overlay?.isConnected) return;
+      const state = getState();
+      const draft = cloneConfig(state.config);
+      if (!draft.endpoints.length) {
+        const endpoint = createEndpoint(0);
+        draft.endpoints.push(endpoint);
+        draft.selectedEndpointId = endpoint.id;
+      }
+      let selectedEndpointId = state.activeEndpointId || draft.selectedEndpointId || draft.endpoints[0].id;
       style = document.createElement("style");
       style.textContent = SETTINGS_CSS;
       overlay = document.createElement("div");
@@ -2072,8 +2150,20 @@
           <button class="gam-icon-button gam-settings-close" type="button" aria-label="\u5173\u95ED\u914D\u7F6E">\xD7</button>
         </div>
         <div class="gam-settings-body">
-          <p class="gam-settings-note">\u540E\u7AEF\u5730\u5740\u5C31\u662F REST \u57FA\u5740\uFF0C\u76D1\u63A7\u63A5\u53E3\u4F1A\u76F4\u63A5\u5728\u5176\u540E\u62FC\u63A5 /v1/action-logs\u3002</p>
+          <p class="gam-settings-note">\u53EF\u4FDD\u5B58\u591A\u4E2A\u63A5\u53E3\uFF0C\u4F46\u76D1\u63A7\u59CB\u7EC8\u53EA\u4F7F\u7528\u4E00\u4E2A\u3002\u5168\u5C40\u9009\u62E9\u6C38\u4E45\u4FDD\u5B58\uFF1B\u5C40\u90E8\u9009\u62E9\u53EA\u5BF9\u5F53\u524D\u9875\u9762\u6709\u6548\uFF0C\u5237\u65B0\u540E\u81EA\u52A8\u6062\u590D\u5168\u5C40\u63A5\u53E3\u3002</p>
           <form class="gam-editor">
+            <div class="gam-field">
+              <span>\u63A5\u53E3</span>
+              <div class="gam-endpoint-row">
+                <select class="gam-input gam-endpoint-select" aria-label="\u9009\u62E9\u63A5\u53E3"></select>
+                <button class="gam-button gam-add-endpoint" type="button">\u6DFB\u52A0</button>
+                <button class="gam-button gam-delete-endpoint" type="button">\u5220\u9664</button>
+              </div>
+            </div>
+            <label class="gam-field">
+              <span>\u63A5\u53E3\u540D\u79F0</span>
+              <input class="gam-input gam-name" type="text" autocomplete="off" placeholder="\u4F8B\u5982 ChatGPT MCP" required>
+            </label>
             <label class="gam-field">
               <span>\u540E\u7AEF\u5730\u5740</span>
               <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://githubaction.giize.com/mcp-app" required>
@@ -2085,6 +2175,17 @@
                 <button class="gam-button gam-token-toggle" type="button">\u663E\u793A</button>
               </div>
             </label>
+            <fieldset class="gam-scope-group">
+              <legend>\u751F\u6548\u8303\u56F4</legend>
+              <label class="gam-scope-option">
+                <input type="radio" name="gam-scope" value="global">
+                <span><strong>\u5168\u5C40</strong><small>\u6C38\u4E45\u4FDD\u5B58\u4E3A\u9ED8\u8BA4\u63A5\u53E3\uFF0C\u5237\u65B0\u548C\u65B0\u9875\u9762\u7EE7\u7EED\u4F7F\u7528\u3002</small></span>
+              </label>
+              <label class="gam-scope-option">
+                <input type="radio" name="gam-scope" value="local">
+                <span><strong>\u5C40\u90E8</strong><small>\u53EA\u5728\u5F53\u524D\u9875\u9762\u4E34\u65F6\u4F7F\u7528\uFF0C\u5237\u65B0\u9875\u9762\u540E\u5931\u6548\u5E76\u6062\u590D\u5168\u5C40\u63A5\u53E3\u3002</small></span>
+              </label>
+            </fieldset>
             <div class="gam-form-message" aria-live="polite"></div>
             <div class="gam-editor-footer">
               <span class="gam-spacer"></span>
@@ -2098,27 +2199,62 @@
       document.documentElement.appendChild(style);
       document.body.appendChild(overlay);
       const editor = overlay.querySelector(".gam-editor");
+      const endpointSelect = overlay.querySelector(".gam-endpoint-select");
+      const nameInput = overlay.querySelector(".gam-name");
       const backendInput = overlay.querySelector(".gam-backend");
       const tokenInput = overlay.querySelector(".gam-token");
+      const deleteButton = overlay.querySelector(".gam-delete-endpoint");
       const formMessage = overlay.querySelector(".gam-form-message");
       const testButton = overlay.querySelector(".gam-test");
-      const current = getProfile();
-      backendInput.value = current?.backend || "";
-      tokenInput.value = current?.token || "";
+      const initialScope = state.localEndpointId ? "local" : "global";
+      overlay.querySelector(`input[name="gam-scope"][value="${initialScope}"]`).checked = true;
+      function currentEndpoint() {
+        return draft.endpoints.find((endpoint) => endpoint.id === selectedEndpointId) || null;
+      }
       function clearMessage() {
         formMessage.textContent = "";
         delete formMessage.dataset.state;
       }
-      function formProfile() {
-        return {
-          backend: normalizeBackend(backendInput.value),
-          token: tokenInput.value.trim()
-        };
+      function commitFields() {
+        const endpoint = currentEndpoint();
+        if (!endpoint) return;
+        endpoint.name = nameInput.value.trim();
+        endpoint.backend = normalizeBackend(backendInput.value);
+        endpoint.token = tokenInput.value.trim();
       }
-      function validateProfile(profile) {
-        const backendValidation = validateBackend(profile.backend);
-        if (!backendValidation.ok) return backendValidation.message;
-        profile.backend = backendValidation.backend;
+      function renderEndpointSelect() {
+        endpointSelect.replaceChildren(...draft.endpoints.map((endpoint, index) => {
+          const option = document.createElement("option");
+          option.value = endpoint.id;
+          const label = endpoint.name || `\u63A5\u53E3 ${index + 1}`;
+          option.textContent = endpoint.id === draft.selectedEndpointId ? `${label}\uFF08\u5168\u5C40\u9ED8\u8BA4\uFF09` : label;
+          return option;
+        }));
+        endpointSelect.value = selectedEndpointId;
+        deleteButton.disabled = draft.endpoints.length <= 1;
+      }
+      function loadSelectedEndpoint() {
+        const endpoint = currentEndpoint();
+        if (!endpoint) return;
+        nameInput.value = endpoint.name || "";
+        backendInput.value = endpoint.backend || "";
+        tokenInput.value = endpoint.token || "";
+        renderEndpointSelect();
+        clearMessage();
+      }
+      function validateDraft() {
+        for (let index = 0; index < draft.endpoints.length; index += 1) {
+          const endpoint = draft.endpoints[index];
+          endpoint.name = String(endpoint.name || "").trim();
+          if (!endpoint.name) return `\u63A5\u53E3 ${index + 1} \u7F3A\u5C11\u540D\u79F0\u3002`;
+          const validation = validateBackend(endpoint.backend);
+          if (!validation.ok) return `${endpoint.name}\uFF1A${validation.message}`;
+          endpoint.backend = validation.backend;
+          endpoint.token = String(endpoint.token || "").trim();
+        }
+        if (!draft.endpoints.some((endpoint) => endpoint.id === selectedEndpointId)) {
+          return "\u8BF7\u9009\u62E9\u8981\u4F7F\u7528\u7684\u63A5\u53E3\u3002";
+        }
         return "";
       }
       overlay.querySelector(".gam-settings-close").addEventListener("click", close);
@@ -2127,22 +2263,60 @@
         tokenInput.type = visible ? "password" : "text";
         event.currentTarget.textContent = visible ? "\u663E\u793A" : "\u9690\u85CF";
       });
+      endpointSelect.addEventListener("change", () => {
+        commitFields();
+        selectedEndpointId = endpointSelect.value;
+        loadSelectedEndpoint();
+      });
+      nameInput.addEventListener("input", () => {
+        const endpoint = currentEndpoint();
+        if (!endpoint) return;
+        endpoint.name = nameInput.value;
+        const option = [...endpointSelect.options].find((item) => item.value === endpoint.id);
+        if (option) option.textContent = endpoint.name.trim() || "\u672A\u547D\u540D\u63A5\u53E3";
+      });
+      overlay.querySelector(".gam-add-endpoint").addEventListener("click", () => {
+        commitFields();
+        const endpoint = createEndpoint(draft.endpoints.length);
+        draft.endpoints.push(endpoint);
+        selectedEndpointId = endpoint.id;
+        loadSelectedEndpoint();
+        nameInput.select();
+      });
+      deleteButton.addEventListener("click", () => {
+        if (draft.endpoints.length <= 1) return;
+        const index = draft.endpoints.findIndex((endpoint) => endpoint.id === selectedEndpointId);
+        if (index < 0) return;
+        draft.endpoints.splice(index, 1);
+        if (draft.selectedEndpointId === selectedEndpointId) {
+          draft.selectedEndpointId = draft.endpoints[0]?.id || "";
+        }
+        selectedEndpointId = draft.endpoints[Math.min(index, draft.endpoints.length - 1)]?.id || "";
+        loadSelectedEndpoint();
+      });
       testButton.addEventListener("click", () => {
-        const profile = formProfile();
         clearMessage();
-        testProfileConnection(profile, formMessage, testButton);
+        testProfileConnection({
+          backend: normalizeBackend(backendInput.value),
+          token: tokenInput.value.trim()
+        }, formMessage, testButton);
       });
       editor.addEventListener("submit", (event) => {
         event.preventDefault();
-        const profile = formProfile();
-        const error = validateProfile(profile);
+        commitFields();
+        const error = validateDraft();
         if (error) {
           formMessage.textContent = error;
           formMessage.dataset.state = "error";
           return;
         }
-        onApplyProfile(profile);
-        formMessage.textContent = "\u2713 \u5DF2\u4FDD\u5B58";
+        const scope = overlay.querySelector('input[name="gam-scope"]:checked')?.value || "global";
+        onApplySettings({
+          nextConfig: draft,
+          selectedEndpointId,
+          scope
+        });
+        formMessage.textContent = scope === "local" ? "\u2713 \u5F53\u524D\u9875\u9762\u5DF2\u4E34\u65F6\u5207\u6362\uFF1B\u5237\u65B0\u540E\u6062\u590D\u5168\u5C40\u63A5\u53E3" : "\u2713 \u5DF2\u4FDD\u5B58\u4E3A\u5168\u5C40\u9ED8\u8BA4\u63A5\u53E3";
         formMessage.dataset.state = "success";
       });
       overlay.addEventListener("click", (event) => {
@@ -2151,7 +2325,8 @@
       overlay.addEventListener("keydown", (event) => {
         if (event.key === "Escape") close();
       });
-      window.setTimeout(() => backendInput.focus(), 0);
+      loadSelectedEndpoint();
+      window.setTimeout(() => endpointSelect.focus(), 0);
     }
     return { open, close };
   }
@@ -2261,14 +2436,18 @@
   // src/main.js
   (function() {
     "use strict";
-    let profile = loadProfile();
+    let config = loadConfig();
+    let localEndpointId = null;
     let monitorActive = false;
     let actionLogClient = null;
     let activitySessionKey = null;
     let activitySessionCursor = null;
+    function getActiveEndpoint() {
+      return getEndpoint(config, localEndpointId) || getEndpoint(config, config.selectedEndpointId) || config.endpoints[0] || null;
+    }
     const composerAdapter = createComposerAdapter();
     const skillCatalogClient = createSkillCatalogClient({
-      getProfile: () => profile
+      getProfile: getActiveEndpoint
     });
     const activityStore = createActivityStore();
     let monitorUi = null;
@@ -2298,19 +2477,29 @@
       skillsMenu.close();
       monitorUi.unmount();
     }
-    function applyProfile(nextProfile) {
-      profile = saveProfile(nextProfile);
+    function applySettings({ nextConfig, selectedEndpointId, scope }) {
+      const persisted = {
+        ...nextConfig,
+        selectedEndpointId: scope === "global" ? selectedEndpointId : config.selectedEndpointId
+      };
+      config = saveConfig(persisted);
+      localEndpointId = scope === "local" ? selectedEndpointId : null;
       deactivateMonitor();
       if (document.visibilityState === "visible") activateMonitor();
     }
     const settingsPanel = createSettingsPanel({
-      getProfile: () => profile,
-      onApplyProfile: applyProfile
+      getState: () => ({
+        config,
+        activeEndpointId: getActiveEndpoint()?.id || "",
+        localEndpointId
+      }),
+      onApplySettings: applySettings
     });
     function activateMonitor() {
+      const profile = getActiveEndpoint();
       if (monitorActive || !profile?.backend) return;
       monitorActive = true;
-      const nextSessionKey = profile.backend;
+      const nextSessionKey = `${profile.id}:${profile.backend}`;
       if (activitySessionKey !== nextSessionKey) {
         activityStore.clear();
         activitySessionKey = nextSessionKey;
@@ -2319,7 +2508,7 @@
       monitorUi.mount();
       monitorUi.setStatus("idle");
       actionLogClient = createActionLogClient({
-        getProfile: () => profile,
+        getProfile: getActiveEndpoint,
         initialCursor: activitySessionCursor,
         onCursor: (cursor) => {
           activitySessionCursor = cursor;

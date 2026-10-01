@@ -3,7 +3,7 @@ import { compactActivity } from './activity/presentation.js';
 import { createActionLogClient } from './api/action-log-client.js';
 import { createSkillCatalogClient } from './api/skill-catalog-client.js';
 import { createComposerAdapter, loadSkillsCall } from './adapters/composer.js';
-import { loadProfile, saveProfile } from './profile/profile-store.js';
+import { getEndpoint, loadConfig, saveConfig } from './profile/profile-store.js';
 import { createMonitorPanel } from './ui/monitor-panel.js';
 import { createSettingsPanel } from './ui/settings-panel.js';
 import { createSkillsMenu } from './ui/skills-menu.js';
@@ -11,14 +11,23 @@ import { createSkillsMenu } from './ui/skills-menu.js';
 (function () {
   'use strict';
 
-  let profile = loadProfile();
+  let config = loadConfig();
+  let localEndpointId = null;
   let monitorActive = false;
   let actionLogClient = null;
   let activitySessionKey = null;
   let activitySessionCursor = null;
+
+  function getActiveEndpoint() {
+    return getEndpoint(config, localEndpointId)
+      || getEndpoint(config, config.selectedEndpointId)
+      || config.endpoints[0]
+      || null;
+  }
+
   const composerAdapter = createComposerAdapter();
   const skillCatalogClient = createSkillCatalogClient({
-    getProfile: () => profile,
+    getProfile: getActiveEndpoint,
   });
 
   const activityStore = createActivityStore();
@@ -51,22 +60,35 @@ import { createSkillsMenu } from './ui/skills-menu.js';
     monitorUi.unmount();
   }
 
-  function applyProfile(nextProfile) {
-    profile = saveProfile(nextProfile);
+  function applySettings({ nextConfig, selectedEndpointId, scope }) {
+    const persisted = {
+      ...nextConfig,
+      selectedEndpointId: scope === 'global'
+        ? selectedEndpointId
+        : config.selectedEndpointId,
+    };
+    config = saveConfig(persisted);
+    localEndpointId = scope === 'local' ? selectedEndpointId : null;
+
     deactivateMonitor();
     if (document.visibilityState === 'visible') activateMonitor();
   }
 
   const settingsPanel = createSettingsPanel({
-    getProfile: () => profile,
-    onApplyProfile: applyProfile,
+    getState: () => ({
+      config,
+      activeEndpointId: getActiveEndpoint()?.id || '',
+      localEndpointId,
+    }),
+    onApplySettings: applySettings,
   });
 
   function activateMonitor() {
+    const profile = getActiveEndpoint();
     if (monitorActive || !profile?.backend) return;
 
     monitorActive = true;
-    const nextSessionKey = profile.backend;
+    const nextSessionKey = `${profile.id}:${profile.backend}`;
     if (activitySessionKey !== nextSessionKey) {
       activityStore.clear();
       activitySessionKey = nextSessionKey;
@@ -76,7 +98,7 @@ import { createSkillsMenu } from './ui/skills-menu.js';
     monitorUi.setStatus('idle');
 
     actionLogClient = createActionLogClient({
-      getProfile: () => profile,
+      getProfile: getActiveEndpoint,
       initialCursor: activitySessionCursor,
       onCursor: (cursor) => { activitySessionCursor = cursor; },
       onItems(items) {

@@ -1064,6 +1064,8 @@ def create_app(settings: MCPSettings | None = None):
                 timeout=float(request.query_params.get("wait", "55")),
                 limit=int(request.query_params.get("limit", "50")),
                 workspace_id=request.query_params.get("workspace_id") or None,
+                operation=request.query_params.get("operation") or None,
+                phase=request.query_params.get("phase") or None,
             )
         )
 

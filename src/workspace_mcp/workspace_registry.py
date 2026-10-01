@@ -66,6 +66,19 @@ class WorkspaceRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return {"workspace_id": generated_id, "created": created, "empty": not any(path.iterdir())}
 
+    def list_ids(self) -> list[str]:
+        root = self.storage_root()
+        entries = [
+            path
+            for path in root.iterdir()
+            if path.is_dir() and _WORKSPACE_ID_RE.fullmatch(path.name)
+        ]
+        entries.sort(
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
+            reverse=True,
+        )
+        return [path.name for path in entries]
+
     def resolve(self, workspace_id: str) -> Path:
         if not _WORKSPACE_ID_RE.fullmatch(workspace_id):
             raise WorkspaceToolError(

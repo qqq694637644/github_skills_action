@@ -1,5 +1,4 @@
-const PRIMARY_EDITOR_SELECTOR = '#prompt-textarea.ProseMirror[contenteditable="true"]';
-const FALLBACK_EDITOR_SELECTOR = '#prompt-textarea[contenteditable="true"][role="textbox"]';
+const EDITOR_SELECTOR = 'div.ProseMirror[contenteditable="true"][role="textbox"][aria-multiline="true"][data-composer-markdown]';
 
 function containsNode(root, node) {
   if (!root || !node) return false;
@@ -12,8 +11,7 @@ export function createComposerAdapter() {
   let savedRange = null;
 
   function findEditor() {
-    return document.querySelector(PRIMARY_EDITOR_SELECTOR)
-      || document.querySelector(FALLBACK_EDITOR_SELECTOR);
+    return document.querySelector(EDITOR_SELECTOR);
   }
 
   function captureSelection() {

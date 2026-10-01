@@ -145,13 +145,26 @@
         result: detail || explorationResult(active, "Search completed", payload)
       });
     } else if (operation === "read") {
-      for (const path of payload.paths || []) {
+      const files = Array.isArray(payload.files) ? payload.files : [];
+      const requestedStart = Number.isInteger(payload.start_line) ? payload.start_line : null;
+      const requestedMax = Number.isInteger(payload.max_lines) ? payload.max_lines : null;
+      const items = files.length ? files.map((file) => ({
+        path: file.path,
+        startLine: file.start_line,
+        endLine: file.end_line
+      })) : (payload.paths || []).map((path) => ({
+        path,
+        startLine: requestedStart,
+        endLine: requestedStart && requestedMax ? requestedStart + requestedMax - 1 : null
+      }));
+      for (const item of items) {
+        const detail = Number.isInteger(item.startLine) && Number.isInteger(item.endLine) ? `${item.startLine}\u2013${item.endLine}` : "";
         entries.push({
           verb: "Read",
-          label: path,
-          detail: "",
+          label: item.path,
+          detail,
           updatedAt,
-          result: explorationResult(active, "Read completed", payload)
+          result: detail ? `${detail}${payload.truncated ? " \xB7 truncated" : ""}` : explorationResult(active, "Read completed", payload)
         });
       }
     } else if (operation === "inspect") {
@@ -1110,8 +1123,7 @@ ${result}`;
   }
 
   // src/adapters/composer.js
-  var PRIMARY_EDITOR_SELECTOR = '#prompt-textarea.ProseMirror[contenteditable="true"]';
-  var FALLBACK_EDITOR_SELECTOR = '#prompt-textarea[contenteditable="true"][role="textbox"]';
+  var EDITOR_SELECTOR = 'div.ProseMirror[contenteditable="true"][role="textbox"][aria-multiline="true"][data-composer-markdown]';
   function containsNode(root, node) {
     if (!root || !node) return false;
     if (root === node) return true;
@@ -1121,7 +1133,7 @@ ${result}`;
     let savedEditor = null;
     let savedRange = null;
     function findEditor() {
-      return document.querySelector(PRIMARY_EDITOR_SELECTOR) || document.querySelector(FALLBACK_EDITOR_SELECTOR);
+      return document.querySelector(EDITOR_SELECTOR);
     }
     function captureSelection() {
       savedEditor = null;

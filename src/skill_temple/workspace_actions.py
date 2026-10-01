@@ -815,6 +815,8 @@ def register_workspace_actions(app: FastAPI) -> None:
                 "operation": "read",
                 "workspace_id": request.workspace_id,
                 "paths": request.paths,
+                "start_line": request.start_line,
+                "max_lines": request.max_lines,
             },
             legacy_action="workspaceReadFiles",
             legacy_fields={"phase": "started", "paths": request.paths},
@@ -831,7 +833,14 @@ def register_workspace_actions(app: FastAPI) -> None:
                     "phase": "completed",
                     "payload": {
                         "operation": "read",
-                        "paths": [item.path for item in response.files],
+                        "files": [
+                            {
+                                "path": item.path,
+                                "start_line": item.start_line,
+                                "end_line": item.end_line,
+                            }
+                            for item in response.files
+                        ],
                         "truncated": response.truncated,
                     },
                 },
@@ -856,6 +865,8 @@ def register_workspace_actions(app: FastAPI) -> None:
                     "payload": {
                         "operation": "read",
                         "paths": request.paths,
+                        "start_line": request.start_line,
+                        "max_lines": request.max_lines,
                         "error_code": exc.code,
                         "diagnostic": exc.message,
                     },

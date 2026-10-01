@@ -409,7 +409,13 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
         kind: 'exploration',
         phase: 'completed',
         timestamp: '2026-09-21T12:00:22Z',
-        payload: { operation: 'read', paths: ['workspace_actions.py', 'runtime.py'] },
+        payload: {
+          operation: 'read',
+          files: [
+            { path: 'workspace_actions.py', start_line: 1, end_line: 200 },
+            { path: 'runtime.py', start_line: 201, end_line: 244 },
+          ],
+        },
       },
     },
   ]);
@@ -418,6 +424,13 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   assert.deepEqual(explorationHistory.map((cell) => cell.entries.length), [1, 3]);
   assert.equal(explorationHistory.every((cell) => presentActivity(cell).lines.length <= 3), true);
   assert.equal(presentActivity(explorationHistory[0]).title, 'Explored');
+  assert.deepEqual(
+    explorationHistory.flatMap((cell) => presentActivity(cell).lines).filter((line) => line.startsWith('Read ')),
+    [
+      'Read runtime.py · 201–244',
+      'Read workspace_actions.py · 1–200',
+    ],
+  );
   assert.deepEqual(
     explorationHistory.flatMap((cell) => cell.entries).map((entry) => `${entry.verb} ${entry.label}`),
     [

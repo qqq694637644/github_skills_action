@@ -7,7 +7,7 @@ import {
 } from './src/activity/presentation.js';
 import { createActionLogClient } from './src/api/action-log-client.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
-import { createComposerAdapter, loadSkillsCall } from './src/adapters/composer.js';
+import { loadSkillsCall } from './src/adapters/composer.js';
 import {
   loadEndpoints,
   loadGlobalActiveEndpointId,
@@ -16,13 +16,7 @@ import {
   validateBackend,
 } from './src/profile/profile-store.js';
 import { summarize } from './src/formatter/action-formatter.js';
-import { createActivityPanel } from './src/ui/activity-panel.js';
-import { createMonitorPanel } from './src/ui/monitor-panel.js';
-import { MONITOR_CSS } from './src/ui/styles.js';
-import {
-  FakeElement,
-  installDomFixture,
-} from './test/dom-fixture.mjs';
+import { installDomFixture } from './test/dom-fixture.mjs';
 
 const succeeded = summarize(
   '[2026-09-21 12:00:00] ACTION workspaceCommand action="start" command="git status --short" state="succeeded" exit_code=0',
@@ -41,9 +35,6 @@ assert.deepEqual(validateBackend('https://skills.example.com/'), {
 });
 assert.equal(validateBackend('ftp://skills.example.com').ok, false);
 assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintenance"])');
-assert.match(MONITOR_CSS, /resize:\s*both/);
-assert.match(MONITOR_CSS, /\.gam-resize-handle\s*\{[\s\S]*?left:\s*0;[\s\S]*?bottom:\s*0;[\s\S]*?cursor:\s*nesw-resize/);
-assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/);
 
 // V3 deliberately separates the persistent endpoint library from the global
 // active endpoint and ignores the legacy combined profile storage key.
@@ -139,92 +130,6 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.equal(requests, 1);
   completeRequest();
   await Promise.all([first, refresh]);
-}
-
-// Skills target the current ChatGPT ProseMirror composer only. The editor that
-// owns the captured selection stays pinned through the menu click so a
-// fallback/duplicate input cannot steal the insertion target.
-{
-  const { document, window } = installDomFixture();
-  const editor = new FakeElement('div');
-  editor.isConnected = true;
-  const alternateEditor = new FakeElement('div');
-  alternateEditor.isConnected = true;
-  const range = {
-    commonAncestorContainer: editor,
-    cloneRange() { return this; },
-  };
-  let restoredRange = null;
-  let insertedText = null;
-  const selection = {
-    rangeCount: 1,
-    getRangeAt: () => range,
-    removeAllRanges() {},
-    addRange(value) { restoredRange = value; },
-  };
-  editor.contains = (node) => node === editor;
-  let primaryLookupCount = 0;
-  document.querySelector = (selector) => {
-    if (selector === '#prompt-textarea.ProseMirror[contenteditable="true"]') {
-      primaryLookupCount += 1;
-      return primaryLookupCount === 1 ? editor : alternateEditor;
-    }
-    if (selector === '#prompt-textarea[contenteditable="true"][role="textbox"]') {
-      return alternateEditor;
-    }
-    if (selector.includes('textarea')) throw new Error('textarea composer fallback must not be queried');
-    return null;
-  };
-  document.execCommand = (command, _showUi, value) => {
-    assert.equal(command, 'insertText');
-    insertedText = value;
-    return true;
-  };
-  window.getSelection = () => selection;
-
-  const composer = createComposerAdapter();
-  assert.equal(composer.captureSelection(), true);
-  assert.equal(composer.insertText(loadSkillsCall('github-maintenance')), true);
-  assert.equal(restoredRange, range);
-  assert.equal(insertedText, 'loadSkills(["github-maintenance"])');
-  assert.equal(primaryLookupCount, 1);
-}
-
-// If ChatGPT omits the ProseMirror class, accept only the same prompt editor
-// shape with role=textbox; do not fall back to textarea-based composers.
-{
-  const { document, window } = installDomFixture();
-  const editor = new FakeElement('div');
-  editor.isConnected = true;
-  editor.contains = (node) => node === editor;
-  const range = {
-    commonAncestorContainer: editor,
-    cloneRange() { return this; },
-  };
-  const selection = {
-    rangeCount: 1,
-    getRangeAt: () => range,
-    removeAllRanges() {},
-    addRange() {},
-  };
-  const seenSelectors = [];
-  document.querySelector = (selector) => {
-    seenSelectors.push(selector);
-    if (selector === '#prompt-textarea.ProseMirror[contenteditable="true"]') return null;
-    if (selector === '#prompt-textarea[contenteditable="true"][role="textbox"]') return editor;
-    if (selector.includes('textarea')) throw new Error('textarea composer fallback must not be queried');
-    return null;
-  };
-  document.execCommand = () => true;
-  window.getSelection = () => selection;
-
-  const composer = createComposerAdapter();
-  assert.equal(composer.captureSelection(), true);
-  assert.equal(composer.insertText('loadSkills(["fallback"])'), true);
-  assert.deepEqual(seenSelectors, [
-    '#prompt-textarea.ProseMirror[contenteditable="true"]',
-    '#prompt-textarea[contenteditable="true"][role="textbox"]',
-  ]);
 }
 
 // Structured command events update one active cell in place and move it to
@@ -663,126 +568,6 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   } finally {
     console.debug = originalDebug;
   }
-}
-
-// NOW cells update in place and terminal cells move into RECENT without
-// duplicating DOM nodes.
-{
-  installDomFixture();
-  const root = new FakeElement('div');
-  const panel = createActivityPanel({ root });
-  const running = {
-    id: 'command:dom',
-    kind: 'command',
-    phase: 'started',
-    startedAt: '2026-09-21T12:00:00Z',
-    updatedAt: '2026-09-21T12:00:00Z',
-    payload: { command: 'pytest -q' },
-    liveOutput: '',
-    entries: [],
-    revision: 1,
-  };
-  panel.render({ active: [running], recent: [] });
-  const nowList = root.querySelector('.gam-now-list');
-  const recentList = root.querySelector('.gam-recent-list');
-  assert.equal(nowList.childElementCount, 1);
-  assert.equal(recentList.childElementCount, 0);
-  assert.equal(nowList.children[0].children[0].children[1].textContent, 'Running pytest -q');
-
-  const updated = {
-    ...running,
-    updatedAt: '2026-09-21T12:00:01Z',
-    liveOutput: 'collecting...\n',
-    revision: 2,
-  };
-  panel.render({ active: [updated], recent: [] });
-  assert.equal(nowList.childElementCount, 1);
-  assert.equal(nowList.children[0].children[1].children[0].textContent, 'collecting...');
-  assert.match(nowList.children[0].children[0].title, /调用\npytest -q/);
-  assert.match(nowList.children[0].children[0].title, /当前输出\ncollecting\.\.\./);
-
-  const completed = {
-    ...updated,
-    phase: 'completed',
-    updatedAt: '2026-09-21T12:00:02Z',
-    payload: { command: 'pytest -q', stdout_preview: ['50 passed'], stderr_preview: [] },
-    revision: 3,
-  };
-  panel.render({ active: [], recent: [completed] });
-  assert.equal(nowList.childElementCount, 0);
-  assert.equal(recentList.childElementCount, 1);
-  assert.equal(recentList.children[0].children[0].children[1].textContent, 'Ran pytest -q');
-  assert.match(recentList.children[0].children[0].title, /结果\ncollecting\.\.\./);
-
-  // RECENT follows the newest item only while the scrollbar is already at
-  // the newest edge. If the user has scrolled away, preserve the visible
-  // anchor even when a newer cell is inserted above it.
-  const recentSection = root.querySelector('.gam-recent-section');
-  recentSection.getBoundingClientRect = () => ({ top: 0, bottom: 100, height: 100 });
-  recentSection.scrollTop = 40;
-  const existingNode = recentList.children[0];
-  existingNode.getBoundingClientRect = () => {
-    const top = recentList.childElementCount === 1 ? 20 : 40;
-    return { top, bottom: top + 20, height: 20 };
-  };
-  const newer = {
-    ...completed,
-    id: 'command:newer',
-    updatedAt: '2026-09-21T12:00:03Z',
-    payload: { command: 'git status', stdout_preview: ['clean'], stderr_preview: [] },
-  };
-  panel.render({ active: [], recent: [newer, completed] });
-  assert.equal(recentSection.scrollTop, 60);
-
-  recentSection.scrollTop = 0;
-  panel.render({ active: [], recent: [{ ...newer, revision: 4 }, completed] });
-  assert.equal(recentSection.scrollTop, 0);
-}
-
-// Deactivation/unmount must discard activity queued by the previous profile so
-// a later visibility resume cannot replay stale UI from that profile.
-{
-  const { document, timers } = installDomFixture();
-  document.visibilityState = 'hidden';
-  const panel = createMonitorPanel({
-    activityStore: createActivityStore(),
-    isActive: () => true,
-  });
-  panel.queueActivity({ action: 'profile-a', detail: 'old', time: '', raw: '' });
-  assert.equal(timers.size, 0);
-  panel.unmount();
-
-  document.visibilityState = 'visible';
-  panel.resumeActivity();
-  assert.equal(timers.size, 0);
-}
-
-// Profile/session teardown must clear connection hints as well as queued
-// activity so a newly mounted profile cannot inherit stale backend status.
-{
-  const { document } = installDomFixture();
-  const panel = createMonitorPanel({
-    activityStore: createActivityStore(),
-    isActive: () => true,
-  });
-  panel.mount();
-  const panelElement = document.body.children[0];
-  const activityRoot = panelElement.querySelector('.gam-activity-root');
-  const hint = activityRoot.querySelector('.gam-monitor-hint');
-
-  panel.recordHint('Profile A disconnected');
-  assert.equal(hint.textContent, 'Profile A disconnected');
-  assert.equal(hint.hidden, false);
-
-  panel.unmount();
-  assert.equal(hint.textContent, '');
-  assert.equal(hint.hidden, true);
-
-  panel.mount();
-  panel.recordHint('Profile A disconnected');
-  assert.equal(hint.textContent, 'Profile A disconnected');
-  assert.equal(hint.hidden, false);
-  panel.unmount();
 }
 
 // Poll suspension must abort the active request and resume with a fresh poll

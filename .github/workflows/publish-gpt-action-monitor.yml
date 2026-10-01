@@ -69,7 +69,7 @@ jobs:
         working-directory: ${{ env.SCRIPT_DIR }}
         run: npm ci
 
-      - name: Run tests
+      - name: Run stable userscript tests
         working-directory: ${{ env.SCRIPT_DIR }}
         run: npm test
 

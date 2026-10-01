@@ -53,6 +53,10 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         ]
         assert "wait_seconds" in command.input_schema["properties"]
         command_properties = command.input_schema["properties"]
+        assert (
+            "Required on every workspaceCommand call"
+            in command_properties["action"]["description"]
+        )
         assert command_properties["workspace_id"]["anyOf"][0]["pattern"] == "^ws_[0-9a-f]{16}$"
         assert command_properties["script"]["anyOf"][0]["minLength"] == 1
         assert command_properties["script"]["anyOf"][0]["maxLength"] == 20_000
@@ -63,12 +67,14 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         action_conditions = command.input_schema["allOf"]
         assert any(
             item.get("if", {}).get("properties", {}).get("action", {}).get("const") == "start"
+            and item["if"].get("required") == ["action"]
             and set(item["then"]["required"]) == {"idempotency_key", "workspace_id", "script"}
             for item in action_conditions
         )
         for action in ("get", "logs", "cancel"):
             assert any(
                 item.get("if", {}).get("properties", {}).get("action", {}).get("const") == action
+                and item["if"].get("required") == ["action"]
                 and item["then"]["required"] == ["operation_id"]
                 for item in action_conditions
             )
@@ -99,7 +105,22 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         assert inspect_properties["paths"]["anyOf"][0]["items"]["maxLength"] == 500
         assert inspect_properties["queries"]["anyOf"][0]["items"]["minLength"] == 1
         assert inspect_properties["queries"]["anyOf"][0]["items"]["maxLength"] == 500
+
+        patch_tool = by_name["workspaceApplyPatch"]
+        assert patch_tool.description is not None
+        assert "*** Begin Patch" in patch_tool.description
+        patch_description = patch_tool.input_schema["properties"]["patch"]["description"]
+        assert "Raw workspace patch text" in patch_description
+        assert "*** End Patch" in patch_description
+
+        assert by_name["prepareWorkspace"].annotations is not None
+        assert by_name["prepareWorkspace"].annotations.read_only_hint is False
+        for name in ("workspaceWriteFile", "workspaceApplyPatch"):
+            assert by_name[name].annotations is not None
+            assert by_name[name].annotations.read_only_hint is False
+            assert by_name[name].annotations.destructive_hint is True
         assert command.annotations is not None
+        assert command.annotations.read_only_hint is False
         assert command.annotations.destructive_hint is True
         assert command.annotations.open_world_hint is True
 

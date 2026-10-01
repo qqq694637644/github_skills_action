@@ -5,13 +5,62 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 OperationState = Literal["running", "succeeded", "failed", "timed_out", "canceled", "interrupted"]
-WorkspaceId = Annotated[str, Field(pattern=r"^ws_[0-9a-f]{16}$")]
-OperationId = Annotated[str, Field(pattern=r"^op_[0-9a-f]{16}$")]
-IdempotencyKey = Annotated[str, Field(min_length=8, max_length=200)]
+CommandAction = Annotated[
+    Literal["start", "get", "logs", "cancel", "list"],
+    Field(
+        description=(
+            "Required on every workspaceCommand call. Use start to launch work; get to follow a "
+            "running operation; logs to reread/page historical output; cancel to stop an "
+            "operation; list to enumerate operations."
+        )
+    ),
+]
+WorkspaceId = Annotated[
+    str,
+    Field(
+        pattern=r"^ws_[0-9a-f]{16}$",
+        description="Workspace identifier returned by prepareWorkspace.",
+    ),
+]
+OperationId = Annotated[
+    str,
+    Field(
+        pattern=r"^op_[0-9a-f]{16}$",
+        description="Operation identifier returned by workspaceCommand(action=start).",
+    ),
+]
+IdempotencyKey = Annotated[
+    str,
+    Field(
+        min_length=8,
+        max_length=200,
+        description="Stable caller-chosen key used to make create/start retries safe.",
+    ),
+]
 WorkspacePath = Annotated[str, Field(min_length=1, max_length=500)]
 QueryText = Annotated[str, Field(min_length=1, max_length=500)]
-ScriptText = Annotated[str, Field(min_length=1, max_length=20000)]
-PatchText = Annotated[str, Field(min_length=1)]
+ScriptText = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=20000,
+        description="PowerShell 7 script. Only valid with workspaceCommand(action=start).",
+    ),
+]
+PatchText = Annotated[
+    str,
+    Field(
+        min_length=1,
+        description=(
+            "Raw workspace patch text; do not wrap it in Markdown fences or send a git/unified "
+            "diff. "
+            "The first line must be '*** Begin Patch' and the last line '*** End Patch'. Use "
+            "'*** Update File: <relative-path>' followed by one or more '@@' hunks whose lines "
+            "start with space, '+', or '-'; use '*** Add File: <relative-path>' with every content "
+            "line starting '+'; use '*** Delete File: <relative-path>' only when allow_delete=true."
+        ),
+    ),
+]
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
 Paths = Annotated[list[WorkspacePath], Field(min_length=1, max_length=50)]
 Queries = Annotated[list[QueryText], Field(max_length=10)]
@@ -216,7 +265,7 @@ class WorkspaceOperationSummary(WorkspaceModel):
 
 
 class WorkspaceCommandRequest(WorkspaceModel):
-    action: Literal["start", "get", "logs", "cancel", "list"]
+    action: CommandAction
     idempotency_key: IdempotencyKey | None = None
     workspace_id: WorkspaceId | None = None
     script: ScriptText | None = None

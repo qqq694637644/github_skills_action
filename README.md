@@ -97,7 +97,38 @@ overwrite_if_sha256_matches
 
 ### `workspaceApplyPatch`
 
-应用多文件文本 Patch。
+应用多文件 UTF-8 文本 Patch。调用前应先用 `workspaceInspect` / `workspaceSearch`
+定位文件，并用 `workspaceReadFiles` 读取要修改的准确内容。单个已知文件需要完整替换时优先
+使用 `workspaceWriteFile`；需要有界的多文件局部修改时使用 `workspaceApplyPatch`。
+
+`patch` 使用本项目的原始 Patch grammar，**不是** `git diff` / unified diff，也不要包在
+Markdown code fence 中。首尾必须是：
+
+```text
+*** Begin Patch
+...
+*** End Patch
+```
+
+最小更新示例：
+
+```text
+*** Begin Patch
+*** Update File: src/example.py
+@@
+-old_value = 1
++old_value = 2
+*** End Patch
+```
+
+规则：
+
+- 所有路径都是相对 Workspace root 的相对路径；
+- `*** Update File: <path>` 后必须至少有一个 `@@` hunk，hunk 行必须以空格、`+` 或 `-` 开头；
+- `*** Add File: <path>` 的每一行文件内容都必须以 `+` 开头；
+- `*** Delete File: <path>` 只有在 `allow_delete=true` 时允许，且 section 内不能携带文件内容；
+- 不要发送 `diff --git`、`--- a/...`、`+++ b/...` 这类 unified diff header；
+- 格式不确定时先用 `dry_run=true` 验证，再提交真实修改。
 
 支持：
 
@@ -126,6 +157,7 @@ workspaceCommand(
 输入核心字段：
 
 ```text
+action = start
 idempotency_key
 workspace_id
 script
@@ -159,6 +191,7 @@ stderr_eof
 输入：
 
 ```text
+action = get
 operation_id
 wait_seconds
 stdout_offset
@@ -201,6 +234,7 @@ terminal state
 显式读取历史日志：
 
 ```text
+action = logs
 operation_id
 stdout_offset
 stderr_offset
@@ -216,11 +250,12 @@ max_bytes
 
 #### `cancel`
 
-请求取消 operation，并终止对应 PowerShell process tree。
+请求取消 operation，并终止对应 PowerShell process tree。调用时必须传
+`action=cancel` 和 `operation_id`。
 
 #### `list`
 
-枚举 operation，可按 state 过滤。
+枚举 operation，调用时传 `action=list`，可按 `state` 过滤。
 
 ## PowerShell 权限模型
 

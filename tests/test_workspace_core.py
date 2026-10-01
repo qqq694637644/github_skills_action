@@ -121,6 +121,52 @@ def test_workspace_files_search_write_and_patch() -> None:
         _run(scenario(Path(temp)))
 
 
+def test_workspace_patch_preserves_crlf_line_endings() -> None:
+    async def scenario() -> None:
+        service = LocalWorkspaceService()
+        try:
+            prepared = await service.prepare_workspace(
+                idempotency_key="workspace-patch-crlf-001", workspace_id=None
+            )
+            workspace_id = str(prepared["workspace_id"])
+            await service.write_file(
+                workspace_id=workspace_id,
+                path="src/crlf.txt",
+                content="alpha\nbeta\n",
+                mode="create_only",
+                line_ending="crlf",
+                expected_sha256=None,
+                dry_run=False,
+                max_bytes=None,
+            )
+
+            patched = await service.apply_patch(
+                workspace_id=workspace_id,
+                patch=(
+                    "*** Begin Patch\n"
+                    "*** Update File: src/crlf.txt\n"
+                    "@@\n"
+                    "-beta\n"
+                    "+gamma\n"
+                    "*** End Patch"
+                ),
+                dry_run=False,
+                allow_delete=False,
+                max_changed_files=None,
+                max_patch_bytes=None,
+            )
+
+            path = Path(os.environ["WORKSPACE_ROOT"]) / workspace_id / "src/crlf.txt"
+            assert path.read_bytes() == b"alpha\r\ngamma\r\n"
+            assert patched["changed_files"][0]["additions"] == 1
+            assert patched["changed_files"][0]["deletions"] == 1
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
+        _run(scenario())
+
+
 def test_workspace_file_tools_reject_paths_outside_root() -> None:
     async def scenario(root: Path) -> None:
         service = LocalWorkspaceService()

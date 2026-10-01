@@ -12,9 +12,9 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from pydantic import AnyHttpUrl, BaseModel, ValidationError
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.applications import Starlette
 
 from .auth import JWTTokenVerifier
 from .config import MCPSettings
@@ -27,6 +27,7 @@ from .logging import (
     wait_for_action_events,
 )
 from .models import (
+    CommandAction,
     ContextLines,
     IdempotencyKey,
     LogBytes,
@@ -69,10 +70,13 @@ from .workspace_files import LocalWorkspaceService
 from .workspace_patch import WorkspaceToolError
 
 SERVER_INSTRUCTIONS = (
-    "Use workspaceInspect/workspaceSearch before guessing paths. Read exact files with "
-    "workspaceReadFiles and modify text with workspaceWriteFile/workspaceApplyPatch. "
-    "workspaceCommand separates PowerShell lifetime from one MCP call: start and get return "
-    "incremental logs directly; use logs only to reread or page historical output."
+    "Use workspaceInspect/workspaceSearch before guessing paths and workspaceReadFiles before "
+    "editing exact targets. Use workspaceWriteFile for one complete known file and "
+    "workspaceApplyPatch for bounded multi-file edits; workspaceApplyPatch.patch must be raw patch "
+    "text enclosed by '*** Begin Patch' and '*** End Patch', not a git/unified diff or Markdown "
+    "fence. workspaceCommand requires action on every call: start also requires idempotency_key, "
+    "workspace_id, and script; get/logs/cancel require operation_id. Carry next_stdout_offset and "
+    "next_stderr_offset into subsequent get calls; use logs only to reread/page historical output."
 )
 
 
@@ -183,7 +187,10 @@ def _advertised_input_schema(
         all_of.extend(
             [
                 {
-                    "if": {"properties": {"action": {"const": "start"}}},
+                    "if": {
+                        "properties": {"action": {"const": "start"}},
+                        "required": ["action"],
+                    },
                     "then": {
                         "properties": {
                             "idempotency_key": {
@@ -202,7 +209,10 @@ def _advertised_input_schema(
                 },
                 *[
                     {
-                        "if": {"properties": {"action": {"const": action}}},
+                        "if": {
+                            "properties": {"action": {"const": action}},
+                            "required": ["action"],
+                        },
                         "then": {
                             "properties": {
                                 "operation_id": {
@@ -313,7 +323,7 @@ def create_server(
             "When creating, idempotency_key is required; when reusing, workspace_id is required. "
             "Repository and branch state are not managed implicitly."
         ),
-        annotations=_READ_ONLY,
+        annotations=_PREPARE,
     )
     async def prepare_workspace(
         idempotency_key: IdempotencyKey | None = None,
@@ -664,7 +674,7 @@ def create_server(
             "hash-checked overwrite, dry-run, and line-ending control. The target must remain "
             "inside the workspace root after path and symlink/junction resolution."
         ),
-        annotations=_READ_ONLY,
+        annotations=_WRITE,
     )
     async def workspace_write_file(
         workspace_id: WorkspaceId,
@@ -760,11 +770,14 @@ def create_server(
         name="workspaceApplyPatch",
         title="Apply workspace patch",
         description=(
-            "Apply a bounded multi-file text patch with optional dry-run and delete permission. "
-            "Changes are committed atomically with rollback on failure. Every patch path is "
-            "confined to the workspace root."
+            "Use after inspecting/reading exact targets for bounded multi-file UTF-8 edits. patch "
+            "uses the raw workspace patch grammar, not a standard git/unified diff: begin with "
+            "'*** Begin Patch', end with '*** End Patch', and use Update/Add/Delete File sections. "
+            "Update sections require '@@' hunks; Add content lines start with '+'; Delete requires "
+            "allow_delete=true. Do not wrap patch text in Markdown fences. Changes are committed "
+            "atomically with rollback on failure, and every path is confined to the workspace root."
         ),
-        annotations=_READ_ONLY,
+        annotations=_WRITE,
     )
     async def workspace_apply_patch(
         workspace_id: WorkspaceId,
@@ -863,10 +876,10 @@ def create_server(
             "start requires idempotency_key, workspace_id, and script; get/logs/cancel require "
             "operation_id."
         ),
-        annotations=_READ_ONLY,
+        annotations=_COMMAND,
     )
     async def workspace_command(
-        action: Literal["start", "get", "logs", "cancel", "list"],
+        action: CommandAction,
         idempotency_key: IdempotencyKey | None = None,
         workspace_id: WorkspaceId | None = None,
         script: ScriptText | None = None,

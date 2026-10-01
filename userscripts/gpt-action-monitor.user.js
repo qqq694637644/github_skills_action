@@ -140,7 +140,6 @@
         label: payload.query || "code",
         detail,
         updatedAt,
-        outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
         result: detail || explorationResult(active, "Search completed", payload)
       });
     } else if (operation === "read") {
@@ -150,7 +149,6 @@
           label: path,
           detail: "",
           updatedAt,
-          outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
           result: explorationResult(active, "Read completed", payload)
         });
       }
@@ -162,7 +160,6 @@
           label: path,
           detail: "",
           updatedAt,
-          outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
           result: listResult
         });
       }
@@ -174,7 +171,6 @@
           label: search.query || "code",
           detail,
           updatedAt,
-          outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
           result: detail || explorationResult(active, "Search completed", payload)
         });
       }
@@ -184,7 +180,6 @@
           label: path,
           detail: "",
           updatedAt,
-          outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
           result: explorationResult(active, "Read completed", payload)
         });
       }
@@ -547,28 +542,18 @@ ${text.slice(-HOVER_TEXT_LIMIT)}`;
   }
   function activityHoverText(cell) {
     const presentation = presentActivity(cell);
-    const outputLabel = cell?.phase === "started" || cell?.phase === "updated" ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C";
-    return [
-      `\u6700\u540E\u6D3B\u52A8  ${formatLocalTime(cell?.updatedAt || cell?.startedAt || "")}`,
-      "",
-      "\u8C03\u7528",
-      hoverCall(cell || {}, presentation),
-      "",
-      outputLabel,
-      hoverOutput(cell || {}, presentation)
-    ].join("\n");
+    const time = formatLocalTime(cell?.updatedAt || cell?.startedAt || "");
+    const call = hoverCall(cell || {}, presentation);
+    const output = hoverOutput(cell || {}, presentation);
+    return `${time} \xB7 ${call}
+${output}`;
   }
   function explorationEntryHoverText(entry) {
     const call = `${entry?.verb || "Explore"} ${entry?.label || ""}`.trim();
-    return [
-      `\u6700\u540E\u6D3B\u52A8  ${formatLocalTime(entry?.updatedAt || "")}`,
-      "",
-      "\u8C03\u7528",
-      limitHoverText(call),
-      "",
-      entry?.outputLabel || "\u7ED3\u679C",
-      limitHoverText(entry?.result || entry?.detail || "(no output)")
-    ].join("\n");
+    const time = formatLocalTime(entry?.updatedAt || "");
+    const result = limitHoverText(entry?.result || entry?.detail || "(no output)");
+    return `${time} \xB7 ${limitHoverText(call)}
+${result}`;
   }
   function leadingLines(lines) {
     return (lines || []).map((line) => String(line || "").trimEnd()).filter((line) => line.trim()).slice(0, PREVIEW_LINES);

@@ -63,7 +63,6 @@ export function explorationEntries(payload, updatedAt = '', phase = 'completed')
       label: payload.query || 'code',
       detail,
       updatedAt,
-      outputLabel: active ? '当前输出' : '结果',
       result: detail || explorationResult(active, 'Search completed', payload),
     });
   } else if (operation === 'read') {
@@ -73,7 +72,6 @@ export function explorationEntries(payload, updatedAt = '', phase = 'completed')
         label: path,
         detail: '',
         updatedAt,
-        outputLabel: active ? '当前输出' : '结果',
         result: explorationResult(active, 'Read completed', payload),
       });
     }
@@ -87,7 +85,6 @@ export function explorationEntries(payload, updatedAt = '', phase = 'completed')
         label: path,
         detail: '',
         updatedAt,
-        outputLabel: active ? '当前输出' : '结果',
         result: listResult,
       });
     }
@@ -101,7 +98,6 @@ export function explorationEntries(payload, updatedAt = '', phase = 'completed')
         label: search.query || 'code',
         detail,
         updatedAt,
-        outputLabel: active ? '当前输出' : '结果',
         result: detail || explorationResult(active, 'Search completed', payload),
       });
     }
@@ -111,7 +107,6 @@ export function explorationEntries(payload, updatedAt = '', phase = 'completed')
         label: path,
         detail: '',
         updatedAt,
-        outputLabel: active ? '当前输出' : '结果',
         result: explorationResult(active, 'Read completed', payload),
       });
     }

@@ -164,9 +164,7 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   assert.equal(runningPresentation.title, 'Running python -m pytest -q');
   assert.deepEqual(runningPresentation.lines, ['two', 'three', 'four']);
   const runningHover = activityHoverText(running);
-  assert.match(runningHover, /最后活动  \d{2}:\d{2}:\d{2}/);
-  assert.match(runningHover, /调用\npython -m pytest -q/);
-  assert.match(runningHover, /当前输出\none\ntwo\nthree\nfour/);
+  assert.match(runningHover, /^\d{2}:\d{2}:\d{2} · python -m pytest -q\none\ntwo\nthree\nfour$/);
 
   activityStore.ingest([{
     id: 3,
@@ -188,7 +186,7 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   assert.equal(activityStore.snapshot().recent.length, 1);
   const completedCommand = activityStore.snapshot().recent[0];
   assert.equal(presentActivity(completedCommand).title, 'Ran python -m pytest -q');
-  assert.match(activityHoverText(completedCommand), /结果\none\ntwo\nthree\nfour/);
+  assert.match(activityHoverText(completedCommand), /^\d{2}:\d{2}:\d{2} · python -m pytest -q\none\ntwo\nthree\nfour$/);
 
   activityStore.ingest([{
     id: 3,
@@ -345,6 +343,7 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
       activity_id: 'search:active',
       kind: 'exploration',
       phase: 'completed',
+      timestamp: '2026-09-21T12:00:20Z',
       payload: { operation: 'search', query: 'workspaceCommand', match_count: 11 },
     },
   }]);
@@ -358,6 +357,7 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
         activity_id: 'search:1',
         kind: 'exploration',
         phase: 'completed',
+        timestamp: '2026-09-21T12:00:21Z',
         payload: { operation: 'search', query: 'workspaceCommand', match_count: 11 },
       },
     },
@@ -367,6 +367,7 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
         activity_id: 'read:1',
         kind: 'exploration',
         phase: 'completed',
+        timestamp: '2026-09-21T12:00:22Z',
         payload: { operation: 'read', paths: ['workspace_actions.py', 'runtime.py'] },
       },
     },
@@ -386,8 +387,7 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
     ],
   );
   const searchEntry = explorationHistory[1].entries[1];
-  assert.match(explorationEntryHoverText(searchEntry), /调用\nSearch workspaceCommand/);
-  assert.match(explorationEntryHoverText(searchEntry), /结果\n11 matches/);
+  assert.match(explorationEntryHoverText(searchEntry), /^\d{2}:\d{2}:\d{2} · Search workspaceCommand\n11 matches$/);
 
   activityStore.ingest([{
     id: 23,

@@ -151,31 +151,17 @@ function hoverCall(cell, presentation) {
 
 export function activityHoverText(cell) {
   const presentation = presentActivity(cell);
-  const outputLabel = cell?.phase === 'started' || cell?.phase === 'updated'
-    ? '当前输出'
-    : '结果';
-  return [
-    `最后活动  ${formatLocalTime(cell?.updatedAt || cell?.startedAt || '')}`,
-    '',
-    '调用',
-    hoverCall(cell || {}, presentation),
-    '',
-    outputLabel,
-    hoverOutput(cell || {}, presentation),
-  ].join('\n');
+  const time = formatLocalTime(cell?.updatedAt || cell?.startedAt || '');
+  const call = hoverCall(cell || {}, presentation);
+  const output = hoverOutput(cell || {}, presentation);
+  return `${time} · ${call}\n${output}`;
 }
 
 export function explorationEntryHoverText(entry) {
   const call = `${entry?.verb || 'Explore'} ${entry?.label || ''}`.trim();
-  return [
-    `最后活动  ${formatLocalTime(entry?.updatedAt || '')}`,
-    '',
-    '调用',
-    limitHoverText(call),
-    '',
-    entry?.outputLabel || '结果',
-    limitHoverText(entry?.result || entry?.detail || '(no output)'),
-  ].join('\n');
+  const time = formatLocalTime(entry?.updatedAt || '');
+  const result = limitHoverText(entry?.result || entry?.detail || '(no output)');
+  return `${time} · ${limitHoverText(call)}\n${result}`;
 }
 
 function leadingLines(lines) {

@@ -6,7 +6,7 @@ import argparse
 import copy
 import secrets
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -233,6 +233,8 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
     @app.get("/v1/action-logs", include_in_schema=False)
     def action_logs(
         workspace_id: str | None = Query(default=None, pattern=r"^ws_[0-9a-f]{16}$"),
+        operation: str | None = Query(default=None, min_length=1, max_length=80),
+        phase: Literal["started", "updated", "completed", "failed"] | None = Query(default=None),
         after: int = Query(default=0, ge=0),
         wait: float = Query(default=55.0, ge=0.0, le=60.0),
         limit: int = Query(default=50, ge=1, le=100),
@@ -242,6 +244,8 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
             timeout=wait,
             limit=limit,
             workspace_id=workspace_id,
+            operation=operation,
+            phase=phase,
         )
 
     @app.get("/console", response_class=HTMLResponse, include_in_schema=False)

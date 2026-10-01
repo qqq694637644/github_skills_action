@@ -16,6 +16,7 @@ from skill_temple.action_logging import (
     clear_action_events,
     command_for_log,
     log_action,
+    log_activity,
     wait_for_action_events,
 )
 from skill_temple.app import create_app, main
@@ -443,6 +444,44 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(result["items"]), ACTION_EVENT_LIMIT)
         self.assertEqual(result["items"][0]["id"], 6)
         self.assertEqual(result["last_id"], ACTION_EVENT_LIMIT + 5)
+
+    def test_action_log_monitor_filters_prepare_workspace_discovery(self) -> None:
+        clear_action_events()
+        with patch("skill_temple.action_logging.LOGGER.info"):
+            log_activity(
+                activity_id="prepare:1",
+                kind="generic",
+                phase="completed",
+                payload={
+                    "operation": "prepare_workspace",
+                    "workspace_id": "ws_0123456789abcdef",
+                },
+                legacy_action="prepareWorkspace",
+            )
+            log_activity(
+                activity_id="read:1",
+                kind="exploration",
+                phase="completed",
+                payload={
+                    "operation": "read",
+                    "workspace_id": "ws_0123456789abcdef",
+                },
+                legacy_action="workspaceReadFiles",
+            )
+
+        result = wait_for_action_events(
+            after=0,
+            timeout=0,
+            limit=50,
+            operation="prepare_workspace",
+            phase="completed",
+        )
+
+        self.assertEqual(len(result["items"]), 1)
+        event = result["items"][0]["event"]
+        self.assertEqual(event["phase"], "completed")
+        self.assertEqual(event["payload"]["operation"], "prepare_workspace")
+        self.assertEqual(result["last_id"], 2)
 
     def test_cli_disables_uvicorn_access_log_by_default(self) -> None:
         with (

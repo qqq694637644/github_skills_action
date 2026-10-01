@@ -214,14 +214,26 @@ def wait_for_action_events(
     timeout: float = 25.0,
     limit: int = 50,
     workspace_id: str | None = None,
+    operation: str | None = None,
+    phase: ActivityPhase | None = None,
 ) -> dict[str, Any]:
-    """Return newer events, optionally filtered to one workspace, with a global cursor."""
+    """Return newer events matching optional structured filters, with a global cursor."""
 
-    def matches_workspace(item: ActionEventItem) -> bool:
-        if workspace_id is None:
+    def matches_filters(item: ActionEventItem) -> bool:
+        if workspace_id is None and operation is None and phase is None:
             return True
         event = item.get("event")
-        return event is not None and event.get("workspace_id") == workspace_id
+        if event is None:
+            return False
+        if workspace_id is not None and event.get("workspace_id") != workspace_id:
+            return False
+        if phase is not None and event.get("phase") != phase:
+            return False
+        if operation is not None:
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping) or payload.get("operation") != operation:
+                return False
+        return True
 
     def collect(start_after: int) -> tuple[list[dict[str, Any]], int]:
         items: list[dict[str, Any]] = []
@@ -230,7 +242,7 @@ def wait_for_action_events(
             if item["id"] <= start_after:
                 continue
             scanned_id = item["id"]
-            if matches_workspace(item):
+            if matches_filters(item):
                 items.append(item.copy())
                 if len(items) >= limit:
                     break
@@ -242,7 +254,7 @@ def wait_for_action_events(
             wait_after = last_id
             _ACTION_EVENTS_CONDITION.wait_for(
                 lambda: any(
-                    item["id"] > wait_after and matches_workspace(item)
+                    item["id"] > wait_after and matches_filters(item)
                     for item in _ACTION_EVENTS
                 ),
                 timeout=timeout,

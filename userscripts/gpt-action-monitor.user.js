@@ -1529,6 +1529,14 @@ ${result}`;
       gap: 3px;
       min-width: 0;
     }
+    #gpt-action-monitor .gam-last-activity-time {
+      flex: 0 0 auto;
+      min-width: 0;
+      color: color-mix(in srgb, CanvasText 52%, transparent);
+      font: 500 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap;
+    }
+    #gpt-action-monitor .gam-last-activity-time:empty { display: none; }
     #gpt-action-monitor .gam-workspace-button,
     #gpt-action-monitor .gam-workspace-reset,
     #gpt-action-monitor .gam-workspace-refresh,
@@ -2153,6 +2161,7 @@ ${result}`;
       <div class="gam-header">
         <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
         <div class="gam-header-controls">
+          <span class="gam-last-activity-time" aria-label="\u6700\u8FD1\u670D\u52A1\u7AEF\u6D3B\u52A8\u65F6\u95F4"></span>
           <button class="gam-workspace-button" type="button" aria-haspopup="menu" aria-label="\u9009\u62E9 Workspace">Workspace \u25BE</button>
           <button class="gam-skills-button" type="button" aria-haspopup="menu" aria-label="\u6253\u5F00 Skills">Skills \u203A</button>
           <button class="gam-close" type="button" title="\u6536\u8D77" aria-label="\u6536\u8D77 GPT Activity">\u2212</button>
@@ -2166,6 +2175,7 @@ ${result}`;
     style.textContent = MONITOR_CSS;
     const handle = panel.querySelector(".gam-handle");
     const close = panel.querySelector(".gam-close");
+    const lastActivityTime = panel.querySelector(".gam-last-activity-time");
     const workspaceButton = panel.querySelector(".gam-workspace-button");
     const skillsButton = panel.querySelector(".gam-skills-button");
     const header = panel.querySelector(".gam-header");
@@ -2196,6 +2206,17 @@ ${result}`;
     }
     function getStatus() {
       return panel.dataset.status;
+    }
+    function setLastActivityTimestamp(timestamp) {
+      const date = new Date(timestamp);
+      if (!timestamp || Number.isNaN(date.getTime())) return;
+      const pad = (value) => String(value).padStart(2, "0");
+      lastActivityTime.textContent = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+      lastActivityTime.title = timestamp;
+    }
+    function clearLastActivityTime() {
+      lastActivityTime.textContent = "";
+      lastActivityTime.removeAttribute("title");
     }
     function updateChipSide() {
       if (panel.classList.contains("gam-open")) return;
@@ -2502,6 +2523,8 @@ ${result}`;
       keepInViewport,
       setStatus,
       getStatus,
+      setLastActivityTimestamp,
+      clearLastActivityTime,
       recordHint,
       clearHint,
       queueActivity,
@@ -3237,8 +3260,22 @@ ${result}`;
       activitySessionKey = null;
       if (!preserveCursor) activitySessionCursor = null;
       monitorUi.resetSession();
+      monitorUi.clearLastActivityTime();
       monitorUi.clearAttention();
       monitorUi.setStatus("idle");
+    }
+    function latestEventTimestamp(items) {
+      let latest = "";
+      let latestTime = -Infinity;
+      for (const item of items || []) {
+        const timestamp = item?.event?.timestamp;
+        if (!timestamp) continue;
+        const parsed = Date.parse(timestamp);
+        if (!Number.isFinite(parsed) || parsed < latestTime) continue;
+        latest = timestamp;
+        latestTime = parsed;
+      }
+      return latest;
     }
     function resetEffectiveEndpointContext() {
       resetWorkspaceStream();
@@ -3368,6 +3405,8 @@ ${result}`;
           activitySessionCursor = cursor;
         },
         onItems(items) {
+          const latestTimestamp = latestEventTimestamp(items);
+          if (latestTimestamp) monitorUi.setLastActivityTimestamp(latestTimestamp);
           const newest = activityStore.ingest(items);
           if (newest) {
             monitorUi.clearHint();

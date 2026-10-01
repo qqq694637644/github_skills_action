@@ -26,6 +26,7 @@ export function createMonitorPanel({
       <div class="gam-header">
         <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
         <div class="gam-header-controls">
+          <span class="gam-last-activity-time" aria-label="最近服务端活动时间"></span>
           <button class="gam-workspace-button" type="button" aria-haspopup="menu" aria-label="选择 Workspace">Workspace ▾</button>
           <button class="gam-skills-button" type="button" aria-haspopup="menu" aria-label="打开 Skills">Skills ›</button>
           <button class="gam-close" type="button" title="收起" aria-label="收起 GPT Activity">−</button>
@@ -41,6 +42,7 @@ export function createMonitorPanel({
 
   const handle = panel.querySelector('.gam-handle');
   const close = panel.querySelector('.gam-close');
+  const lastActivityTime = panel.querySelector('.gam-last-activity-time');
   const workspaceButton = panel.querySelector('.gam-workspace-button');
   const skillsButton = panel.querySelector('.gam-skills-button');
   const header = panel.querySelector('.gam-header');
@@ -75,6 +77,19 @@ export function createMonitorPanel({
 
   function getStatus() {
     return panel.dataset.status;
+  }
+
+  function setLastActivityTimestamp(timestamp) {
+    const date = new Date(timestamp);
+    if (!timestamp || Number.isNaN(date.getTime())) return;
+    const pad = (value) => String(value).padStart(2, '0');
+    lastActivityTime.textContent = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    lastActivityTime.title = timestamp;
+  }
+
+  function clearLastActivityTime() {
+    lastActivityTime.textContent = '';
+    lastActivityTime.removeAttribute('title');
   }
 
   function updateChipSide() {
@@ -417,6 +432,8 @@ export function createMonitorPanel({
     keepInViewport,
     setStatus,
     getStatus,
+    setLastActivityTimestamp,
+    clearLastActivityTime,
     recordHint,
     clearHint,
     queueActivity,

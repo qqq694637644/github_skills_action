@@ -193,6 +193,14 @@ export const MONITOR_CSS = `
       gap: 3px;
       min-width: 0;
     }
+    #gpt-action-monitor .gam-last-activity-time {
+      flex: 0 0 auto;
+      min-width: 0;
+      color: color-mix(in srgb, CanvasText 52%, transparent);
+      font: 500 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap;
+    }
+    #gpt-action-monitor .gam-last-activity-time:empty { display: none; }
     #gpt-action-monitor .gam-workspace-button,
     #gpt-action-monitor .gam-workspace-reset,
     #gpt-action-monitor .gam-workspace-refresh,

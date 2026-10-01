@@ -124,8 +124,23 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     activitySessionKey = null;
     if (!preserveCursor) activitySessionCursor = null;
     monitorUi.resetSession();
+    monitorUi.clearLastActivityTime();
     monitorUi.clearAttention();
     monitorUi.setStatus('idle');
+  }
+
+  function latestEventTimestamp(items) {
+    let latest = '';
+    let latestTime = -Infinity;
+    for (const item of items || []) {
+      const timestamp = item?.event?.timestamp;
+      if (!timestamp) continue;
+      const parsed = Date.parse(timestamp);
+      if (!Number.isFinite(parsed) || parsed < latestTime) continue;
+      latest = timestamp;
+      latestTime = parsed;
+    }
+    return latest;
   }
 
   function resetEffectiveEndpointContext() {
@@ -280,6 +295,8 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       initialCursor: activitySessionCursor,
       onCursor: (cursor) => { activitySessionCursor = cursor; },
       onItems(items) {
+        const latestTimestamp = latestEventTimestamp(items);
+        if (latestTimestamp) monitorUi.setLastActivityTimestamp(latestTimestamp);
         const newest = activityStore.ingest(items);
         if (newest) {
           monitorUi.clearHint();

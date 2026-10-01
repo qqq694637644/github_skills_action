@@ -106,7 +106,7 @@
       updatedAt: event.timestamp || "",
       payload,
       liveOutput: "",
-      entries: event.kind === "exploration" ? explorationEntries(payload) : [],
+      entries: event.kind === "exploration" ? explorationEntries(payload, event.timestamp || "", event.phase || "completed") : [],
       revision: 1
     };
   }
@@ -124,28 +124,69 @@
       revision: 1
     };
   }
-  function explorationEntries(payload) {
+  function explorationResult(active, completedText, payload) {
+    if (active) return "\u7B49\u5F85\u7ED3\u679C";
+    return payload.truncated ? `${completedText} \xB7 truncated` : completedText;
+  }
+  function explorationEntries(payload, updatedAt = "", phase = "completed") {
     const entries = [];
     const operation = payload.operation;
+    const active = phase === "started" || phase === "updated";
     if (operation === "search") {
+      const detail = Number.isInteger(payload.match_count) ? `${payload.match_count} matches` : "";
       entries.push({
         verb: "Search",
         label: payload.query || "code",
-        detail: Number.isInteger(payload.match_count) ? `${payload.match_count} matches` : ""
+        detail,
+        updatedAt,
+        outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
+        result: detail || explorationResult(active, "Search completed", payload)
       });
     } else if (operation === "read") {
-      for (const path of payload.paths || []) entries.push({ verb: "Read", label: path, detail: "" });
+      for (const path of payload.paths || []) {
+        entries.push({
+          verb: "Read",
+          label: path,
+          detail: "",
+          updatedAt,
+          outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
+          result: explorationResult(active, "Read completed", payload)
+        });
+      }
     } else if (operation === "inspect") {
-      for (const path of payload.paths || []) entries.push({ verb: "List", label: path, detail: "" });
+      const listResult = Number.isInteger(payload.tree_entries) ? `${payload.tree_entries} tree entries` : explorationResult(active, "List completed", payload);
+      for (const path of payload.paths || []) {
+        entries.push({
+          verb: "List",
+          label: path,
+          detail: "",
+          updatedAt,
+          outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
+          result: listResult
+        });
+      }
       const searches = (payload.searches || []).length ? payload.searches : (payload.queries || []).map((query) => ({ query }));
       for (const search of searches) {
+        const detail = Number.isInteger(search.match_count) ? `${search.match_count} matches` : "";
         entries.push({
           verb: "Search",
           label: search.query || "code",
-          detail: Number.isInteger(search.match_count) ? `${search.match_count} matches` : ""
+          detail,
+          updatedAt,
+          outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
+          result: detail || explorationResult(active, "Search completed", payload)
         });
       }
-      for (const path of payload.files || []) entries.push({ verb: "Read", label: path, detail: "" });
+      for (const path of payload.files || []) {
+        entries.push({
+          verb: "Read",
+          label: path,
+          detail: "",
+          updatedAt,
+          outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
+          result: explorationResult(active, "Read completed", payload)
+        });
+      }
     }
     return entries;
   }
@@ -195,7 +236,7 @@
       const cell2 = existing ? cloneCell(existing) : structuredCell(event);
       cell2.phase = event.phase;
       cell2.payload = { ...cell2.payload, ...payload };
-      cell2.entries = explorationEntries(payload);
+      cell2.entries = explorationEntries(payload, event.timestamp || cell2.updatedAt, event.phase);
       cell2.updatedAt = event.timestamp || cell2.updatedAt;
       cell2.revision += existing ? 1 : 0;
       state.active.set(cell2.id, cell2);
@@ -208,12 +249,12 @@
       const failed = activeCell ? cloneCell(activeCell) : structuredCell(event);
       failed.phase = "failed";
       failed.payload = { ...failed.payload, ...payload };
-      failed.entries = explorationEntries(payload);
+      failed.entries = explorationEntries(payload, event.timestamp || failed.updatedAt, event.phase);
       failed.updatedAt = event.timestamp || failed.updatedAt;
       failed.revision += activeCell ? 1 : 0;
       return addRecent(state, failed, maxHistory);
     }
-    const entries = explorationEntries(payload);
+    const entries = explorationEntries(payload, event.timestamp || "", event.phase);
     const groupIndex = state.explorationGroupId ? state.recent.findIndex((cell2) => cell2.id === state.explorationGroupId) : -1;
     if (groupIndex >= 0) {
       const grouped = cloneCell(state.recent[groupIndex]);
@@ -346,6 +387,7 @@
   // src/activity/presentation.js
   var PREVIEW_LINES = 3;
   var JSON_DIAGNOSTIC_LIMIT = 100;
+  var HOVER_TEXT_LIMIT = 6e3;
   var jsonDiagnostics = /* @__PURE__ */ new Set();
   function rememberJsonDiagnostic(key) {
     if (jsonDiagnostics.has(key)) return false;
@@ -443,6 +485,71 @@
   }
   function compactLines(lines) {
     return (lines || []).map((line) => String(line || "").trimEnd()).filter((line) => line.trim()).slice(-PREVIEW_LINES);
+  }
+  function formatLocalTime(timestamp) {
+    if (!timestamp) return "--:--:--";
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return "--:--:--";
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
+  function limitHoverText(value) {
+    const text = String(value || "").trimEnd();
+    if (text.length <= HOVER_TEXT_LIMIT) return text;
+    return `\u2026
+${text.slice(-HOVER_TEXT_LIMIT)}`;
+  }
+  function hoverOutput(cell, presentation) {
+    if (cell.kind === "command") {
+      const live = String(cell.liveOutput || "").trimEnd();
+      if (live.trim()) return limitHoverText(live);
+      const payload = cell.payload || {};
+      const previews = [
+        ...payload.stdout_preview || [],
+        ...payload.stderr_preview || []
+      ].map((line) => String(line || "").trimEnd()).filter((line) => line.trim());
+      if (previews.length) return limitHoverText(previews.join("\n"));
+      return limitHoverText(payload.error_message || payload.diagnostic || "(no output)");
+    }
+    const lines = presentation.lines || [];
+    if (lines.length) return limitHoverText(lines.join("\n"));
+    return limitHoverText(cell.payload?.diagnostic || cell.payload?.error_message || "(no output)");
+  }
+  function hoverCall(cell, presentation) {
+    const payload = cell.payload || {};
+    if (cell.kind === "command") return limitHoverText(payload.command || "command");
+    if (cell.kind === "write") return limitHoverText(`workspaceWriteFile ${payload.path || ""}`.trim());
+    if (cell.kind === "patch") return payload.dry_run ? "workspaceApplyPatch (dry run)" : "workspaceApplyPatch";
+    if (cell.kind === "skill") {
+      const target = payload.path || (payload.skill_ids || []).join(", ") || payload.skill_id || "";
+      return limitHoverText([payload.operation || "skill", target].filter(Boolean).join(" "));
+    }
+    return limitHoverText(payload.operation || presentation.title);
+  }
+  function activityHoverText(cell) {
+    const presentation = presentActivity(cell);
+    const outputLabel = cell?.phase === "started" || cell?.phase === "updated" ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C";
+    return [
+      `\u6700\u540E\u6D3B\u52A8  ${formatLocalTime(cell?.updatedAt || cell?.startedAt || "")}`,
+      "",
+      "\u8C03\u7528",
+      hoverCall(cell || {}, presentation),
+      "",
+      outputLabel,
+      hoverOutput(cell || {}, presentation)
+    ].join("\n");
+  }
+  function explorationEntryHoverText(entry) {
+    const call = `${entry?.verb || "Explore"} ${entry?.label || ""}`.trim();
+    return [
+      `\u6700\u540E\u6D3B\u52A8  ${formatLocalTime(entry?.updatedAt || "")}`,
+      "",
+      "\u8C03\u7528",
+      limitHoverText(call),
+      "",
+      entry?.outputLabel || "\u7ED3\u679C",
+      limitHoverText(entry?.result || entry?.detail || "(no output)")
+    ].join("\n");
   }
   function leadingLines(lines) {
     return (lines || []).map((line) => String(line || "").trimEnd()).filter((line) => line.trim()).slice(0, PREVIEW_LINES);
@@ -1746,6 +1853,7 @@
     `;
 
   // src/ui/activity-panel.js
+  var LATEST_SCROLL_THRESHOLD_PX = 2;
   function createCellNode() {
     const node = document.createElement("div");
     node.className = "gam-activity-cell";
@@ -1759,7 +1867,7 @@
     const details = document.createElement("div");
     details.className = "gam-activity-details";
     node.append(title, details);
-    node._gam = { marker, label, details, signature: "" };
+    node._gam = { title, marker, label, details, signature: "" };
     return node;
   }
   function updateCellNode(node, cell) {
@@ -1774,16 +1882,21 @@
     ]);
     if (node._gam.signature === signature) return;
     node._gam.signature = signature;
+    node.dataset.activityId = cell.id;
     node.dataset.status = presentation.status;
     node.dataset.kind = cell.kind;
     node._gam.marker.textContent = presentation.marker || "\u2022";
     node._gam.label.textContent = presentation.title;
-    node.title = presentation.title;
+    node.title = "";
+    node._gam.title.title = cell.kind === "exploration" ? "" : activityHoverText(cell);
     node._gam.details.replaceChildren();
-    for (const line of presentation.lines) {
+    const visibleExplorationEntries = cell.kind === "exploration" ? (cell.entries || []).slice(-presentation.lines.length) : [];
+    for (let index = 0; index < presentation.lines.length; index += 1) {
+      const line = presentation.lines[index];
       const detail = document.createElement("div");
       detail.className = "gam-activity-detail-line";
       detail.textContent = line;
+      detail.title = cell.kind === "exploration" ? explorationEntryHoverText(visibleExplorationEntries[index]) : activityHoverText(cell);
       node._gam.details.appendChild(detail);
     }
   }
@@ -1824,11 +1937,48 @@
     const recentList = root.querySelector(".gam-recent-list");
     const nowNodes = /* @__PURE__ */ new Map();
     const recentNodes = /* @__PURE__ */ new Map();
+    function captureRecentViewport() {
+      const scrollTop = Number(recentSection.scrollTop || 0);
+      if (scrollTop <= LATEST_SCROLL_THRESHOLD_PX) {
+        return { followLatest: true, scrollTop };
+      }
+      const sectionRect = recentSection.getBoundingClientRect();
+      const viewportTop = sectionRect.top;
+      for (const node of recentList.children) {
+        const rect = node.getBoundingClientRect();
+        const bottom = Number.isFinite(rect.bottom) ? rect.bottom : rect.top + rect.height;
+        if (bottom > viewportTop) {
+          return {
+            followLatest: false,
+            scrollTop,
+            anchorId: node.dataset.activityId,
+            anchorOffset: rect.top - viewportTop
+          };
+        }
+      }
+      return { followLatest: false, scrollTop };
+    }
+    function restoreRecentViewport(viewport) {
+      if (viewport.followLatest) {
+        recentSection.scrollTop = 0;
+        return;
+      }
+      const anchor = viewport.anchorId ? recentNodes.get(viewport.anchorId) : null;
+      if (!anchor) {
+        recentSection.scrollTop = viewport.scrollTop;
+        return;
+      }
+      const viewportTop = recentSection.getBoundingClientRect().top;
+      const anchorOffset = anchor.getBoundingClientRect().top - viewportTop;
+      recentSection.scrollTop += anchorOffset - viewport.anchorOffset;
+    }
     function render(snapshot) {
+      const recentViewport = captureRecentViewport();
       syncList(nowList, snapshot.active || [], nowNodes);
       syncList(recentList, snapshot.recent || [], recentNodes);
       nowSection.hidden = !(snapshot.active || []).length;
       recentSection.hidden = !(snapshot.recent || []).length;
+      restoreRecentViewport(recentViewport);
     }
     function setHint(message) {
       hint.textContent = message || "";

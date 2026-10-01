@@ -1,5 +1,6 @@
 const PREVIEW_LINES = 3;
 const JSON_DIAGNOSTIC_LIMIT = 100;
+const HOVER_TEXT_LIMIT = 6_000;
 const jsonDiagnostics = new Set();
 
 function rememberJsonDiagnostic(key) {
@@ -102,6 +103,79 @@ function compactLines(lines) {
     .map((line) => String(line || '').trimEnd())
     .filter((line) => line.trim())
     .slice(-PREVIEW_LINES);
+}
+
+function formatLocalTime(timestamp) {
+  if (!timestamp) return '--:--:--';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '--:--:--';
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function limitHoverText(value) {
+  const text = String(value || '').trimEnd();
+  if (text.length <= HOVER_TEXT_LIMIT) return text;
+  return `…\n${text.slice(-HOVER_TEXT_LIMIT)}`;
+}
+
+function hoverOutput(cell, presentation) {
+  if (cell.kind === 'command') {
+    const live = String(cell.liveOutput || '').trimEnd();
+    if (live.trim()) return limitHoverText(live);
+    const payload = cell.payload || {};
+    const previews = [
+      ...(payload.stdout_preview || []),
+      ...(payload.stderr_preview || []),
+    ].map((line) => String(line || '').trimEnd()).filter((line) => line.trim());
+    if (previews.length) return limitHoverText(previews.join('\n'));
+    return limitHoverText(payload.error_message || payload.diagnostic || '(no output)');
+  }
+
+  const lines = presentation.lines || [];
+  if (lines.length) return limitHoverText(lines.join('\n'));
+  return limitHoverText(cell.payload?.diagnostic || cell.payload?.error_message || '(no output)');
+}
+
+function hoverCall(cell, presentation) {
+  const payload = cell.payload || {};
+  if (cell.kind === 'command') return limitHoverText(payload.command || 'command');
+  if (cell.kind === 'write') return limitHoverText(`workspaceWriteFile ${payload.path || ''}`.trim());
+  if (cell.kind === 'patch') return payload.dry_run ? 'workspaceApplyPatch (dry run)' : 'workspaceApplyPatch';
+  if (cell.kind === 'skill') {
+    const target = payload.path || (payload.skill_ids || []).join(', ') || payload.skill_id || '';
+    return limitHoverText([payload.operation || 'skill', target].filter(Boolean).join(' '));
+  }
+  return limitHoverText(payload.operation || presentation.title);
+}
+
+export function activityHoverText(cell) {
+  const presentation = presentActivity(cell);
+  const outputLabel = cell?.phase === 'started' || cell?.phase === 'updated'
+    ? '当前输出'
+    : '结果';
+  return [
+    `最后活动  ${formatLocalTime(cell?.updatedAt || cell?.startedAt || '')}`,
+    '',
+    '调用',
+    hoverCall(cell || {}, presentation),
+    '',
+    outputLabel,
+    hoverOutput(cell || {}, presentation),
+  ].join('\n');
+}
+
+export function explorationEntryHoverText(entry) {
+  const call = `${entry?.verb || 'Explore'} ${entry?.label || ''}`.trim();
+  return [
+    `最后活动  ${formatLocalTime(entry?.updatedAt || '')}`,
+    '',
+    '调用',
+    limitHoverText(call),
+    '',
+    entry?.outputLabel || '结果',
+    limitHoverText(entry?.result || entry?.detail || '(no output)'),
+  ].join('\n');
 }
 
 function leadingLines(lines) {

@@ -24,7 +24,9 @@ function structuredCell(event) {
     updatedAt: event.timestamp || '',
     payload,
     liveOutput: '',
-    entries: event.kind === 'exploration' ? explorationEntries(payload) : [],
+    entries: event.kind === 'exploration'
+      ? explorationEntries(payload, event.timestamp || '', event.phase || 'completed')
+      : [],
     revision: 1,
   };
 }
@@ -44,30 +46,74 @@ function legacyCell(item) {
   };
 }
 
-export function explorationEntries(payload) {
+function explorationResult(active, completedText, payload) {
+  if (active) return '等待结果';
+  return payload.truncated ? `${completedText} · truncated` : completedText;
+}
+
+export function explorationEntries(payload, updatedAt = '', phase = 'completed') {
   const entries = [];
   const operation = payload.operation;
+  const active = phase === 'started' || phase === 'updated';
   if (operation === 'search') {
+    const detail = Number.isInteger(payload.match_count) ? `${payload.match_count} matches` : '';
     entries.push({
       verb: 'Search',
       label: payload.query || 'code',
-      detail: Number.isInteger(payload.match_count) ? `${payload.match_count} matches` : '',
+      detail,
+      updatedAt,
+      outputLabel: active ? '当前输出' : '结果',
+      result: detail || explorationResult(active, 'Search completed', payload),
     });
   } else if (operation === 'read') {
-    for (const path of payload.paths || []) entries.push({ verb: 'Read', label: path, detail: '' });
+    for (const path of payload.paths || []) {
+      entries.push({
+        verb: 'Read',
+        label: path,
+        detail: '',
+        updatedAt,
+        outputLabel: active ? '当前输出' : '结果',
+        result: explorationResult(active, 'Read completed', payload),
+      });
+    }
   } else if (operation === 'inspect') {
-    for (const path of payload.paths || []) entries.push({ verb: 'List', label: path, detail: '' });
+    const listResult = Number.isInteger(payload.tree_entries)
+      ? `${payload.tree_entries} tree entries`
+      : explorationResult(active, 'List completed', payload);
+    for (const path of payload.paths || []) {
+      entries.push({
+        verb: 'List',
+        label: path,
+        detail: '',
+        updatedAt,
+        outputLabel: active ? '当前输出' : '结果',
+        result: listResult,
+      });
+    }
     const searches = (payload.searches || []).length
       ? payload.searches
       : (payload.queries || []).map((query) => ({ query }));
     for (const search of searches) {
+      const detail = Number.isInteger(search.match_count) ? `${search.match_count} matches` : '';
       entries.push({
         verb: 'Search',
         label: search.query || 'code',
-        detail: Number.isInteger(search.match_count) ? `${search.match_count} matches` : '',
+        detail,
+        updatedAt,
+        outputLabel: active ? '当前输出' : '结果',
+        result: detail || explorationResult(active, 'Search completed', payload),
       });
     }
-    for (const path of payload.files || []) entries.push({ verb: 'Read', label: path, detail: '' });
+    for (const path of payload.files || []) {
+      entries.push({
+        verb: 'Read',
+        label: path,
+        detail: '',
+        updatedAt,
+        outputLabel: active ? '当前输出' : '结果',
+        result: explorationResult(active, 'Read completed', payload),
+      });
+    }
   }
   return entries;
 }
@@ -123,7 +169,7 @@ function reduceExploration(state, event, maxHistory) {
     const cell = existing ? cloneCell(existing) : structuredCell(event);
     cell.phase = event.phase;
     cell.payload = { ...cell.payload, ...payload };
-    cell.entries = explorationEntries(payload);
+    cell.entries = explorationEntries(payload, event.timestamp || cell.updatedAt, event.phase);
     cell.updatedAt = event.timestamp || cell.updatedAt;
     cell.revision += existing ? 1 : 0;
     state.active.set(cell.id, cell);
@@ -137,13 +183,13 @@ function reduceExploration(state, event, maxHistory) {
     const failed = activeCell ? cloneCell(activeCell) : structuredCell(event);
     failed.phase = 'failed';
     failed.payload = { ...failed.payload, ...payload };
-    failed.entries = explorationEntries(payload);
+    failed.entries = explorationEntries(payload, event.timestamp || failed.updatedAt, event.phase);
     failed.updatedAt = event.timestamp || failed.updatedAt;
     failed.revision += activeCell ? 1 : 0;
     return addRecent(state, failed, maxHistory);
   }
 
-  const entries = explorationEntries(payload);
+  const entries = explorationEntries(payload, event.timestamp || '', event.phase);
   const groupIndex = state.explorationGroupId
     ? state.recent.findIndex((cell) => cell.id === state.explorationGroupId)
     : -1;

@@ -1,4 +1,10 @@
-import { presentActivity } from '../activity/presentation.js';
+import {
+  activityHoverText,
+  explorationEntryHoverText,
+  presentActivity,
+} from '../activity/presentation.js';
+
+const LATEST_SCROLL_THRESHOLD_PX = 2;
 
 function createCellNode() {
   const node = document.createElement('div');
@@ -13,7 +19,7 @@ function createCellNode() {
   const details = document.createElement('div');
   details.className = 'gam-activity-details';
   node.append(title, details);
-  node._gam = { marker, label, details, signature: '' };
+  node._gam = { title, marker, label, details, signature: '' };
   return node;
 }
 
@@ -29,16 +35,25 @@ function updateCellNode(node, cell) {
   ]);
   if (node._gam.signature === signature) return;
   node._gam.signature = signature;
+  node.dataset.activityId = cell.id;
   node.dataset.status = presentation.status;
   node.dataset.kind = cell.kind;
   node._gam.marker.textContent = presentation.marker || '•';
   node._gam.label.textContent = presentation.title;
-  node.title = presentation.title;
+  node.title = '';
+  node._gam.title.title = cell.kind === 'exploration' ? '' : activityHoverText(cell);
   node._gam.details.replaceChildren();
-  for (const line of presentation.lines) {
+  const visibleExplorationEntries = cell.kind === 'exploration'
+    ? (cell.entries || []).slice(-presentation.lines.length)
+    : [];
+  for (let index = 0; index < presentation.lines.length; index += 1) {
+    const line = presentation.lines[index];
     const detail = document.createElement('div');
     detail.className = 'gam-activity-detail-line';
     detail.textContent = line;
+    detail.title = cell.kind === 'exploration'
+      ? explorationEntryHoverText(visibleExplorationEntries[index])
+      : activityHoverText(cell);
     node._gam.details.appendChild(detail);
   }
 }
@@ -83,11 +98,52 @@ export function createActivityPanel({ root }) {
   const nowNodes = new Map();
   const recentNodes = new Map();
 
+  function captureRecentViewport() {
+    const scrollTop = Number(recentSection.scrollTop || 0);
+    if (scrollTop <= LATEST_SCROLL_THRESHOLD_PX) {
+      return { followLatest: true, scrollTop };
+    }
+
+    const sectionRect = recentSection.getBoundingClientRect();
+    const viewportTop = sectionRect.top;
+    for (const node of recentList.children) {
+      const rect = node.getBoundingClientRect();
+      const bottom = Number.isFinite(rect.bottom) ? rect.bottom : rect.top + rect.height;
+      if (bottom > viewportTop) {
+        return {
+          followLatest: false,
+          scrollTop,
+          anchorId: node.dataset.activityId,
+          anchorOffset: rect.top - viewportTop,
+        };
+      }
+    }
+    return { followLatest: false, scrollTop };
+  }
+
+  function restoreRecentViewport(viewport) {
+    if (viewport.followLatest) {
+      recentSection.scrollTop = 0;
+      return;
+    }
+
+    const anchor = viewport.anchorId ? recentNodes.get(viewport.anchorId) : null;
+    if (!anchor) {
+      recentSection.scrollTop = viewport.scrollTop;
+      return;
+    }
+    const viewportTop = recentSection.getBoundingClientRect().top;
+    const anchorOffset = anchor.getBoundingClientRect().top - viewportTop;
+    recentSection.scrollTop += anchorOffset - viewport.anchorOffset;
+  }
+
   function render(snapshot) {
+    const recentViewport = captureRecentViewport();
     syncList(nowList, snapshot.active || [], nowNodes);
     syncList(recentList, snapshot.recent || [], recentNodes);
     nowSection.hidden = !(snapshot.active || []).length;
     recentSection.hidden = !(snapshot.recent || []).length;
+    restoreRecentViewport(recentViewport);
   }
 
   function setHint(message) {

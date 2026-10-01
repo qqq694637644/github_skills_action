@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { createActivityStore } from './src/activity/activity-store.js';
-import { presentActivity } from './src/activity/presentation.js';
+import {
+  activityHoverText,
+  explorationEntryHoverText,
+  presentActivity,
+} from './src/activity/presentation.js';
 import { createActionLogClient } from './src/api/action-log-client.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
 import { createComposerAdapter, loadSkillsCall } from './src/adapters/composer.js';
@@ -203,6 +207,10 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   const runningPresentation = presentActivity(running);
   assert.equal(runningPresentation.title, 'Running python -m pytest -q');
   assert.deepEqual(runningPresentation.lines, ['two', 'three', 'four']);
+  const runningHover = activityHoverText(running);
+  assert.match(runningHover, /最后活动  \d{2}:\d{2}:\d{2}/);
+  assert.match(runningHover, /调用\npython -m pytest -q/);
+  assert.match(runningHover, /当前输出\none\ntwo\nthree\nfour/);
 
   activityStore.ingest([{
     id: 3,
@@ -222,7 +230,9 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   }]);
   assert.equal(activityStore.snapshot().active.length, 0);
   assert.equal(activityStore.snapshot().recent.length, 1);
-  assert.equal(presentActivity(activityStore.snapshot().recent[0]).title, 'Ran python -m pytest -q');
+  const completedCommand = activityStore.snapshot().recent[0];
+  assert.equal(presentActivity(completedCommand).title, 'Ran python -m pytest -q');
+  assert.match(activityHoverText(completedCommand), /结果\none\ntwo\nthree\nfour/);
 
   activityStore.ingest([{
     id: 3,
@@ -407,6 +417,9 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.equal(activityStore.snapshot().recent.length, 1);
   assert.equal(activityStore.snapshot().recent[0].entries.length, 4);
   assert.equal(presentActivity(activityStore.snapshot().recent[0]).title, 'Explored');
+  const searchEntry = activityStore.snapshot().recent[0].entries[1];
+  assert.match(explorationEntryHoverText(searchEntry), /调用\nSearch workspaceCommand/);
+  assert.match(explorationEntryHoverText(searchEntry), /结果\n11 matches/);
 
   activityStore.ingest([{
     id: 23,
@@ -599,6 +612,8 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
     id: 'command:dom',
     kind: 'command',
     phase: 'started',
+    startedAt: '2026-09-21T12:00:00Z',
+    updatedAt: '2026-09-21T12:00:00Z',
     payload: { command: 'pytest -q' },
     liveOutput: '',
     entries: [],
@@ -611,14 +626,22 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.equal(recentList.childElementCount, 0);
   assert.equal(nowList.children[0].children[0].children[1].textContent, 'Running pytest -q');
 
-  const updated = { ...running, liveOutput: 'collecting...\n', revision: 2 };
+  const updated = {
+    ...running,
+    updatedAt: '2026-09-21T12:00:01Z',
+    liveOutput: 'collecting...\n',
+    revision: 2,
+  };
   panel.render({ active: [updated], recent: [] });
   assert.equal(nowList.childElementCount, 1);
   assert.equal(nowList.children[0].children[1].children[0].textContent, 'collecting...');
+  assert.match(nowList.children[0].children[0].title, /调用\npytest -q/);
+  assert.match(nowList.children[0].children[0].title, /当前输出\ncollecting\.\.\./);
 
   const completed = {
     ...updated,
     phase: 'completed',
+    updatedAt: '2026-09-21T12:00:02Z',
     payload: { command: 'pytest -q', stdout_preview: ['50 passed'], stderr_preview: [] },
     revision: 3,
   };
@@ -626,6 +649,31 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.equal(nowList.childElementCount, 0);
   assert.equal(recentList.childElementCount, 1);
   assert.equal(recentList.children[0].children[0].children[1].textContent, 'Ran pytest -q');
+  assert.match(recentList.children[0].children[0].title, /结果\ncollecting\.\.\./);
+
+  // RECENT follows the newest item only while the scrollbar is already at
+  // the newest edge. If the user has scrolled away, preserve the visible
+  // anchor even when a newer cell is inserted above it.
+  const recentSection = root.querySelector('.gam-recent-section');
+  recentSection.getBoundingClientRect = () => ({ top: 0, bottom: 100, height: 100 });
+  recentSection.scrollTop = 40;
+  const existingNode = recentList.children[0];
+  existingNode.getBoundingClientRect = () => {
+    const top = recentList.childElementCount === 1 ? 20 : 40;
+    return { top, bottom: top + 20, height: 20 };
+  };
+  const newer = {
+    ...completed,
+    id: 'command:newer',
+    updatedAt: '2026-09-21T12:00:03Z',
+    payload: { command: 'git status', stdout_preview: ['clean'], stderr_preview: [] },
+  };
+  panel.render({ active: [], recent: [newer, completed] });
+  assert.equal(recentSection.scrollTop, 60);
+
+  recentSection.scrollTop = 0;
+  panel.render({ active: [], recent: [{ ...newer, revision: 4 }, completed] });
+  assert.equal(recentSection.scrollTop, 0);
 }
 
 // Deactivation/unmount must discard activity queued by the previous profile so

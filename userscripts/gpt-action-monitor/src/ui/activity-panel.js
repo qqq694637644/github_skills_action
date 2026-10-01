@@ -46,14 +46,28 @@ function updateCellNode(node, cell) {
   const visibleExplorationEntries = cell.kind === 'exploration'
     ? (cell.entries || []).slice(-presentation.lines.length)
     : [];
+  const preparedWorkspaceId = cell.kind === 'generic'
+    && cell.phase === 'completed'
+    && cell.payload?.operation === 'prepare_workspace'
+    && /^ws_[0-9a-f]{16}$/.test(cell.payload?.workspace_id || '')
+      ? cell.payload.workspace_id
+      : '';
   for (let index = 0; index < presentation.lines.length; index += 1) {
     const line = presentation.lines[index];
-    const detail = document.createElement('div');
+    const detail = document.createElement(preparedWorkspaceId ? 'button' : 'div');
     detail.className = 'gam-activity-detail-line';
+    if (preparedWorkspaceId) {
+      detail.type = 'button';
+      detail.classList.add('gam-workspace-activity-link');
+      detail.dataset.workspaceId = preparedWorkspaceId;
+      detail.title = `${activityHoverText(cell)}\n点击切换到 ${preparedWorkspaceId}`;
+    }
     detail.textContent = line;
-    detail.title = cell.kind === 'exploration'
-      ? explorationEntryHoverText(visibleExplorationEntries[index])
-      : activityHoverText(cell);
+    if (!preparedWorkspaceId) {
+      detail.title = cell.kind === 'exploration'
+        ? explorationEntryHoverText(visibleExplorationEntries[index])
+        : activityHoverText(cell);
+    }
     node._gam.details.appendChild(detail);
   }
 }
@@ -77,7 +91,7 @@ function syncList(container, cells, nodes) {
   }
 }
 
-export function createActivityPanel({ root }) {
+export function createActivityPanel({ root, onSelectWorkspace = null }) {
   root.innerHTML = `
     <div class="gam-monitor-hint" hidden></div>
     <section class="gam-activity-section gam-now-section">
@@ -97,6 +111,14 @@ export function createActivityPanel({ root }) {
   const recentList = root.querySelector('.gam-recent-list');
   const nowNodes = new Map();
   const recentNodes = new Map();
+
+  root.addEventListener('click', (event) => {
+    const target = event.target.closest?.('.gam-workspace-activity-link');
+    if (!target) return;
+    const workspaceId = target.dataset.workspaceId || '';
+    if (!/^ws_[0-9a-f]{16}$/.test(workspaceId)) return;
+    onSelectWorkspace?.(workspaceId);
+  });
 
   function captureRecentViewport() {
     const scrollTop = Number(recentSection.scrollTop || 0);

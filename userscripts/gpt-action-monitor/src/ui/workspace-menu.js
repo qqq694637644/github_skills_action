@@ -3,19 +3,28 @@ function shortWorkspaceId(workspaceId) {
   return `${workspaceId.slice(0, 11)}… ▾`;
 }
 
-export function createWorkspaceMenu({ loadWorkspaces, getSelectedId, onSelect }) {
+export function createWorkspaceMenu({
+  loadWorkspaces,
+  getSelectedId,
+  onSelect,
+  onReset,
+}) {
   const root = document.createElement('div');
   root.className = 'gam-workspace-picker';
   root.hidden = true;
   root.innerHTML = `
     <div class="gam-workspace-picker-header">
       <strong>Workspace</strong>
-      <button class="gam-workspace-refresh" type="button" title="刷新 Workspace 列表" aria-label="刷新 Workspace 列表">↻</button>
+      <div class="gam-workspace-picker-actions">
+        <button class="gam-workspace-reset" type="button" title="清除当前网址的 Workspace 绑定">重置</button>
+        <button class="gam-workspace-refresh" type="button" title="刷新 Workspace 列表" aria-label="刷新 Workspace 列表">↻</button>
+      </div>
     </div>
     <div class="gam-workspace-state" hidden></div>
     <div class="gam-workspace-list" role="menu" aria-label="Workspaces"></div>
   `;
 
+  const resetButton = root.querySelector('.gam-workspace-reset');
   const refreshButton = root.querySelector('.gam-workspace-refresh');
   const state = root.querySelector('.gam-workspace-state');
   const list = root.querySelector('.gam-workspace-list');
@@ -49,10 +58,12 @@ export function createWorkspaceMenu({ loadWorkspaces, getSelectedId, onSelect })
     }
 
     const selectedId = getSelectedId?.() || '';
+    resetButton.disabled = !selectedId;
     for (const workspaceId of workspaces) {
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'gam-workspace-item';
+      item.dataset.workspaceId = workspaceId;
       item.dataset.selected = workspaceId === selectedId ? 'true' : 'false';
       item.setAttribute('role', 'menuitemradio');
       item.setAttribute('aria-checked', workspaceId === selectedId ? 'true' : 'false');
@@ -123,6 +134,16 @@ export function createWorkspaceMenu({ loadWorkspaces, getSelectedId, onSelect })
     const workspaceId = getSelectedId?.() || '';
     triggerElement.textContent = shortWorkspaceId(workspaceId);
     triggerElement.title = workspaceId || '选择 Workspace';
+    resetButton.disabled = !workspaceId;
+  }
+
+  function updateSelectionMarkers() {
+    const selectedId = getSelectedId?.() || '';
+    for (const item of list.children) {
+      const selected = item.dataset.workspaceId === selectedId;
+      item.dataset.selected = selected ? 'true' : 'false';
+      item.setAttribute('aria-checked', selected ? 'true' : 'false');
+    }
   }
 
   function reset() {
@@ -136,6 +157,12 @@ export function createWorkspaceMenu({ loadWorkspaces, getSelectedId, onSelect })
 
   refreshButton.addEventListener('pointerdown', preserveFocus);
   refreshButton.addEventListener('click', () => refresh({ force: true }));
+  resetButton.addEventListener('pointerdown', preserveFocus);
+  resetButton.addEventListener('click', () => {
+    if (onReset?.() === false) return;
+    updateTrigger();
+    updateSelectionMarkers();
+  });
 
   return {
     element: root,

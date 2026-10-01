@@ -7,6 +7,7 @@ export function createMonitorPanel({
   isActive,
   skillsMenu = null,
   workspaceMenu = null,
+  onSelectWorkspace = null,
 }) {
   const panel = document.createElement('div');
   panel.id = 'gpt-action-monitor';
@@ -48,7 +49,10 @@ export function createMonitorPanel({
   const activityRoot = panel.querySelector('.gam-activity-root');
   const currentAction = panel.querySelector('.gam-current-action');
   const currentDetail = panel.querySelector('.gam-current-detail');
-  const activityPanel = createActivityPanel({ root: activityRoot });
+  const activityPanel = createActivityPanel({
+    root: activityRoot,
+    onSelectWorkspace,
+  });
   if (workspaceMenu?.element) panel.querySelector('.gam-expanded').appendChild(workspaceMenu.element);
   if (skillsMenu?.element) panel.querySelector('.gam-expanded').appendChild(skillsMenu.element);
   workspaceMenu?.bindTrigger?.(workspaceButton);

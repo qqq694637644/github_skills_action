@@ -100,12 +100,14 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     loadWorkspaces: (options) => workspaceClient.list(options),
     getSelectedId: () => activeWorkspaceId,
     onSelect: selectWorkspace,
+    onReset: resetWorkspaceSelection,
   });
   monitorUi = createMonitorPanel({
     activityStore,
     isActive: () => monitorMounted && Boolean(activeWorkspaceId),
     skillsMenu,
     workspaceMenu,
+    onSelectWorkspace: selectWorkspace,
   });
 
   function stopActionLog() {
@@ -159,6 +161,15 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     persistCurrentPageBinding();
     workspaceMenu.updateTrigger();
     if (monitorMounted && document.visibilityState === 'visible') startActionLog();
+    return true;
+  }
+
+  function resetWorkspaceSelection() {
+    if (!activeWorkspaceId) return true;
+    resetWorkspaceStream();
+    activeWorkspaceId = null;
+    persistCurrentPageBinding();
+    workspaceMenu.updateTrigger();
     return true;
   }
 

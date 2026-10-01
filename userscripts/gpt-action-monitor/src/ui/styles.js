@@ -194,6 +194,7 @@ export const MONITOR_CSS = `
       min-width: 0;
     }
     #gpt-action-monitor .gam-workspace-button,
+    #gpt-action-monitor .gam-workspace-reset,
     #gpt-action-monitor .gam-workspace-refresh,
     #gpt-action-monitor .gam-skills-button,
     #gpt-action-monitor .gam-skills-refresh {
@@ -222,6 +223,8 @@ export const MONITOR_CSS = `
     }
     #gpt-action-monitor .gam-workspace-button:hover,
     #gpt-action-monitor .gam-workspace-button:focus-visible,
+    #gpt-action-monitor .gam-workspace-reset:hover,
+    #gpt-action-monitor .gam-workspace-reset:focus-visible,
     #gpt-action-monitor .gam-skills-button:hover,
     #gpt-action-monitor .gam-skills-button:focus-visible,
     #gpt-action-monitor .gam-workspace-refresh:hover,
@@ -339,6 +342,23 @@ export const MONITOR_CSS = `
       opacity: .48;
     }
     #gpt-action-monitor .gam-activity-detail-line:first-child::before { content: "└ "; }
+    #gpt-action-monitor .gam-workspace-activity-link {
+      width: 100%;
+      display: block;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    #gpt-action-monitor .gam-workspace-activity-link:hover,
+    #gpt-action-monitor .gam-workspace-activity-link:focus-visible {
+      color: CanvasText;
+      text-decoration: underline;
+      outline: none;
+    }
     #gpt-action-monitor .gam-workspace-picker,
     #gpt-action-monitor .gam-skills-picker {
       position: absolute;
@@ -369,6 +389,22 @@ export const MONITOR_CSS = `
       padding: 0 7px 0 10px;
       border-bottom: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
       font-size: 11px;
+    }
+    #gpt-action-monitor .gam-workspace-picker-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+    #gpt-action-monitor .gam-workspace-reset {
+      height: 26px;
+      padding: 0 7px;
+      font-size: 11px;
+      line-height: 1;
+      opacity: .68;
+    }
+    #gpt-action-monitor .gam-workspace-reset:disabled {
+      opacity: .28;
+      cursor: default;
     }
     #gpt-action-monitor .gam-workspace-refresh,
     #gpt-action-monitor .gam-skills-refresh {

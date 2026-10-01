@@ -1523,6 +1523,7 @@ ${result}`;
       min-width: 0;
     }
     #gpt-action-monitor .gam-workspace-button,
+    #gpt-action-monitor .gam-workspace-reset,
     #gpt-action-monitor .gam-workspace-refresh,
     #gpt-action-monitor .gam-skills-button,
     #gpt-action-monitor .gam-skills-refresh {
@@ -1551,6 +1552,8 @@ ${result}`;
     }
     #gpt-action-monitor .gam-workspace-button:hover,
     #gpt-action-monitor .gam-workspace-button:focus-visible,
+    #gpt-action-monitor .gam-workspace-reset:hover,
+    #gpt-action-monitor .gam-workspace-reset:focus-visible,
     #gpt-action-monitor .gam-skills-button:hover,
     #gpt-action-monitor .gam-skills-button:focus-visible,
     #gpt-action-monitor .gam-workspace-refresh:hover,
@@ -1668,6 +1671,23 @@ ${result}`;
       opacity: .48;
     }
     #gpt-action-monitor .gam-activity-detail-line:first-child::before { content: "\u2514 "; }
+    #gpt-action-monitor .gam-workspace-activity-link {
+      width: 100%;
+      display: block;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    #gpt-action-monitor .gam-workspace-activity-link:hover,
+    #gpt-action-monitor .gam-workspace-activity-link:focus-visible {
+      color: CanvasText;
+      text-decoration: underline;
+      outline: none;
+    }
     #gpt-action-monitor .gam-workspace-picker,
     #gpt-action-monitor .gam-skills-picker {
       position: absolute;
@@ -1698,6 +1718,22 @@ ${result}`;
       padding: 0 7px 0 10px;
       border-bottom: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
       font-size: 11px;
+    }
+    #gpt-action-monitor .gam-workspace-picker-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+    #gpt-action-monitor .gam-workspace-reset {
+      height: 26px;
+      padding: 0 7px;
+      font-size: 11px;
+      line-height: 1;
+      opacity: .68;
+    }
+    #gpt-action-monitor .gam-workspace-reset:disabled {
+      opacity: .28;
+      cursor: default;
     }
     #gpt-action-monitor .gam-workspace-refresh,
     #gpt-action-monitor .gam-skills-refresh {
@@ -1964,12 +2000,22 @@ ${result}`;
     node._gam.title.title = cell.kind === "exploration" ? "" : activityHoverText(cell);
     node._gam.details.replaceChildren();
     const visibleExplorationEntries = cell.kind === "exploration" ? (cell.entries || []).slice(-presentation.lines.length) : [];
+    const preparedWorkspaceId = cell.kind === "generic" && cell.phase === "completed" && cell.payload?.operation === "prepare_workspace" && /^ws_[0-9a-f]{16}$/.test(cell.payload?.workspace_id || "") ? cell.payload.workspace_id : "";
     for (let index = 0; index < presentation.lines.length; index += 1) {
       const line = presentation.lines[index];
-      const detail = document.createElement("div");
+      const detail = document.createElement(preparedWorkspaceId ? "button" : "div");
       detail.className = "gam-activity-detail-line";
+      if (preparedWorkspaceId) {
+        detail.type = "button";
+        detail.classList.add("gam-workspace-activity-link");
+        detail.dataset.workspaceId = preparedWorkspaceId;
+        detail.title = `${activityHoverText(cell)}
+\u70B9\u51FB\u5207\u6362\u5230 ${preparedWorkspaceId}`;
+      }
       detail.textContent = line;
-      detail.title = cell.kind === "exploration" ? explorationEntryHoverText(visibleExplorationEntries[index]) : activityHoverText(cell);
+      if (!preparedWorkspaceId) {
+        detail.title = cell.kind === "exploration" ? explorationEntryHoverText(visibleExplorationEntries[index]) : activityHoverText(cell);
+      }
       node._gam.details.appendChild(detail);
     }
   }
@@ -1991,7 +2037,7 @@ ${result}`;
       container.appendChild(node);
     }
   }
-  function createActivityPanel({ root }) {
+  function createActivityPanel({ root, onSelectWorkspace = null }) {
     root.innerHTML = `
     <div class="gam-monitor-hint" hidden></div>
     <section class="gam-activity-section gam-now-section">
@@ -2010,6 +2056,13 @@ ${result}`;
     const recentList = root.querySelector(".gam-recent-list");
     const nowNodes = /* @__PURE__ */ new Map();
     const recentNodes = /* @__PURE__ */ new Map();
+    root.addEventListener("click", (event) => {
+      const target = event.target.closest?.(".gam-workspace-activity-link");
+      if (!target) return;
+      const workspaceId = target.dataset.workspaceId || "";
+      if (!/^ws_[0-9a-f]{16}$/.test(workspaceId)) return;
+      onSelectWorkspace?.(workspaceId);
+    });
     function captureRecentViewport() {
       const scrollTop = Number(recentSection.scrollTop || 0);
       if (scrollTop <= LATEST_SCROLL_THRESHOLD_PX) {
@@ -2073,7 +2126,8 @@ ${result}`;
     activityStore,
     isActive,
     skillsMenu = null,
-    workspaceMenu = null
+    workspaceMenu = null,
+    onSelectWorkspace = null
   }) {
     const panel = document.createElement("div");
     panel.id = "gpt-action-monitor";
@@ -2113,7 +2167,10 @@ ${result}`;
     const activityRoot = panel.querySelector(".gam-activity-root");
     const currentAction = panel.querySelector(".gam-current-action");
     const currentDetail = panel.querySelector(".gam-current-detail");
-    const activityPanel = createActivityPanel({ root: activityRoot });
+    const activityPanel = createActivityPanel({
+      root: activityRoot,
+      onSelectWorkspace
+    });
     if (workspaceMenu?.element) panel.querySelector(".gam-expanded").appendChild(workspaceMenu.element);
     if (skillsMenu?.element) panel.querySelector(".gam-expanded").appendChild(skillsMenu.element);
     workspaceMenu?.bindTrigger?.(workspaceButton);
@@ -2934,18 +2991,27 @@ ${result}`;
     if (!workspaceId) return "Workspace \u25BE";
     return `${workspaceId.slice(0, 11)}\u2026 \u25BE`;
   }
-  function createWorkspaceMenu({ loadWorkspaces, getSelectedId, onSelect }) {
+  function createWorkspaceMenu({
+    loadWorkspaces,
+    getSelectedId,
+    onSelect,
+    onReset
+  }) {
     const root = document.createElement("div");
     root.className = "gam-workspace-picker";
     root.hidden = true;
     root.innerHTML = `
     <div class="gam-workspace-picker-header">
       <strong>Workspace</strong>
-      <button class="gam-workspace-refresh" type="button" title="\u5237\u65B0 Workspace \u5217\u8868" aria-label="\u5237\u65B0 Workspace \u5217\u8868">\u21BB</button>
+      <div class="gam-workspace-picker-actions">
+        <button class="gam-workspace-reset" type="button" title="\u6E05\u9664\u5F53\u524D\u7F51\u5740\u7684 Workspace \u7ED1\u5B9A">\u91CD\u7F6E</button>
+        <button class="gam-workspace-refresh" type="button" title="\u5237\u65B0 Workspace \u5217\u8868" aria-label="\u5237\u65B0 Workspace \u5217\u8868">\u21BB</button>
+      </div>
     </div>
     <div class="gam-workspace-state" hidden></div>
     <div class="gam-workspace-list" role="menu" aria-label="Workspaces"></div>
   `;
+    const resetButton = root.querySelector(".gam-workspace-reset");
     const refreshButton = root.querySelector(".gam-workspace-refresh");
     const state = root.querySelector(".gam-workspace-state");
     const list = root.querySelector(".gam-workspace-list");
@@ -2973,10 +3039,12 @@ ${result}`;
         return;
       }
       const selectedId = getSelectedId?.() || "";
+      resetButton.disabled = !selectedId;
       for (const workspaceId of workspaces) {
         const item = document.createElement("button");
         item.type = "button";
         item.className = "gam-workspace-item";
+        item.dataset.workspaceId = workspaceId;
         item.dataset.selected = workspaceId === selectedId ? "true" : "false";
         item.setAttribute("role", "menuitemradio");
         item.setAttribute("aria-checked", workspaceId === selectedId ? "true" : "false");
@@ -3038,6 +3106,15 @@ ${result}`;
       const workspaceId = getSelectedId?.() || "";
       triggerElement.textContent = shortWorkspaceId(workspaceId);
       triggerElement.title = workspaceId || "\u9009\u62E9 Workspace";
+      resetButton.disabled = !workspaceId;
+    }
+    function updateSelectionMarkers() {
+      const selectedId = getSelectedId?.() || "";
+      for (const item of list.children) {
+        const selected = item.dataset.workspaceId === selectedId;
+        item.dataset.selected = selected ? "true" : "false";
+        item.setAttribute("aria-checked", selected ? "true" : "false");
+      }
     }
     function reset() {
       close();
@@ -3049,6 +3126,12 @@ ${result}`;
     }
     refreshButton.addEventListener("pointerdown", preserveFocus);
     refreshButton.addEventListener("click", () => refresh({ force: true }));
+    resetButton.addEventListener("pointerdown", preserveFocus);
+    resetButton.addEventListener("click", () => {
+      if (onReset?.() === false) return;
+      updateTrigger();
+      updateSelectionMarkers();
+    });
     return {
       element: root,
       open: openMenu,
@@ -3124,13 +3207,15 @@ ${result}`;
     const workspaceMenu = createWorkspaceMenu({
       loadWorkspaces: (options) => workspaceClient.list(options),
       getSelectedId: () => activeWorkspaceId,
-      onSelect: selectWorkspace
+      onSelect: selectWorkspace,
+      onReset: resetWorkspaceSelection
     });
     monitorUi = createMonitorPanel({
       activityStore,
       isActive: () => monitorMounted && Boolean(activeWorkspaceId),
       skillsMenu,
-      workspaceMenu
+      workspaceMenu,
+      onSelectWorkspace: selectWorkspace
     });
     function stopActionLog() {
       if (!actionLogClient) return;
@@ -3176,6 +3261,14 @@ ${result}`;
       persistCurrentPageBinding();
       workspaceMenu.updateTrigger();
       if (monitorMounted && document.visibilityState === "visible") startActionLog();
+      return true;
+    }
+    function resetWorkspaceSelection() {
+      if (!activeWorkspaceId) return true;
+      resetWorkspaceStream();
+      activeWorkspaceId = null;
+      persistCurrentPageBinding();
+      workspaceMenu.updateTrigger();
       return true;
     }
     function deactivateMonitor() {

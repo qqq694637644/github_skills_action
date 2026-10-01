@@ -47,6 +47,9 @@ class LocalWorkspaceService:
     def root(self, workspace_id: str) -> Path:
         return self._registry.resolve(workspace_id)
 
+    def list_workspace_ids(self) -> list[str]:
+        return self._registry.list_ids()
+
     async def prepare_workspace(
         self, *, idempotency_key: str | None, workspace_id: str | None
     ) -> dict[str, object]:

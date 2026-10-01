@@ -67,6 +67,7 @@ from .models import (
 )
 from .workspace_files import LocalWorkspaceService
 from .workspace_patch import WorkspaceToolError
+from .workspace_registry import WorkspaceRegistry
 
 SERVER_INSTRUCTIONS = (
     "Use workspaceInspect/workspaceSearch before guessing paths. Read exact files with "
@@ -409,6 +410,7 @@ def create_server(
             phase="started",
             payload={
                 "operation": "inspect",
+                "workspace_id": request.workspace_id,
                 "paths": request.paths,
                 "queries": request.queries,
             },
@@ -513,6 +515,7 @@ def create_server(
             phase="started",
             payload={
                 "operation": "search",
+                "workspace_id": request.workspace_id,
                 "query": request.query,
                 "paths": request.paths,
             },
@@ -605,7 +608,13 @@ def create_server(
             activity_id=activity_id,
             kind="exploration",
             phase="started",
-            payload={"operation": "read", "paths": request.paths},
+            payload={
+                "operation": "read",
+                "workspace_id": request.workspace_id,
+                "paths": request.paths,
+                "start_line": request.start_line,
+                "max_lines": request.max_lines,
+            },
             legacy_action="workspaceReadFiles",
             legacy_fields={"phase": "started", "paths": request.paths},
         )
@@ -621,7 +630,14 @@ def create_server(
                     "phase": "completed",
                     "payload": {
                         "operation": "read",
-                        "paths": [item.path for item in response.files],
+                        "files": [
+                            {
+                                "path": item.path,
+                                "start_line": item.start_line,
+                                "end_line": item.end_line,
+                            }
+                            for item in response.files
+                        ],
                         "truncated": response.truncated,
                     },
                 },
@@ -649,6 +665,8 @@ def create_server(
                     "payload": {
                         "operation": "read",
                         "paths": request.paths,
+                        "start_line": request.start_line,
+                        "max_lines": request.max_lines,
                         "error_code": exc.code,
                         "diagnostic": exc.message,
                     },
@@ -694,7 +712,12 @@ def create_server(
             activity_id=activity_id,
             kind="write",
             phase="started",
-            payload={"path": request.path, "mode": request.mode, "dry_run": request.dry_run},
+            payload={
+                "workspace_id": request.workspace_id,
+                "path": request.path,
+                "mode": request.mode,
+                "dry_run": request.dry_run,
+            },
             legacy_action="workspaceWriteFile",
             legacy_fields={"phase": "started", "path": request.path, "mode": request.mode},
         )
@@ -789,6 +812,7 @@ def create_server(
             kind="patch",
             phase="started",
             payload={
+                "workspace_id": request.workspace_id,
                 "dry_run": request.dry_run,
                 "allow_delete": request.allow_delete,
                 "patch_bytes": len(request.patch.encode("utf-8")),
@@ -1012,18 +1036,34 @@ def create_app(settings: MCPSettings | None = None):
         host=resolved.host,
     )
 
-    def action_logs(request: Request) -> JSONResponse:
+    def action_api_authorized(request: Request) -> bool:
         expected_token = resolved.action_log_bearer_token
-        if expected_token:
-            authorization = request.headers.get("authorization", "")
-            if authorization != f"Bearer {expected_token}":
-                return JSONResponse({"detail": "invalid bearer token"}, status_code=401)
+        if not expected_token:
+            return True
+        return request.headers.get("authorization", "") == f"Bearer {expected_token}"
+
+    def action_logs(request: Request) -> JSONResponse:
+        if not action_api_authorized(request):
+            return JSONResponse({"detail": "invalid bearer token"}, status_code=401)
         return JSONResponse(
             wait_for_action_events(
                 after=int(request.query_params.get("after", "0")),
                 timeout=float(request.query_params.get("wait", "55")),
                 limit=int(request.query_params.get("limit", "50")),
+                workspace_id=request.query_params.get("workspace_id") or None,
             )
+        )
+
+    def action_workspaces(request: Request) -> JSONResponse:
+        if not action_api_authorized(request):
+            return JSONResponse({"detail": "invalid bearer token"}, status_code=401)
+        return JSONResponse(
+            {
+                "workspaces": [
+                    {"workspace_id": workspace_id}
+                    for workspace_id in WorkspaceRegistry().list_ids()
+                ]
+            }
         )
 
     @asynccontextmanager
@@ -1032,6 +1072,7 @@ def create_app(settings: MCPSettings | None = None):
             yield
 
     app = Starlette(lifespan=lifespan)
+    app.add_route("/v1/action-workspaces", action_workspaces, methods=["GET"])
     app.add_route("/v1/action-logs", action_logs, methods=["GET"])
     app.mount("/", mcp_app)
     return app

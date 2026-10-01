@@ -4,8 +4,14 @@ import { presentActivity } from './src/activity/presentation.js';
 import { createActionLogClient } from './src/api/action-log-client.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
 import { createComposerAdapter, loadSkillsCall } from './src/adapters/composer.js';
+import {
+  loadEndpoints,
+  loadGlobalActiveEndpointId,
+  saveEndpoints,
+  saveGlobalActiveEndpointId,
+  validateBackend,
+} from './src/profile/profile-store.js';
 import { summarize } from './src/formatter/action-formatter.js';
-import { validateBackend } from './src/profile/profile-store.js';
 import { createActivityPanel } from './src/ui/activity-panel.js';
 import { createMonitorPanel } from './src/ui/monitor-panel.js';
 import { MONITOR_CSS } from './src/ui/styles.js';
@@ -34,6 +40,37 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
 assert.match(MONITOR_CSS, /resize:\s*both/);
 assert.match(MONITOR_CSS, /\.gam-resize-handle\s*\{[\s\S]*?left:\s*0;[\s\S]*?bottom:\s*0;[\s\S]*?cursor:\s*nesw-resize/);
 assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/);
+
+// V3 deliberately separates the persistent endpoint library from the global
+// active endpoint and ignores the legacy combined profile storage key.
+{
+  const values = new Map([
+    ['gptActionMonitorProfiles', {
+      version: 2,
+      endpoints: [{ id: 'legacy', name: 'legacy', backend: 'https://legacy.example.com', token: '' }],
+      selectedEndpointId: 'legacy',
+    }],
+  ]);
+  globalThis.GM_getValue = (key, fallback) => values.has(key) ? values.get(key) : fallback;
+  globalThis.GM_setValue = (key, value) => values.set(key, value);
+
+  assert.deepEqual(loadEndpoints(), []);
+  assert.equal(loadGlobalActiveEndpointId(), '');
+
+  const endpoints = saveEndpoints([
+    { id: 'alpha', name: 'Alpha', backend: 'https://alpha.example.com/', token: 'a' },
+    { id: 'beta', name: 'Beta', backend: 'https://beta.example.com', token: 'b' },
+  ]);
+  assert.deepEqual(endpoints, [
+    { id: 'alpha', name: 'Alpha', backend: 'https://alpha.example.com', token: 'a' },
+    { id: 'beta', name: 'Beta', backend: 'https://beta.example.com', token: 'b' },
+  ]);
+  assert.equal(loadGlobalActiveEndpointId(), '');
+
+  saveGlobalActiveEndpointId('beta');
+  assert.equal(loadGlobalActiveEndpointId(), 'beta');
+  assert.deepEqual(loadEndpoints(), endpoints);
+}
 
 // Skill catalog reads are cached in-page, while explicit refresh performs a
 // new backend read so the server can rescan its on-disk Skill catalog.

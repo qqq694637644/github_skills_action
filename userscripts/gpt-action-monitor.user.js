@@ -15,7 +15,8 @@
 // ==/UserScript==
 (() => {
   // src/constants.js
-  var PROFILE_KEY = "gptActionMonitorProfiles";
+  var ENDPOINTS_KEY = "gptActionMonitorEndpointsV3";
+  var GLOBAL_ACTIVE_ENDPOINT_KEY = "gptActionMonitorGlobalActiveEndpointV3";
   var POSITION_KEY = "gptActionMonitorPosition";
   var POLL_WAIT_SECONDS = 55;
   var RETRY_MS = 3e3;
@@ -1093,48 +1094,43 @@
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     return `endpoint-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
-  function normalizeEndpoint(endpoint, index = 0) {
-    return {
-      id: String(endpoint?.id || "").trim() || nextEndpointId(),
-      name: String(endpoint?.name || endpoint?.gptName || "").trim() || `\u63A5\u53E3 ${index + 1}`,
-      backend: normalizeBackend(endpoint?.backend),
-      token: String(endpoint?.token || "").trim()
-    };
-  }
-  function normalizeConfig(value) {
-    let endpoints = [];
-    let selectedEndpointId = "";
-    if (Array.isArray(value)) {
-      endpoints = value.filter((endpoint) => endpoint?.backend).map((endpoint, index) => normalizeEndpoint(endpoint, index));
-    } else if (Array.isArray(value?.endpoints)) {
-      endpoints = value.endpoints.map((endpoint, index) => normalizeEndpoint(endpoint, index));
-      selectedEndpointId = String(value.selectedEndpointId || "").trim();
-    } else if (value?.backend) {
-      endpoints = [normalizeEndpoint({ ...value, name: value.name || "\u9ED8\u8BA4\u63A5\u53E3" }, 0)];
-    }
-    endpoints = endpoints.filter((endpoint) => endpoint.backend);
-    if (!endpoints.some((endpoint) => endpoint.id === selectedEndpointId)) {
-      selectedEndpointId = endpoints[0]?.id || "";
-    }
-    return {
-      version: 2,
-      endpoints,
-      selectedEndpointId
-    };
-  }
-  function loadConfig() {
-    return normalizeConfig(GM_getValue(PROFILE_KEY, null));
-  }
-  function saveConfig(config) {
-    const normalized = normalizeConfig(config);
-    GM_setValue(PROFILE_KEY, normalized);
-    return normalized;
+  function normalizeStoredEndpoint(endpoint) {
+    if (!endpoint || typeof endpoint !== "object") return null;
+    const id = String(endpoint.id || "").trim();
+    const name = String(endpoint.name || "").trim();
+    const backend = normalizeBackend(endpoint.backend);
+    const token = String(endpoint.token || "").trim();
+    if (!id || !name || !backend) return null;
+    return { id, name, backend, token };
   }
   function createEndpoint(index = 0) {
-    return normalizeEndpoint({ name: `\u63A5\u53E3 ${index + 1}` }, index);
+    return {
+      id: nextEndpointId(),
+      name: `\u63A5\u53E3 ${index + 1}`,
+      backend: "",
+      token: ""
+    };
   }
-  function getEndpoint(config, endpointId) {
-    return config?.endpoints?.find((endpoint) => endpoint.id === endpointId) || null;
+  function loadEndpoints() {
+    const stored = GM_getValue(ENDPOINTS_KEY, []);
+    if (!Array.isArray(stored)) return [];
+    return stored.map(normalizeStoredEndpoint).filter(Boolean);
+  }
+  function saveEndpoints(endpoints) {
+    const normalized = (Array.isArray(endpoints) ? endpoints : []).map(normalizeStoredEndpoint).filter(Boolean);
+    GM_setValue(ENDPOINTS_KEY, normalized);
+    return normalized;
+  }
+  function loadGlobalActiveEndpointId() {
+    return String(GM_getValue(GLOBAL_ACTIVE_ENDPOINT_KEY, "") || "").trim();
+  }
+  function saveGlobalActiveEndpointId(endpointId) {
+    const normalized = String(endpointId || "").trim();
+    GM_setValue(GLOBAL_ACTIVE_ENDPOINT_KEY, normalized);
+    return normalized;
+  }
+  function getEndpoint(endpoints, endpointId) {
+    return endpoints.find((endpoint) => endpoint.id === endpointId) || null;
   }
   function validateBackend(value) {
     const backend = normalizeBackend(value);
@@ -1660,6 +1656,17 @@
         color: color-mix(in srgb, CanvasText 62%, transparent);
         font-size: 12px;
       }
+      #gam-settings-overlay .gam-settings-section {
+        display: grid;
+        gap: 13px;
+        padding: 12px;
+        border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+        border-radius: 10px;
+      }
+      #gam-settings-overlay .gam-section-heading {
+        font-weight: 650;
+        font-size: 13px;
+      }
       #gam-settings-overlay .gam-button {
         min-height: 32px;
         padding: 5px 11px;
@@ -1696,28 +1703,31 @@
         gap: 7px;
       }
       #gam-settings-overlay .gam-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
-      #gam-settings-overlay .gam-scope-group {
-        display: grid;
+      #gam-settings-overlay .gam-config-actions,
+      #gam-settings-overlay .gam-usage-actions {
+        display: flex;
+        justify-content: flex-end;
         gap: 8px;
-        margin: 0;
-        padding: 10px 11px;
-        border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
-        border-radius: 9px;
+        flex-wrap: wrap;
       }
-      #gam-settings-overlay .gam-scope-group legend {
-        padding: 0 5px;
-        font-weight: 600;
-      }
-      #gam-settings-overlay .gam-scope-option {
+      #gam-settings-overlay .gam-usage-grid {
         display: grid;
         grid-template-columns: auto minmax(0, 1fr);
-        gap: 8px;
-        align-items: start;
-        cursor: pointer;
+        gap: 8px 14px;
+        align-items: baseline;
       }
-      #gam-settings-overlay .gam-scope-option input { margin-top: 3px; }
-      #gam-settings-overlay .gam-scope-option span { display: grid; gap: 1px; }
-      #gam-settings-overlay .gam-scope-option small {
+      #gam-settings-overlay .gam-usage-grid > span {
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 12px;
+      }
+      #gam-settings-overlay .gam-usage-grid > strong {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #gam-settings-overlay .gam-usage-note {
+        min-height: 18px;
         color: color-mix(in srgb, CanvasText 58%, transparent);
         font-size: 12px;
       }
@@ -1725,19 +1735,13 @@
       #gam-settings-overlay .gam-form-message[data-state="error"] { color: #c53e3e; }
       #gam-settings-overlay .gam-form-message[data-state="success"] { color: #238349; }
       #gam-settings-overlay .gam-form-message[data-state="pending"] { color: color-mix(in srgb, CanvasText 60%, transparent); }
-      #gam-settings-overlay .gam-editor-footer {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        margin-top: 2px;
-      }
-      #gam-settings-overlay .gam-editor-footer .gam-spacer { flex: 1; }
       @media (max-width: 520px) {
         #gam-settings-overlay { padding: 8px; }
         #gam-settings-overlay .gam-settings-card { max-height: calc(100vh - 16px); }
         #gam-settings-overlay .gam-endpoint-row { grid-template-columns: 1fr 1fr; }
         #gam-settings-overlay .gam-endpoint-select { grid-column: 1 / -1; }
-        #gam-settings-overlay .gam-editor-footer { flex-wrap: wrap; }
+        #gam-settings-overlay .gam-usage-grid { grid-template-columns: 1fr; gap: 2px; }
+        #gam-settings-overlay .gam-usage-grid > strong { margin-bottom: 6px; }
       }
     `;
 
@@ -2265,14 +2269,27 @@
       }
     });
   }
-  function cloneConfig(config) {
-    return {
-      version: 2,
-      selectedEndpointId: config?.selectedEndpointId || "",
-      endpoints: (config?.endpoints || []).map((endpoint) => ({ ...endpoint }))
-    };
+  function cloneEndpoints(endpoints) {
+    return (endpoints || []).map((endpoint) => ({ ...endpoint }));
   }
-  function createSettingsPanel({ getState, onApplySettings }) {
+  function endpointSnapshot(endpoints) {
+    return JSON.stringify((endpoints || []).map((endpoint) => ({
+      id: endpoint.id,
+      name: String(endpoint.name || "").trim(),
+      backend: normalizeBackend(endpoint.backend),
+      token: String(endpoint.token || "").trim()
+    })));
+  }
+  function endpointName(endpoints, endpointId) {
+    return endpoints.find((endpoint) => endpoint.id === endpointId)?.name || "";
+  }
+  function createSettingsPanel({
+    getState,
+    onSaveEndpoints,
+    onSetGlobalEndpoint,
+    onUseLocalEndpoint,
+    onRestoreGlobalEndpoint
+  }) {
     let overlay = null;
     let style = null;
     function close() {
@@ -2283,14 +2300,13 @@
     }
     function open() {
       if (overlay?.isConnected) return;
-      const state = getState();
-      const draft = cloneConfig(state.config);
-      if (!draft.endpoints.length) {
-        const endpoint = createEndpoint(0);
-        draft.endpoints.push(endpoint);
-        draft.selectedEndpointId = endpoint.id;
-      }
-      let selectedEndpointId = state.activeEndpointId || draft.selectedEndpointId || draft.endpoints[0].id;
+      const initialState = getState();
+      let draftEndpoints = cloneEndpoints(initialState.endpoints);
+      if (!draftEndpoints.length) draftEndpoints.push(createEndpoint(0));
+      let persistedSnapshot = endpointSnapshot(initialState.endpoints);
+      let editingEndpointId = draftEndpoints.some(
+        (endpoint) => endpoint.id === initialState.effectiveEndpointId
+      ) ? initialState.effectiveEndpointId : draftEndpoints.some((endpoint) => endpoint.id === initialState.globalActiveEndpointId) ? initialState.globalActiveEndpointId : draftEndpoints[0].id;
       style = document.createElement("style");
       style.textContent = SETTINGS_CSS;
       overlay = document.createElement("div");
@@ -2302,48 +2318,55 @@
           <button class="gam-icon-button gam-settings-close" type="button" aria-label="\u5173\u95ED\u914D\u7F6E">\xD7</button>
         </div>
         <div class="gam-settings-body">
-          <p class="gam-settings-note">\u53EF\u4FDD\u5B58\u591A\u4E2A\u63A5\u53E3\uFF0C\u4F46\u76D1\u63A7\u59CB\u7EC8\u53EA\u4F7F\u7528\u4E00\u4E2A\u3002\u5168\u5C40\u9009\u62E9\u6C38\u4E45\u4FDD\u5B58\uFF1B\u5C40\u90E8\u9009\u62E9\u53EA\u5BF9\u5F53\u524D\u9875\u9762\u6709\u6548\uFF0C\u5237\u65B0\u540E\u81EA\u52A8\u6062\u590D\u5168\u5C40\u63A5\u53E3\u3002</p>
+          <p class="gam-settings-note">\u63A5\u53E3\u914D\u7F6E\u6C38\u4E45\u4FDD\u5B58\uFF1B\u4FDD\u5B58\u914D\u7F6E\u4E0D\u4F1A\u6539\u53D8\u5F53\u524D\u4F7F\u7528\u7684\u63A5\u53E3\u3002\u5168\u5C40\u9ED8\u8BA4\u6C38\u4E45\u751F\u6548\uFF0C\u5F53\u524D\u9875\u9762\u63A5\u53E3\u53EA\u5728\u672C\u6B21\u9875\u9762\u52A0\u8F7D\u671F\u95F4\u4E34\u65F6\u8986\u76D6\u3002</p>
           <form class="gam-editor">
-            <div class="gam-field">
-              <span>\u63A5\u53E3</span>
-              <div class="gam-endpoint-row">
-                <select class="gam-input gam-endpoint-select" aria-label="\u9009\u62E9\u63A5\u53E3"></select>
-                <button class="gam-button gam-add-endpoint" type="button">\u6DFB\u52A0</button>
-                <button class="gam-button gam-delete-endpoint" type="button">\u5220\u9664</button>
+            <section class="gam-settings-section">
+              <div class="gam-section-heading">\u63A5\u53E3\u914D\u7F6E</div>
+              <div class="gam-field">
+                <span>\u7F16\u8F91\u63A5\u53E3</span>
+                <div class="gam-endpoint-row">
+                  <select class="gam-input gam-endpoint-select" aria-label="\u9009\u62E9\u8981\u7F16\u8F91\u7684\u63A5\u53E3"></select>
+                  <button class="gam-button gam-add-endpoint" type="button">\u6DFB\u52A0</button>
+                  <button class="gam-button gam-delete-endpoint" type="button">\u5220\u9664</button>
+                </div>
               </div>
-            </div>
-            <label class="gam-field">
-              <span>\u63A5\u53E3\u540D\u79F0</span>
-              <input class="gam-input gam-name" type="text" autocomplete="off" placeholder="\u4F8B\u5982 ChatGPT MCP" required>
-            </label>
-            <label class="gam-field">
-              <span>\u540E\u7AEF\u5730\u5740</span>
-              <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://githubaction.giize.com/mcp-app" required>
-            </label>
-            <label class="gam-field">
-              <span>Bearer Token</span>
-              <div class="gam-token-row">
-                <input class="gam-input gam-token" type="password" autocomplete="off" placeholder="\u672A\u542F\u7528\u8BA4\u8BC1\u53EF\u7559\u7A7A">
-                <button class="gam-button gam-token-toggle" type="button">\u663E\u793A</button>
+              <label class="gam-field">
+                <span>\u63A5\u53E3\u540D\u79F0</span>
+                <input class="gam-input gam-name" type="text" autocomplete="off" placeholder="\u4F8B\u5982 skill_action" required>
+              </label>
+              <label class="gam-field">
+                <span>\u540E\u7AEF\u5730\u5740</span>
+                <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://githubaction.giize.com/mcp-app" required>
+              </label>
+              <label class="gam-field">
+                <span>Bearer Token</span>
+                <div class="gam-token-row">
+                  <input class="gam-input gam-token" type="password" autocomplete="off" placeholder="\u672A\u542F\u7528\u8BA4\u8BC1\u53EF\u7559\u7A7A">
+                  <button class="gam-button gam-token-toggle" type="button">\u663E\u793A</button>
+                </div>
+              </label>
+              <div class="gam-config-actions">
+                <button class="gam-button gam-test" type="button">\u6D4B\u8BD5\u8FDE\u63A5</button>
+                <button class="gam-button gam-button-primary gam-save" type="submit">\u4FDD\u5B58\u914D\u7F6E</button>
               </div>
-            </label>
-            <fieldset class="gam-scope-group">
-              <legend>\u751F\u6548\u8303\u56F4</legend>
-              <label class="gam-scope-option">
-                <input type="radio" name="gam-scope" value="global">
-                <span><strong>\u5168\u5C40</strong><small>\u6C38\u4E45\u4FDD\u5B58\u4E3A\u9ED8\u8BA4\u63A5\u53E3\uFF0C\u5237\u65B0\u548C\u65B0\u9875\u9762\u7EE7\u7EED\u4F7F\u7528\u3002</small></span>
-              </label>
-              <label class="gam-scope-option">
-                <input type="radio" name="gam-scope" value="local">
-                <span><strong>\u5C40\u90E8</strong><small>\u53EA\u5728\u5F53\u524D\u9875\u9762\u4E34\u65F6\u4F7F\u7528\uFF0C\u5237\u65B0\u9875\u9762\u540E\u5931\u6548\u5E76\u6062\u590D\u5168\u5C40\u63A5\u53E3\u3002</small></span>
-              </label>
-            </fieldset>
+            </section>
+
+            <section class="gam-settings-section gam-usage-section">
+              <div class="gam-section-heading">\u4F7F\u7528\u72B6\u6001</div>
+              <div class="gam-usage-grid">
+                <span>\u5168\u5C40\u9ED8\u8BA4</span><strong class="gam-global-value"></strong>
+                <span>\u5F53\u524D\u9875\u9762</span><strong class="gam-current-value"></strong>
+                <span>\u5F53\u524D\u7F16\u8F91</span><strong class="gam-editing-value"></strong>
+              </div>
+              <div class="gam-usage-actions">
+                <button class="gam-button gam-set-global" type="button">\u8BBE\u4E3A\u5168\u5C40\u9ED8\u8BA4</button>
+                <button class="gam-button gam-use-local" type="button">\u4EC5\u5F53\u524D\u9875\u9762\u4F7F\u7528</button>
+                <button class="gam-button gam-restore-global" type="button">\u6062\u590D\u5168\u5C40\u9ED8\u8BA4</button>
+              </div>
+              <div class="gam-usage-note"></div>
+            </section>
+
             <div class="gam-form-message" aria-live="polite"></div>
-            <div class="gam-editor-footer">
-              <span class="gam-spacer"></span>
-              <button class="gam-button gam-test" type="button">\u6D4B\u8BD5\u8FDE\u63A5</button>
-              <button class="gam-button gam-button-primary gam-save" type="submit">\u4FDD\u5B58</button>
-            </div>
           </form>
         </div>
       </div>
@@ -2357,57 +2380,118 @@
       const tokenInput = overlay.querySelector(".gam-token");
       const deleteButton = overlay.querySelector(".gam-delete-endpoint");
       const formMessage = overlay.querySelector(".gam-form-message");
+      const usageNote = overlay.querySelector(".gam-usage-note");
       const testButton = overlay.querySelector(".gam-test");
-      const initialScope = state.localEndpointId ? "local" : "global";
-      overlay.querySelector(`input[name="gam-scope"][value="${initialScope}"]`).checked = true;
-      function currentEndpoint() {
-        return draft.endpoints.find((endpoint) => endpoint.id === selectedEndpointId) || null;
+      const setGlobalButton = overlay.querySelector(".gam-set-global");
+      const useLocalButton = overlay.querySelector(".gam-use-local");
+      const restoreGlobalButton = overlay.querySelector(".gam-restore-global");
+      const globalValue = overlay.querySelector(".gam-global-value");
+      const currentValue = overlay.querySelector(".gam-current-value");
+      const editingValue = overlay.querySelector(".gam-editing-value");
+      function currentDraftEndpoint() {
+        return draftEndpoints.find((endpoint) => endpoint.id === editingEndpointId) || null;
       }
       function clearMessage() {
         formMessage.textContent = "";
         delete formMessage.dataset.state;
       }
+      function showError(message) {
+        formMessage.textContent = message;
+        formMessage.dataset.state = "error";
+      }
+      function showSuccess(message) {
+        formMessage.textContent = message;
+        formMessage.dataset.state = "success";
+      }
       function commitFields() {
-        const endpoint = currentEndpoint();
+        const endpoint = currentDraftEndpoint();
         if (!endpoint) return;
         endpoint.name = nameInput.value.trim();
         endpoint.backend = normalizeBackend(backendInput.value);
         endpoint.token = tokenInput.value.trim();
       }
+      function hasUnsavedChanges() {
+        commitFields();
+        return endpointSnapshot(draftEndpoints) !== persistedSnapshot;
+      }
       function renderEndpointSelect() {
-        endpointSelect.replaceChildren(...draft.endpoints.map((endpoint, index) => {
+        const state = getState();
+        endpointSelect.replaceChildren(...draftEndpoints.map((endpoint, index) => {
           const option = document.createElement("option");
           option.value = endpoint.id;
-          const label = endpoint.name || `\u63A5\u53E3 ${index + 1}`;
-          option.textContent = endpoint.id === draft.selectedEndpointId ? `${label}\uFF08\u5168\u5C40\u9ED8\u8BA4\uFF09` : label;
+          const markers = [];
+          if (endpoint.id === state.globalActiveEndpointId) markers.push("\u5168\u5C40\u9ED8\u8BA4");
+          if (endpoint.id === state.localActiveEndpointId) markers.push("\u5F53\u524D\u9875\u9762");
+          const suffix = markers.length ? `\uFF08${markers.join(" / ")}\uFF09` : "";
+          option.textContent = `${endpoint.name || `\u63A5\u53E3 ${index + 1}`}${suffix}`;
           return option;
         }));
-        endpointSelect.value = selectedEndpointId;
-        deleteButton.disabled = draft.endpoints.length <= 1;
+        endpointSelect.value = editingEndpointId;
+        deleteButton.disabled = draftEndpoints.length <= 1;
       }
-      function loadSelectedEndpoint() {
-        const endpoint = currentEndpoint();
+      function renderUsageState() {
+        const state = getState();
+        const persistedEditing = state.endpoints.find(
+          (endpoint) => endpoint.id === editingEndpointId
+        );
+        const dirty = hasUnsavedChanges();
+        const globalName = endpointName(state.endpoints, state.globalActiveEndpointId);
+        const effectiveName = endpointName(state.endpoints, state.effectiveEndpointId);
+        const editingName = currentDraftEndpoint()?.name || "\u672A\u547D\u540D\u63A5\u53E3";
+        globalValue.textContent = globalName || "\u672A\u8BBE\u7F6E";
+        currentValue.textContent = effectiveName ? `${effectiveName}${state.localActiveEndpointId ? " \xB7 \u4E34\u65F6" : " \xB7 \u8DDF\u968F\u5168\u5C40"}` : "\u672A\u8BBE\u7F6E";
+        editingValue.textContent = `${editingName}${dirty ? " \xB7 \u672A\u4FDD\u5B58" : ""}`;
+        const activationBlocked = dirty || !persistedEditing;
+        setGlobalButton.disabled = activationBlocked || editingEndpointId === state.globalActiveEndpointId;
+        useLocalButton.disabled = activationBlocked || editingEndpointId === state.localActiveEndpointId;
+        restoreGlobalButton.disabled = !state.localActiveEndpointId;
+        if (dirty) {
+          usageNote.textContent = "\u5F53\u524D\u6709\u672A\u4FDD\u5B58\u7684\u914D\u7F6E\u66F4\u6539\u3002\u751F\u6548\u64CD\u4F5C\u53EA\u9488\u5BF9\u5DF2\u4FDD\u5B58\u914D\u7F6E\uFF0C\u8BF7\u5148\u4FDD\u5B58\u914D\u7F6E\u3002";
+        } else if (!persistedEditing) {
+          usageNote.textContent = "\u8FD9\u662F\u5C1A\u672A\u4FDD\u5B58\u7684\u65B0\u63A5\u53E3\uFF0C\u8BF7\u5148\u4FDD\u5B58\u914D\u7F6E\u540E\u518D\u8BBE\u7F6E\u751F\u6548\u3002";
+        } else if (state.localActiveEndpointId) {
+          usageNote.textContent = "\u5F53\u524D\u9875\u9762\u6B63\u5728\u4F7F\u7528\u4E34\u65F6\u63A5\u53E3\uFF1B\u5237\u65B0\u9875\u9762\u540E\u5C40\u90E8\u8986\u76D6\u81EA\u52A8\u5931\u6548\u3002";
+        } else {
+          usageNote.textContent = "\u5F53\u524D\u9875\u9762\u8DDF\u968F\u5168\u5C40\u9ED8\u8BA4\u63A5\u53E3\u3002";
+        }
+        renderEndpointSelect();
+      }
+      function loadEditingEndpoint() {
+        const endpoint = currentDraftEndpoint();
         if (!endpoint) return;
         nameInput.value = endpoint.name || "";
         backendInput.value = endpoint.backend || "";
         tokenInput.value = endpoint.token || "";
-        renderEndpointSelect();
         clearMessage();
+        renderUsageState();
       }
       function validateDraft() {
-        for (let index = 0; index < draft.endpoints.length; index += 1) {
-          const endpoint = draft.endpoints[index];
+        const seenIds = /* @__PURE__ */ new Set();
+        for (let index = 0; index < draftEndpoints.length; index += 1) {
+          const endpoint = draftEndpoints[index];
+          endpoint.id = String(endpoint.id || "").trim();
           endpoint.name = String(endpoint.name || "").trim();
+          if (!endpoint.id || seenIds.has(endpoint.id)) return `\u63A5\u53E3 ${index + 1} \u7684 ID \u65E0\u6548\u3002`;
+          seenIds.add(endpoint.id);
           if (!endpoint.name) return `\u63A5\u53E3 ${index + 1} \u7F3A\u5C11\u540D\u79F0\u3002`;
           const validation = validateBackend(endpoint.backend);
           if (!validation.ok) return `${endpoint.name}\uFF1A${validation.message}`;
           endpoint.backend = validation.backend;
           endpoint.token = String(endpoint.token || "").trim();
         }
-        if (!draft.endpoints.some((endpoint) => endpoint.id === selectedEndpointId)) {
-          return "\u8BF7\u9009\u62E9\u8981\u4F7F\u7528\u7684\u63A5\u53E3\u3002";
-        }
         return "";
+      }
+      function syncDirtyUi() {
+        const option = [...endpointSelect.options].find((item) => item.value === editingEndpointId);
+        if (option) {
+          const state = getState();
+          const markers = [];
+          if (editingEndpointId === state.globalActiveEndpointId) markers.push("\u5168\u5C40\u9ED8\u8BA4");
+          if (editingEndpointId === state.localActiveEndpointId) markers.push("\u5F53\u524D\u9875\u9762");
+          const suffix = markers.length ? `\uFF08${markers.join(" / ")}\uFF09` : "";
+          option.textContent = `${nameInput.value.trim() || "\u672A\u547D\u540D\u63A5\u53E3"}${suffix}`;
+        }
+        renderUsageState();
       }
       overlay.querySelector(".gam-settings-close").addEventListener("click", close);
       overlay.querySelector(".gam-token-toggle").addEventListener("click", (event) => {
@@ -2417,34 +2501,36 @@
       });
       endpointSelect.addEventListener("change", () => {
         commitFields();
-        selectedEndpointId = endpointSelect.value;
-        loadSelectedEndpoint();
+        editingEndpointId = endpointSelect.value;
+        loadEditingEndpoint();
       });
-      nameInput.addEventListener("input", () => {
-        const endpoint = currentEndpoint();
-        if (!endpoint) return;
-        endpoint.name = nameInput.value;
-        const option = [...endpointSelect.options].find((item) => item.value === endpoint.id);
-        if (option) option.textContent = endpoint.name.trim() || "\u672A\u547D\u540D\u63A5\u53E3";
-      });
+      for (const input of [nameInput, backendInput, tokenInput]) {
+        input.addEventListener("input", () => {
+          clearMessage();
+          syncDirtyUi();
+        });
+      }
       overlay.querySelector(".gam-add-endpoint").addEventListener("click", () => {
         commitFields();
-        const endpoint = createEndpoint(draft.endpoints.length);
-        draft.endpoints.push(endpoint);
-        selectedEndpointId = endpoint.id;
-        loadSelectedEndpoint();
+        const endpoint = createEndpoint(draftEndpoints.length);
+        draftEndpoints.push(endpoint);
+        editingEndpointId = endpoint.id;
+        loadEditingEndpoint();
         nameInput.select();
       });
       deleteButton.addEventListener("click", () => {
-        if (draft.endpoints.length <= 1) return;
-        const index = draft.endpoints.findIndex((endpoint) => endpoint.id === selectedEndpointId);
-        if (index < 0) return;
-        draft.endpoints.splice(index, 1);
-        if (draft.selectedEndpointId === selectedEndpointId) {
-          draft.selectedEndpointId = draft.endpoints[0]?.id || "";
+        commitFields();
+        const state = getState();
+        if (editingEndpointId === state.globalActiveEndpointId) {
+          showError("\u4E0D\u80FD\u5220\u9664\u5F53\u524D\u5168\u5C40\u9ED8\u8BA4\u63A5\u53E3\uFF0C\u8BF7\u5148\u5C06\u5176\u4ED6\u63A5\u53E3\u8BBE\u4E3A\u5168\u5C40\u9ED8\u8BA4\u3002");
+          return;
         }
-        selectedEndpointId = draft.endpoints[Math.min(index, draft.endpoints.length - 1)]?.id || "";
-        loadSelectedEndpoint();
+        if (draftEndpoints.length <= 1) return;
+        const index = draftEndpoints.findIndex((endpoint) => endpoint.id === editingEndpointId);
+        if (index < 0) return;
+        draftEndpoints.splice(index, 1);
+        editingEndpointId = draftEndpoints[Math.min(index, draftEndpoints.length - 1)]?.id || "";
+        loadEditingEndpoint();
       });
       testButton.addEventListener("click", () => {
         clearMessage();
@@ -2458,18 +2544,53 @@
         commitFields();
         const error = validateDraft();
         if (error) {
-          formMessage.textContent = error;
-          formMessage.dataset.state = "error";
+          showError(error);
           return;
         }
-        const scope = overlay.querySelector('input[name="gam-scope"]:checked')?.value || "global";
-        onApplySettings({
-          nextConfig: draft,
-          selectedEndpointId,
-          scope
-        });
-        formMessage.textContent = scope === "local" ? "\u2713 \u5F53\u524D\u9875\u9762\u5DF2\u4E34\u65F6\u5207\u6362\uFF1B\u5237\u65B0\u540E\u6062\u590D\u5168\u5C40\u63A5\u53E3" : "\u2713 \u5DF2\u4FDD\u5B58\u4E3A\u5168\u5C40\u9ED8\u8BA4\u63A5\u53E3";
-        formMessage.dataset.state = "success";
+        try {
+          onSaveEndpoints(draftEndpoints);
+          draftEndpoints = cloneEndpoints(getState().endpoints);
+          persistedSnapshot = endpointSnapshot(draftEndpoints);
+          if (!draftEndpoints.some((endpoint) => endpoint.id === editingEndpointId)) {
+            editingEndpointId = draftEndpoints[0]?.id || "";
+          }
+          if (!editingEndpointId && !draftEndpoints.length) {
+            const endpoint = createEndpoint(0);
+            draftEndpoints.push(endpoint);
+            editingEndpointId = endpoint.id;
+          }
+          loadEditingEndpoint();
+          showSuccess("\u2713 \u63A5\u53E3\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u5F53\u524D\u751F\u6548\u63A5\u53E3\u672A\u6539\u53D8\u3002");
+        } catch (error_) {
+          showError(error_ instanceof Error ? error_.message : String(error_));
+        }
+      });
+      setGlobalButton.addEventListener("click", () => {
+        try {
+          onSetGlobalEndpoint(editingEndpointId);
+          clearMessage();
+          renderUsageState();
+        } catch (error) {
+          showError(error instanceof Error ? error.message : String(error));
+        }
+      });
+      useLocalButton.addEventListener("click", () => {
+        try {
+          onUseLocalEndpoint(editingEndpointId);
+          clearMessage();
+          renderUsageState();
+        } catch (error) {
+          showError(error instanceof Error ? error.message : String(error));
+        }
+      });
+      restoreGlobalButton.addEventListener("click", () => {
+        try {
+          onRestoreGlobalEndpoint();
+          clearMessage();
+          renderUsageState();
+        } catch (error) {
+          showError(error instanceof Error ? error.message : String(error));
+        }
       });
       overlay.addEventListener("click", (event) => {
         if (event.target === overlay) close();
@@ -2477,7 +2598,7 @@
       overlay.addEventListener("keydown", (event) => {
         if (event.key === "Escape") close();
       });
-      loadSelectedEndpoint();
+      loadEditingEndpoint();
       window.setTimeout(() => endpointSelect.focus(), 0);
     }
     return { open, close };
@@ -2719,22 +2840,30 @@
   // src/main.js
   (function() {
     "use strict";
-    let config = loadConfig();
-    let localEndpointId = null;
+    let endpoints = loadEndpoints();
+    let globalActiveEndpointId = loadGlobalActiveEndpointId();
+    let localActiveEndpointId = null;
     let activeWorkspaceId = null;
     let monitorMounted = false;
     let actionLogClient = null;
     let activitySessionKey = null;
     let activitySessionCursor = null;
-    function getActiveEndpoint() {
-      return getEndpoint(config, localEndpointId) || getEndpoint(config, config.selectedEndpointId) || config.endpoints[0] || null;
+    function getEffectiveEndpointId() {
+      return localActiveEndpointId ?? globalActiveEndpointId;
+    }
+    function getEffectiveEndpoint() {
+      return getEndpoint(endpoints, getEffectiveEndpointId());
+    }
+    function connectionSignature(endpoint) {
+      if (!endpoint) return "";
+      return `${endpoint.id}\0${endpoint.backend}\0${endpoint.token}`;
     }
     const composerAdapter = createComposerAdapter();
     const skillCatalogClient = createSkillCatalogClient({
-      getProfile: getActiveEndpoint
+      getProfile: getEffectiveEndpoint
     });
     const workspaceClient = createWorkspaceClient({
-      getProfile: getActiveEndpoint
+      getProfile: getEffectiveEndpoint
     });
     const activityStore = createActivityStore();
     let monitorUi = null;
@@ -2776,6 +2905,23 @@
       monitorUi.clearAttention();
       monitorUi.setStatus("idle");
     }
+    function resetEffectiveEndpointContext() {
+      resetWorkspaceStream();
+      activeWorkspaceId = null;
+      workspaceClient.clear();
+      workspaceMenu.reset();
+      skillsMenu.close();
+    }
+    function reconcileEffectiveEndpoint(previousSignature) {
+      const nextEndpoint = getEffectiveEndpoint();
+      const changed = connectionSignature(nextEndpoint) !== previousSignature;
+      if (changed) resetEffectiveEndpointContext();
+      if (!nextEndpoint?.backend) {
+        deactivateMonitor();
+        return;
+      }
+      if (document.visibilityState === "visible") activateMonitor();
+    }
     function selectWorkspace(workspaceId) {
       if (!/^ws_[0-9a-f]{16}$/.test(workspaceId)) return false;
       if (workspaceId === activeWorkspaceId) {
@@ -2796,37 +2942,49 @@
       workspaceMenu.close();
       monitorUi.unmount();
     }
-    function applySettings({ nextConfig, selectedEndpointId, scope }) {
-      const previousEndpoint = getActiveEndpoint();
-      const persisted = {
-        ...nextConfig,
-        selectedEndpointId: scope === "global" ? selectedEndpointId : config.selectedEndpointId
-      };
-      config = saveConfig(persisted);
-      localEndpointId = scope === "local" ? selectedEndpointId : null;
-      const nextEndpoint = getActiveEndpoint();
-      const endpointChanged = previousEndpoint?.id !== nextEndpoint?.id || previousEndpoint?.backend !== nextEndpoint?.backend;
-      deactivateMonitor();
-      if (endpointChanged) {
-        activeWorkspaceId = null;
-        activityStore.clear();
-        activitySessionKey = null;
-        activitySessionCursor = null;
-        workspaceClient.clear();
-        workspaceMenu.reset();
+    function saveEndpointLibrary(nextEndpoints) {
+      const previousSignature = connectionSignature(getEffectiveEndpoint());
+      if (globalActiveEndpointId && !nextEndpoints.some((endpoint) => endpoint.id === globalActiveEndpointId)) {
+        throw new Error("\u4E0D\u80FD\u5220\u9664\u5F53\u524D\u5168\u5C40\u9ED8\u8BA4\u63A5\u53E3\uFF0C\u8BF7\u5148\u5C06\u5176\u4ED6\u63A5\u53E3\u8BBE\u4E3A\u5168\u5C40\u9ED8\u8BA4\u3002");
       }
-      if (document.visibilityState === "visible") activateMonitor();
+      endpoints = saveEndpoints(nextEndpoints);
+      if (localActiveEndpointId && !endpoints.some((endpoint) => endpoint.id === localActiveEndpointId)) {
+        localActiveEndpointId = null;
+      }
+      reconcileEffectiveEndpoint(previousSignature);
+    }
+    function setGlobalActiveEndpoint(endpointId) {
+      if (!getEndpoint(endpoints, endpointId)) throw new Error("\u8BF7\u5148\u4FDD\u5B58\u8FD9\u4E2A\u63A5\u53E3\u914D\u7F6E\u3002");
+      const previousSignature = connectionSignature(getEffectiveEndpoint());
+      globalActiveEndpointId = saveGlobalActiveEndpointId(endpointId);
+      localActiveEndpointId = null;
+      reconcileEffectiveEndpoint(previousSignature);
+    }
+    function useLocalEndpoint(endpointId) {
+      if (!getEndpoint(endpoints, endpointId)) throw new Error("\u8BF7\u5148\u4FDD\u5B58\u8FD9\u4E2A\u63A5\u53E3\u914D\u7F6E\u3002");
+      const previousSignature = connectionSignature(getEffectiveEndpoint());
+      localActiveEndpointId = endpointId;
+      reconcileEffectiveEndpoint(previousSignature);
+    }
+    function restoreGlobalEndpoint() {
+      const previousSignature = connectionSignature(getEffectiveEndpoint());
+      localActiveEndpointId = null;
+      reconcileEffectiveEndpoint(previousSignature);
     }
     const settingsPanel = createSettingsPanel({
       getState: () => ({
-        config,
-        activeEndpointId: getActiveEndpoint()?.id || "",
-        localEndpointId
+        endpoints,
+        globalActiveEndpointId,
+        localActiveEndpointId,
+        effectiveEndpointId: getEffectiveEndpointId()
       }),
-      onApplySettings: applySettings
+      onSaveEndpoints: saveEndpointLibrary,
+      onSetGlobalEndpoint: setGlobalActiveEndpoint,
+      onUseLocalEndpoint: useLocalEndpoint,
+      onRestoreGlobalEndpoint: restoreGlobalEndpoint
     });
     function startActionLog() {
-      const profile = getActiveEndpoint();
+      const profile = getEffectiveEndpoint();
       if (!monitorMounted || actionLogClient || !profile?.backend || !activeWorkspaceId) return;
       const nextSessionKey = `${profile.id}:${profile.backend}:${activeWorkspaceId}`;
       if (activitySessionKey !== nextSessionKey) {
@@ -2835,7 +2993,7 @@
         activitySessionCursor = null;
       }
       actionLogClient = createActionLogClient({
-        getProfile: getActiveEndpoint,
+        getProfile: getEffectiveEndpoint,
         getWorkspaceId: () => activeWorkspaceId,
         initialCursor: activitySessionCursor,
         onCursor: (cursor) => {
@@ -2857,7 +3015,7 @@
       if (document.visibilityState === "visible") actionLogClient.start();
     }
     function activateMonitor() {
-      const profile = getActiveEndpoint();
+      const profile = getEffectiveEndpoint();
       if (!profile?.backend) return;
       if (!monitorMounted) {
         monitorMounted = true;

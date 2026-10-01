@@ -508,6 +508,17 @@ export const SETTINGS_CSS = `
         color: color-mix(in srgb, CanvasText 62%, transparent);
         font-size: 12px;
       }
+      #gam-settings-overlay .gam-settings-section {
+        display: grid;
+        gap: 13px;
+        padding: 12px;
+        border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+        border-radius: 10px;
+      }
+      #gam-settings-overlay .gam-section-heading {
+        font-weight: 650;
+        font-size: 13px;
+      }
       #gam-settings-overlay .gam-button {
         min-height: 32px;
         padding: 5px 11px;
@@ -544,28 +555,31 @@ export const SETTINGS_CSS = `
         gap: 7px;
       }
       #gam-settings-overlay .gam-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
-      #gam-settings-overlay .gam-scope-group {
-        display: grid;
+      #gam-settings-overlay .gam-config-actions,
+      #gam-settings-overlay .gam-usage-actions {
+        display: flex;
+        justify-content: flex-end;
         gap: 8px;
-        margin: 0;
-        padding: 10px 11px;
-        border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
-        border-radius: 9px;
+        flex-wrap: wrap;
       }
-      #gam-settings-overlay .gam-scope-group legend {
-        padding: 0 5px;
-        font-weight: 600;
-      }
-      #gam-settings-overlay .gam-scope-option {
+      #gam-settings-overlay .gam-usage-grid {
         display: grid;
         grid-template-columns: auto minmax(0, 1fr);
-        gap: 8px;
-        align-items: start;
-        cursor: pointer;
+        gap: 8px 14px;
+        align-items: baseline;
       }
-      #gam-settings-overlay .gam-scope-option input { margin-top: 3px; }
-      #gam-settings-overlay .gam-scope-option span { display: grid; gap: 1px; }
-      #gam-settings-overlay .gam-scope-option small {
+      #gam-settings-overlay .gam-usage-grid > span {
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 12px;
+      }
+      #gam-settings-overlay .gam-usage-grid > strong {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #gam-settings-overlay .gam-usage-note {
+        min-height: 18px;
         color: color-mix(in srgb, CanvasText 58%, transparent);
         font-size: 12px;
       }
@@ -573,18 +587,12 @@ export const SETTINGS_CSS = `
       #gam-settings-overlay .gam-form-message[data-state="error"] { color: #c53e3e; }
       #gam-settings-overlay .gam-form-message[data-state="success"] { color: #238349; }
       #gam-settings-overlay .gam-form-message[data-state="pending"] { color: color-mix(in srgb, CanvasText 60%, transparent); }
-      #gam-settings-overlay .gam-editor-footer {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        margin-top: 2px;
-      }
-      #gam-settings-overlay .gam-editor-footer .gam-spacer { flex: 1; }
       @media (max-width: 520px) {
         #gam-settings-overlay { padding: 8px; }
         #gam-settings-overlay .gam-settings-card { max-height: calc(100vh - 16px); }
         #gam-settings-overlay .gam-endpoint-row { grid-template-columns: 1fr 1fr; }
         #gam-settings-overlay .gam-endpoint-select { grid-column: 1 / -1; }
-        #gam-settings-overlay .gam-editor-footer { flex-wrap: wrap; }
+        #gam-settings-overlay .gam-usage-grid { grid-template-columns: 1fr; gap: 2px; }
+        #gam-settings-overlay .gam-usage-grid > strong { margin-bottom: 6px; }
       }
     `;

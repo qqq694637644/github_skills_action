@@ -1,4 +1,7 @@
-import { PROFILE_KEY } from '../constants.js';
+import {
+  ENDPOINTS_KEY,
+  GLOBAL_ACTIVE_ENDPOINT_KEY,
+} from '../constants.js';
 
 export function normalizeBackend(value) {
   return String(value || '').trim().replace(/\/+$/, '');
@@ -9,58 +12,51 @@ function nextEndpointId() {
   return `endpoint-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function normalizeEndpoint(endpoint, index = 0) {
-  return {
-    id: String(endpoint?.id || '').trim() || nextEndpointId(),
-    name: String(endpoint?.name || endpoint?.gptName || '').trim() || `接口 ${index + 1}`,
-    backend: normalizeBackend(endpoint?.backend),
-    token: String(endpoint?.token || '').trim(),
-  };
-}
-
-export function normalizeConfig(value) {
-  let endpoints = [];
-  let selectedEndpointId = '';
-
-  if (Array.isArray(value)) {
-    endpoints = value
-      .filter((endpoint) => endpoint?.backend)
-      .map((endpoint, index) => normalizeEndpoint(endpoint, index));
-  } else if (Array.isArray(value?.endpoints)) {
-    endpoints = value.endpoints.map((endpoint, index) => normalizeEndpoint(endpoint, index));
-    selectedEndpointId = String(value.selectedEndpointId || '').trim();
-  } else if (value?.backend) {
-    endpoints = [normalizeEndpoint({ ...value, name: value.name || '默认接口' }, 0)];
-  }
-
-  endpoints = endpoints.filter((endpoint) => endpoint.backend);
-  if (!endpoints.some((endpoint) => endpoint.id === selectedEndpointId)) {
-    selectedEndpointId = endpoints[0]?.id || '';
-  }
-
-  return {
-    version: 2,
-    endpoints,
-    selectedEndpointId,
-  };
-}
-
-export function loadConfig() {
-  return normalizeConfig(GM_getValue(PROFILE_KEY, null));
-}
-
-export function saveConfig(config) {
-  const normalized = normalizeConfig(config);
-  GM_setValue(PROFILE_KEY, normalized);
-  return normalized;
+function normalizeStoredEndpoint(endpoint) {
+  if (!endpoint || typeof endpoint !== 'object') return null;
+  const id = String(endpoint.id || '').trim();
+  const name = String(endpoint.name || '').trim();
+  const backend = normalizeBackend(endpoint.backend);
+  const token = String(endpoint.token || '').trim();
+  if (!id || !name || !backend) return null;
+  return { id, name, backend, token };
 }
 
 export function createEndpoint(index = 0) {
-  return normalizeEndpoint({ name: `接口 ${index + 1}` }, index);
+  return {
+    id: nextEndpointId(),
+    name: `接口 ${index + 1}`,
+    backend: '',
+    token: '',
+  };
 }
 
-export function getEndpoint(config, endpointId) {
-  return config?.endpoints?.find((endpoint) => endpoint.id === endpointId) || null;
+export function loadEndpoints() {
+  const stored = GM_getValue(ENDPOINTS_KEY, []);
+  if (!Array.isArray(stored)) return [];
+  return stored.map(normalizeStoredEndpoint).filter(Boolean);
+}
+
+export function saveEndpoints(endpoints) {
+  const normalized = (Array.isArray(endpoints) ? endpoints : [])
+    .map(normalizeStoredEndpoint)
+    .filter(Boolean);
+  GM_setValue(ENDPOINTS_KEY, normalized);
+  return normalized;
+}
+
+export function loadGlobalActiveEndpointId() {
+  return String(GM_getValue(GLOBAL_ACTIVE_ENDPOINT_KEY, '') || '').trim();
+}
+
+export function saveGlobalActiveEndpointId(endpointId) {
+  const normalized = String(endpointId || '').trim();
+  GM_setValue(GLOBAL_ACTIVE_ENDPOINT_KEY, normalized);
+  return normalized;
+}
+
+export function getEndpoint(endpoints, endpointId) {
+  return endpoints.find((endpoint) => endpoint.id === endpointId) || null;
 }
 
 export function validateBackend(value) {

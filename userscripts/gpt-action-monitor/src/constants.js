@@ -1,4 +1,5 @@
-export const PROFILE_KEY = 'gptActionMonitorProfiles';
+export const ENDPOINTS_KEY = 'gptActionMonitorEndpointsV3';
+export const GLOBAL_ACTIVE_ENDPOINT_KEY = 'gptActionMonitorGlobalActiveEndpointV3';
 export const POSITION_KEY = 'gptActionMonitorPosition';
 export const POLL_WAIT_SECONDS = 55;
 export const RETRY_MS = 3000;

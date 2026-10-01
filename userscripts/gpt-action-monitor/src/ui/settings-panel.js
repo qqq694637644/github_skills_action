@@ -50,15 +50,30 @@ function testProfileConnection(profile, statusElement, button) {
   });
 }
 
-function cloneConfig(config) {
-  return {
-    version: 2,
-    selectedEndpointId: config?.selectedEndpointId || '',
-    endpoints: (config?.endpoints || []).map((endpoint) => ({ ...endpoint })),
-  };
+function cloneEndpoints(endpoints) {
+  return (endpoints || []).map((endpoint) => ({ ...endpoint }));
 }
 
-export function createSettingsPanel({ getState, onApplySettings }) {
+function endpointSnapshot(endpoints) {
+  return JSON.stringify((endpoints || []).map((endpoint) => ({
+    id: endpoint.id,
+    name: String(endpoint.name || '').trim(),
+    backend: normalizeBackend(endpoint.backend),
+    token: String(endpoint.token || '').trim(),
+  })));
+}
+
+function endpointName(endpoints, endpointId) {
+  return endpoints.find((endpoint) => endpoint.id === endpointId)?.name || '';
+}
+
+export function createSettingsPanel({
+  getState,
+  onSaveEndpoints,
+  onSetGlobalEndpoint,
+  onUseLocalEndpoint,
+  onRestoreGlobalEndpoint,
+}) {
   let overlay = null;
   let style = null;
 
@@ -72,14 +87,17 @@ export function createSettingsPanel({ getState, onApplySettings }) {
   function open() {
     if (overlay?.isConnected) return;
 
-    const state = getState();
-    const draft = cloneConfig(state.config);
-    if (!draft.endpoints.length) {
-      const endpoint = createEndpoint(0);
-      draft.endpoints.push(endpoint);
-      draft.selectedEndpointId = endpoint.id;
-    }
-    let selectedEndpointId = state.activeEndpointId || draft.selectedEndpointId || draft.endpoints[0].id;
+    const initialState = getState();
+    let draftEndpoints = cloneEndpoints(initialState.endpoints);
+    if (!draftEndpoints.length) draftEndpoints.push(createEndpoint(0));
+    let persistedSnapshot = endpointSnapshot(initialState.endpoints);
+    let editingEndpointId = draftEndpoints.some(
+      (endpoint) => endpoint.id === initialState.effectiveEndpointId,
+    )
+      ? initialState.effectiveEndpointId
+      : draftEndpoints.some((endpoint) => endpoint.id === initialState.globalActiveEndpointId)
+        ? initialState.globalActiveEndpointId
+        : draftEndpoints[0].id;
 
     style = document.createElement('style');
     style.textContent = SETTINGS_CSS;
@@ -92,48 +110,55 @@ export function createSettingsPanel({ getState, onApplySettings }) {
           <button class="gam-icon-button gam-settings-close" type="button" aria-label="关闭配置">×</button>
         </div>
         <div class="gam-settings-body">
-          <p class="gam-settings-note">可保存多个接口，但监控始终只使用一个。全局选择永久保存；局部选择只对当前页面有效，刷新后自动恢复全局接口。</p>
+          <p class="gam-settings-note">接口配置永久保存；保存配置不会改变当前使用的接口。全局默认永久生效，当前页面接口只在本次页面加载期间临时覆盖。</p>
           <form class="gam-editor">
-            <div class="gam-field">
-              <span>接口</span>
-              <div class="gam-endpoint-row">
-                <select class="gam-input gam-endpoint-select" aria-label="选择接口"></select>
-                <button class="gam-button gam-add-endpoint" type="button">添加</button>
-                <button class="gam-button gam-delete-endpoint" type="button">删除</button>
+            <section class="gam-settings-section">
+              <div class="gam-section-heading">接口配置</div>
+              <div class="gam-field">
+                <span>编辑接口</span>
+                <div class="gam-endpoint-row">
+                  <select class="gam-input gam-endpoint-select" aria-label="选择要编辑的接口"></select>
+                  <button class="gam-button gam-add-endpoint" type="button">添加</button>
+                  <button class="gam-button gam-delete-endpoint" type="button">删除</button>
+                </div>
               </div>
-            </div>
-            <label class="gam-field">
-              <span>接口名称</span>
-              <input class="gam-input gam-name" type="text" autocomplete="off" placeholder="例如 ChatGPT MCP" required>
-            </label>
-            <label class="gam-field">
-              <span>后端地址</span>
-              <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://githubaction.giize.com/mcp-app" required>
-            </label>
-            <label class="gam-field">
-              <span>Bearer Token</span>
-              <div class="gam-token-row">
-                <input class="gam-input gam-token" type="password" autocomplete="off" placeholder="未启用认证可留空">
-                <button class="gam-button gam-token-toggle" type="button">显示</button>
+              <label class="gam-field">
+                <span>接口名称</span>
+                <input class="gam-input gam-name" type="text" autocomplete="off" placeholder="例如 skill_action" required>
+              </label>
+              <label class="gam-field">
+                <span>后端地址</span>
+                <input class="gam-input gam-backend" type="url" autocomplete="off" placeholder="https://githubaction.giize.com/mcp-app" required>
+              </label>
+              <label class="gam-field">
+                <span>Bearer Token</span>
+                <div class="gam-token-row">
+                  <input class="gam-input gam-token" type="password" autocomplete="off" placeholder="未启用认证可留空">
+                  <button class="gam-button gam-token-toggle" type="button">显示</button>
+                </div>
+              </label>
+              <div class="gam-config-actions">
+                <button class="gam-button gam-test" type="button">测试连接</button>
+                <button class="gam-button gam-button-primary gam-save" type="submit">保存配置</button>
               </div>
-            </label>
-            <fieldset class="gam-scope-group">
-              <legend>生效范围</legend>
-              <label class="gam-scope-option">
-                <input type="radio" name="gam-scope" value="global">
-                <span><strong>全局</strong><small>永久保存为默认接口，刷新和新页面继续使用。</small></span>
-              </label>
-              <label class="gam-scope-option">
-                <input type="radio" name="gam-scope" value="local">
-                <span><strong>局部</strong><small>只在当前页面临时使用，刷新页面后失效并恢复全局接口。</small></span>
-              </label>
-            </fieldset>
+            </section>
+
+            <section class="gam-settings-section gam-usage-section">
+              <div class="gam-section-heading">使用状态</div>
+              <div class="gam-usage-grid">
+                <span>全局默认</span><strong class="gam-global-value"></strong>
+                <span>当前页面</span><strong class="gam-current-value"></strong>
+                <span>当前编辑</span><strong class="gam-editing-value"></strong>
+              </div>
+              <div class="gam-usage-actions">
+                <button class="gam-button gam-set-global" type="button">设为全局默认</button>
+                <button class="gam-button gam-use-local" type="button">仅当前页面使用</button>
+                <button class="gam-button gam-restore-global" type="button">恢复全局默认</button>
+              </div>
+              <div class="gam-usage-note"></div>
+            </section>
+
             <div class="gam-form-message" aria-live="polite"></div>
-            <div class="gam-editor-footer">
-              <span class="gam-spacer"></span>
-              <button class="gam-button gam-test" type="button">测试连接</button>
-              <button class="gam-button gam-button-primary gam-save" type="submit">保存</button>
-            </div>
           </form>
         </div>
       </div>
@@ -149,12 +174,17 @@ export function createSettingsPanel({ getState, onApplySettings }) {
     const tokenInput = overlay.querySelector('.gam-token');
     const deleteButton = overlay.querySelector('.gam-delete-endpoint');
     const formMessage = overlay.querySelector('.gam-form-message');
+    const usageNote = overlay.querySelector('.gam-usage-note');
     const testButton = overlay.querySelector('.gam-test');
-    const initialScope = state.localEndpointId ? 'local' : 'global';
-    overlay.querySelector(`input[name="gam-scope"][value="${initialScope}"]`).checked = true;
+    const setGlobalButton = overlay.querySelector('.gam-set-global');
+    const useLocalButton = overlay.querySelector('.gam-use-local');
+    const restoreGlobalButton = overlay.querySelector('.gam-restore-global');
+    const globalValue = overlay.querySelector('.gam-global-value');
+    const currentValue = overlay.querySelector('.gam-current-value');
+    const editingValue = overlay.querySelector('.gam-editing-value');
 
-    function currentEndpoint() {
-      return draft.endpoints.find((endpoint) => endpoint.id === selectedEndpointId) || null;
+    function currentDraftEndpoint() {
+      return draftEndpoints.find((endpoint) => endpoint.id === editingEndpointId) || null;
     }
 
     function clearMessage() {
@@ -162,52 +192,119 @@ export function createSettingsPanel({ getState, onApplySettings }) {
       delete formMessage.dataset.state;
     }
 
+    function showError(message) {
+      formMessage.textContent = message;
+      formMessage.dataset.state = 'error';
+    }
+
+    function showSuccess(message) {
+      formMessage.textContent = message;
+      formMessage.dataset.state = 'success';
+    }
+
     function commitFields() {
-      const endpoint = currentEndpoint();
+      const endpoint = currentDraftEndpoint();
       if (!endpoint) return;
       endpoint.name = nameInput.value.trim();
       endpoint.backend = normalizeBackend(backendInput.value);
       endpoint.token = tokenInput.value.trim();
     }
 
-    function renderEndpointSelect() {
-      endpointSelect.replaceChildren(...draft.endpoints.map((endpoint, index) => {
-        const option = document.createElement('option');
-        option.value = endpoint.id;
-        const label = endpoint.name || `接口 ${index + 1}`;
-        option.textContent = endpoint.id === draft.selectedEndpointId
-          ? `${label}（全局默认）`
-          : label;
-        return option;
-      }));
-      endpointSelect.value = selectedEndpointId;
-      deleteButton.disabled = draft.endpoints.length <= 1;
+    function hasUnsavedChanges() {
+      commitFields();
+      return endpointSnapshot(draftEndpoints) !== persistedSnapshot;
     }
 
-    function loadSelectedEndpoint() {
-      const endpoint = currentEndpoint();
+    function renderEndpointSelect() {
+      const state = getState();
+      endpointSelect.replaceChildren(...draftEndpoints.map((endpoint, index) => {
+        const option = document.createElement('option');
+        option.value = endpoint.id;
+        const markers = [];
+        if (endpoint.id === state.globalActiveEndpointId) markers.push('全局默认');
+        if (endpoint.id === state.localActiveEndpointId) markers.push('当前页面');
+        const suffix = markers.length ? `（${markers.join(' / ')}）` : '';
+        option.textContent = `${endpoint.name || `接口 ${index + 1}`}${suffix}`;
+        return option;
+      }));
+      endpointSelect.value = editingEndpointId;
+      deleteButton.disabled = draftEndpoints.length <= 1;
+    }
+
+    function renderUsageState() {
+      const state = getState();
+      const persistedEditing = state.endpoints.find(
+        (endpoint) => endpoint.id === editingEndpointId,
+      );
+      const dirty = hasUnsavedChanges();
+      const globalName = endpointName(state.endpoints, state.globalActiveEndpointId);
+      const effectiveName = endpointName(state.endpoints, state.effectiveEndpointId);
+      const editingName = currentDraftEndpoint()?.name || '未命名接口';
+
+      globalValue.textContent = globalName || '未设置';
+      currentValue.textContent = effectiveName
+        ? `${effectiveName}${state.localActiveEndpointId ? ' · 临时' : ' · 跟随全局'}`
+        : '未设置';
+      editingValue.textContent = `${editingName}${dirty ? ' · 未保存' : ''}`;
+
+      const activationBlocked = dirty || !persistedEditing;
+      setGlobalButton.disabled = activationBlocked
+        || editingEndpointId === state.globalActiveEndpointId;
+      useLocalButton.disabled = activationBlocked
+        || editingEndpointId === state.localActiveEndpointId;
+      restoreGlobalButton.disabled = !state.localActiveEndpointId;
+
+      if (dirty) {
+        usageNote.textContent = '当前有未保存的配置更改。生效操作只针对已保存配置，请先保存配置。';
+      } else if (!persistedEditing) {
+        usageNote.textContent = '这是尚未保存的新接口，请先保存配置后再设置生效。';
+      } else if (state.localActiveEndpointId) {
+        usageNote.textContent = '当前页面正在使用临时接口；刷新页面后局部覆盖自动失效。';
+      } else {
+        usageNote.textContent = '当前页面跟随全局默认接口。';
+      }
+
+      renderEndpointSelect();
+    }
+
+    function loadEditingEndpoint() {
+      const endpoint = currentDraftEndpoint();
       if (!endpoint) return;
       nameInput.value = endpoint.name || '';
       backendInput.value = endpoint.backend || '';
       tokenInput.value = endpoint.token || '';
-      renderEndpointSelect();
       clearMessage();
+      renderUsageState();
     }
 
     function validateDraft() {
-      for (let index = 0; index < draft.endpoints.length; index += 1) {
-        const endpoint = draft.endpoints[index];
+      const seenIds = new Set();
+      for (let index = 0; index < draftEndpoints.length; index += 1) {
+        const endpoint = draftEndpoints[index];
+        endpoint.id = String(endpoint.id || '').trim();
         endpoint.name = String(endpoint.name || '').trim();
+        if (!endpoint.id || seenIds.has(endpoint.id)) return `接口 ${index + 1} 的 ID 无效。`;
+        seenIds.add(endpoint.id);
         if (!endpoint.name) return `接口 ${index + 1} 缺少名称。`;
         const validation = validateBackend(endpoint.backend);
         if (!validation.ok) return `${endpoint.name}：${validation.message}`;
         endpoint.backend = validation.backend;
         endpoint.token = String(endpoint.token || '').trim();
       }
-      if (!draft.endpoints.some((endpoint) => endpoint.id === selectedEndpointId)) {
-        return '请选择要使用的接口。';
-      }
       return '';
+    }
+
+    function syncDirtyUi() {
+      const option = [...endpointSelect.options].find((item) => item.value === editingEndpointId);
+      if (option) {
+        const state = getState();
+        const markers = [];
+        if (editingEndpointId === state.globalActiveEndpointId) markers.push('全局默认');
+        if (editingEndpointId === state.localActiveEndpointId) markers.push('当前页面');
+        const suffix = markers.length ? `（${markers.join(' / ')}）` : '';
+        option.textContent = `${nameInput.value.trim() || '未命名接口'}${suffix}`;
+      }
+      renderUsageState();
     }
 
     overlay.querySelector('.gam-settings-close').addEventListener('click', close);
@@ -218,34 +315,36 @@ export function createSettingsPanel({ getState, onApplySettings }) {
     });
     endpointSelect.addEventListener('change', () => {
       commitFields();
-      selectedEndpointId = endpointSelect.value;
-      loadSelectedEndpoint();
+      editingEndpointId = endpointSelect.value;
+      loadEditingEndpoint();
     });
-    nameInput.addEventListener('input', () => {
-      const endpoint = currentEndpoint();
-      if (!endpoint) return;
-      endpoint.name = nameInput.value;
-      const option = [...endpointSelect.options].find((item) => item.value === endpoint.id);
-      if (option) option.textContent = endpoint.name.trim() || '未命名接口';
-    });
+    for (const input of [nameInput, backendInput, tokenInput]) {
+      input.addEventListener('input', () => {
+        clearMessage();
+        syncDirtyUi();
+      });
+    }
     overlay.querySelector('.gam-add-endpoint').addEventListener('click', () => {
       commitFields();
-      const endpoint = createEndpoint(draft.endpoints.length);
-      draft.endpoints.push(endpoint);
-      selectedEndpointId = endpoint.id;
-      loadSelectedEndpoint();
+      const endpoint = createEndpoint(draftEndpoints.length);
+      draftEndpoints.push(endpoint);
+      editingEndpointId = endpoint.id;
+      loadEditingEndpoint();
       nameInput.select();
     });
     deleteButton.addEventListener('click', () => {
-      if (draft.endpoints.length <= 1) return;
-      const index = draft.endpoints.findIndex((endpoint) => endpoint.id === selectedEndpointId);
-      if (index < 0) return;
-      draft.endpoints.splice(index, 1);
-      if (draft.selectedEndpointId === selectedEndpointId) {
-        draft.selectedEndpointId = draft.endpoints[0]?.id || '';
+      commitFields();
+      const state = getState();
+      if (editingEndpointId === state.globalActiveEndpointId) {
+        showError('不能删除当前全局默认接口，请先将其他接口设为全局默认。');
+        return;
       }
-      selectedEndpointId = draft.endpoints[Math.min(index, draft.endpoints.length - 1)]?.id || '';
-      loadSelectedEndpoint();
+      if (draftEndpoints.length <= 1) return;
+      const index = draftEndpoints.findIndex((endpoint) => endpoint.id === editingEndpointId);
+      if (index < 0) return;
+      draftEndpoints.splice(index, 1);
+      editingEndpointId = draftEndpoints[Math.min(index, draftEndpoints.length - 1)]?.id || '';
+      loadEditingEndpoint();
     });
     testButton.addEventListener('click', () => {
       clearMessage();
@@ -259,20 +358,53 @@ export function createSettingsPanel({ getState, onApplySettings }) {
       commitFields();
       const error = validateDraft();
       if (error) {
-        formMessage.textContent = error;
-        formMessage.dataset.state = 'error';
+        showError(error);
         return;
       }
-      const scope = overlay.querySelector('input[name="gam-scope"]:checked')?.value || 'global';
-      onApplySettings({
-        nextConfig: draft,
-        selectedEndpointId,
-        scope,
-      });
-      formMessage.textContent = scope === 'local'
-        ? '✓ 当前页面已临时切换；刷新后恢复全局接口'
-        : '✓ 已保存为全局默认接口';
-      formMessage.dataset.state = 'success';
+      try {
+        onSaveEndpoints(draftEndpoints);
+        draftEndpoints = cloneEndpoints(getState().endpoints);
+        persistedSnapshot = endpointSnapshot(draftEndpoints);
+        if (!draftEndpoints.some((endpoint) => endpoint.id === editingEndpointId)) {
+          editingEndpointId = draftEndpoints[0]?.id || '';
+        }
+        if (!editingEndpointId && !draftEndpoints.length) {
+          const endpoint = createEndpoint(0);
+          draftEndpoints.push(endpoint);
+          editingEndpointId = endpoint.id;
+        }
+        loadEditingEndpoint();
+        showSuccess('✓ 接口配置已保存，当前生效接口未改变。');
+      } catch (error_) {
+        showError(error_ instanceof Error ? error_.message : String(error_));
+      }
+    });
+    setGlobalButton.addEventListener('click', () => {
+      try {
+        onSetGlobalEndpoint(editingEndpointId);
+        clearMessage();
+        renderUsageState();
+      } catch (error) {
+        showError(error instanceof Error ? error.message : String(error));
+      }
+    });
+    useLocalButton.addEventListener('click', () => {
+      try {
+        onUseLocalEndpoint(editingEndpointId);
+        clearMessage();
+        renderUsageState();
+      } catch (error) {
+        showError(error instanceof Error ? error.message : String(error));
+      }
+    });
+    restoreGlobalButton.addEventListener('click', () => {
+      try {
+        onRestoreGlobalEndpoint();
+        clearMessage();
+        renderUsageState();
+      } catch (error) {
+        showError(error instanceof Error ? error.message : String(error));
+      }
     });
     overlay.addEventListener('click', (event) => {
       if (event.target === overlay) close();
@@ -281,7 +413,7 @@ export function createSettingsPanel({ getState, onApplySettings }) {
       if (event.key === 'Escape') close();
     });
 
-    loadSelectedEndpoint();
+    loadEditingEndpoint();
     window.setTimeout(() => endpointSelect.focus(), 0);
   }
 

@@ -406,6 +406,55 @@ export function presentActivity(cell) {
   return genericPresentation(cell);
 }
 
+function hoverCommandOutput(cell) {
+  const liveOutput = String(cell.liveOutput || '').trimEnd();
+  if (liveOutput.trim()) return liveOutput;
+
+  const payload = cell.payload || {};
+  const previews = [
+    ...(payload.stdout_preview || []),
+    ...(payload.stderr_preview || []),
+  ].map((line) => String(line || '').trimEnd()).filter((line) => line.trim());
+  if (previews.length) return previews.join('\n');
+  if (payload.error_message) return String(payload.error_message);
+  if (payload.diagnostic) return String(payload.diagnostic);
+  return '(no output)';
+}
+
+function hoverCallText(cell, presentation) {
+  const payload = cell.payload || {};
+  if (cell.kind === 'command') return String(payload.command || 'command');
+  if (cell.kind === 'exploration') {
+    const entries = (cell.entries || []).map((entry) => {
+      const detail = entry.detail ? ` · ${entry.detail}` : '';
+      return `${entry.verb} ${entry.label}${detail}`;
+    });
+    return entries.join('\n') || presentation.title;
+  }
+  if (cell.kind === 'write') return `workspaceWriteFile ${payload.path || ''}`.trim();
+  if (cell.kind === 'patch') return payload.dry_run ? 'workspaceApplyPatch (dry run)' : 'workspaceApplyPatch';
+  if (cell.kind === 'skill') {
+    const target = payload.path || (payload.skill_ids || []).join(', ') || payload.skill_id || '';
+    return [payload.operation || 'skill', target].filter(Boolean).join(' ');
+  }
+  return String(payload.operation || presentation.title);
+}
+
+export function presentActivityHover(cell) {
+  const presentation = presentActivity(cell);
+  const active = cell?.phase === 'started' || cell?.phase === 'updated';
+  let output = presentation.lines.join('\n');
+  if (cell?.kind === 'command') output = hoverCommandOutput(cell);
+  else if (!output) output = String(cell?.payload?.diagnostic || cell?.payload?.error_message || '(no output)');
+
+  return {
+    updatedAt: cell?.updatedAt || cell?.startedAt || '',
+    call: hoverCallText(cell || {}, presentation),
+    outputLabel: active ? '当前输出' : '结果',
+    output,
+  };
+}
+
 export function compactActivity(cell) {
   const presentation = presentActivity(cell);
   return {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createActivityStore } from './src/activity/activity-store.js';
-import { presentActivity } from './src/activity/presentation.js';
+import { presentActivity, presentActivityHover } from './src/activity/presentation.js';
 import { createActionLogClient } from './src/api/action-log-client.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
 import { createComposerAdapter, loadSkillsCall } from './src/adapters/composer.js';
@@ -203,6 +203,12 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   const runningPresentation = presentActivity(running);
   assert.equal(runningPresentation.title, 'Running python -m pytest -q');
   assert.deepEqual(runningPresentation.lines, ['two', 'three', 'four']);
+  assert.deepEqual(presentActivityHover(running), {
+    updatedAt: '2026-09-21T12:00:01Z',
+    call: 'python -m pytest -q',
+    outputLabel: '当前输出',
+    output: 'one\ntwo\nthree\nfour',
+  });
 
   activityStore.ingest([{
     id: 3,
@@ -223,6 +229,11 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.equal(activityStore.snapshot().active.length, 0);
   assert.equal(activityStore.snapshot().recent.length, 1);
   assert.equal(presentActivity(activityStore.snapshot().recent[0]).title, 'Ran python -m pytest -q');
+  const completedHover = presentActivityHover(activityStore.snapshot().recent[0]);
+  assert.equal(completedHover.updatedAt, '2026-09-21T12:00:02Z');
+  assert.equal(completedHover.call, 'python -m pytest -q');
+  assert.equal(completedHover.outputLabel, '结果');
+  assert.equal(completedHover.output, 'one\ntwo\nthree\nfour');
 
   activityStore.ingest([{
     id: 3,

@@ -653,6 +653,7 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   };
   const client = createActionLogClient({
     getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
+    getWorkspaceId: () => 'ws_0123456789abcdef',
     onItems: () => {},
     onHint: () => {},
   });
@@ -682,6 +683,7 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   };
   const client = createActionLogClient({
     getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
+    getWorkspaceId: () => 'ws_0123456789abcdef',
     onItems: () => {},
     onHint: () => {},
     initialCursor: 40,
@@ -691,8 +693,34 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   timers.delete(timerId);
   runPoll();
   assert.equal(requestedUrls.length, 1);
+  assert.equal(requestedUrls[0].includes('workspace_id=ws_0123456789abcdef'), true);
   assert.equal(requestedUrls[0].includes('after=40'), true);
   assert.equal(requestedUrls[0].includes('wait=55'), true);
   assert.equal(client.getCursor(), 41);
+  client.stop();
+}
+
+// A page without a selected Workspace must stay idle instead of opening an
+// unfiltered action-log connection. Selecting a Workspace is the network and
+// information-flow boundary for the monitor.
+{
+  const { timers } = installDomFixture();
+  let requests = 0;
+  globalThis.GM_xmlhttpRequest = () => {
+    requests += 1;
+    return { abort() {} };
+  };
+  const client = createActionLogClient({
+    getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
+    getWorkspaceId: () => null,
+    onItems: () => {},
+    onHint: () => {},
+  });
+  client.start();
+  const [timerId, runPoll] = timers.entries().next().value;
+  timers.delete(timerId);
+  runPoll();
+  assert.equal(requests, 0);
+  assert.equal(timers.size, 0);
   client.stop();
 }

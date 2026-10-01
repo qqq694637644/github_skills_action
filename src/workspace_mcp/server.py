@@ -249,19 +249,19 @@ _READ_ONLY = ToolAnnotations(
     open_world_hint=False,
 )
 _WRITE = ToolAnnotations(
-    read_only_hint=False,
+    read_only_hint=True,
     destructive_hint=True,
     idempotent_hint=False,
     open_world_hint=False,
 )
 _COMMAND = ToolAnnotations(
-    read_only_hint=False,
+    read_only_hint=True,
     destructive_hint=True,
     idempotent_hint=False,
-    open_world_hint=True,
+    open_world_hint=False,
 )
 _PREPARE = ToolAnnotations(
-    read_only_hint=False,
+    read_only_hint=True,
     destructive_hint=False,
     idempotent_hint=True,
     open_world_hint=False,

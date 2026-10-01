@@ -27,6 +27,15 @@ class WorkspaceScopedModel(WorkspaceModel):
 
 
 class PrepareWorkspaceRequest(WorkspaceModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "anyOf": [
+                {"required": ["workspace_id"]},
+                {"required": ["idempotency_key"]},
+            ]
+        },
+    )
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
     workspace_id: str | None = Field(default=None, pattern=r"^ws_[0-9a-f]{16}$")
 
@@ -194,14 +203,46 @@ class WorkspaceInspectResponse(WorkspaceModel):
 
 
 class WorkspaceWriteFileRequest(WorkspaceScopedModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {"const": "overwrite_if_sha256_matches"}
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {"required": ["expected_sha256"]},
+                }
+            ]
+        },
+    )
     path: str = Field(min_length=1, max_length=500)
     content: str
     mode: Literal["create_only", "overwrite", "overwrite_if_sha256_matches"] = "create_only"
     encoding: Literal["utf-8"] = "utf-8"
-    line_ending: Literal["preserve", "lf", "crlf"] = "preserve"
-    expected_sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    line_ending: Literal["preserve", "lf", "crlf"] = Field(
+        default="preserve",
+        description=(
+            "preserve keeps an existing file's dominant LF/CRLF style; for a new file it "
+            "normalizes to LF. Use lf or crlf to force a style."
+        ),
+    )
+    expected_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-fA-F]{64}$",
+        description="Required when mode=overwrite_if_sha256_matches.",
+    )
     dry_run: bool = False
     max_bytes: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_hash_checked_overwrite(self) -> WorkspaceWriteFileRequest:
+        if self.mode == "overwrite_if_sha256_matches" and self.expected_sha256 is None:
+            raise ValueError("expected_sha256 is required when mode=overwrite_if_sha256_matches")
+        return self
 
 
 class WorkspaceWriteFileResponse(WorkspaceModel):
@@ -217,7 +258,16 @@ class WorkspaceWriteFileResponse(WorkspaceModel):
 
 
 class WorkspaceApplyPatchRequest(WorkspaceScopedModel):
-    patch: str = Field(min_length=1)
+    patch: str = Field(
+        min_length=1,
+        description=(
+            "Raw Workspace patch text, not git/unified diff and not a Markdown fence. First line "
+            "must be '*** Begin Patch' and last line '*** End Patch'. Use '*** Update File: "
+            "<path>' with one or more '@@' hunks whose lines start with space, '+', or '-'; use "
+            "'*** Add File: <path>' with every content line starting '+'; use '*** Delete File: "
+            "<path>' only with allow_delete=true."
+        ),
+    )
     dry_run: bool = False
     allow_delete: bool = False
     max_changed_files: int | None = Field(default=None, ge=1)
@@ -253,21 +303,65 @@ class WorkspaceOperationSummary(WorkspaceModel):
 
 
 class WorkspaceCommandRequest(WorkspaceModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"action": {"const": "start"}},
+                        "required": ["action"],
+                    },
+                    "then": {
+                        "required": ["idempotency_key", "workspace_id", "script"]
+                    },
+                },
+                *[
+                    {
+                        "if": {
+                            "properties": {"action": {"const": action}},
+                            "required": ["action"],
+                        },
+                        "then": {"required": ["operation_id"]},
+                    }
+                    for action in ("get", "logs", "cancel")
+                ],
+            ]
+        },
+    )
     action: Literal["start", "get", "logs", "cancel", "list"] = Field(
         description=(
-            "start executes a command and returns output when it finishes quickly; when it "
-            "returns a running operation_id, get reads status, logs reads output, cancel stops "
-            "it, and list enumerates operations."
+            "Required on every workspaceCommand call. start launches PowerShell work; get follows "
+            "a running operation; logs rereads/pages historical output; cancel stops it; list "
+            "enumerates operations."
         )
     )
-    idempotency_key: str | None = Field(default=None, min_length=8, max_length=200)
-    workspace_id: str | None = Field(default=None, pattern=r"^ws_[0-9a-f]{16}$")
-    script: str | None = Field(default=None, min_length=1, max_length=20000)
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=200,
+        description="Required with action=start; use a stable caller-chosen retry key.",
+    )
+    workspace_id: str | None = Field(
+        default=None,
+        pattern=r"^ws_[0-9a-f]{16}$",
+        description="Required with action=start; returned by prepareWorkspace.",
+    )
+    script: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20000,
+        description="PowerShell 7 script; valid only with action=start.",
+    )
     timeout_seconds: int | None = Field(default=None, ge=1)
     max_output_bytes: int | None = Field(default=None, ge=1)
     plain_output: bool = False
     utf8_output: bool = True
-    operation_id: str | None = Field(default=None, pattern=r"^op_[0-9a-f]{16}$")
+    operation_id: str | None = Field(
+        default=None,
+        pattern=r"^op_[0-9a-f]{16}$",
+        description="Required with action=get, logs, or cancel; returned by action=start.",
+    )
     stdout_offset: int = Field(default=0, ge=0)
     stderr_offset: int = Field(default=0, ge=0)
     max_bytes: int = Field(default=50_000, ge=1, le=500_000)
@@ -384,8 +478,10 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceCommandResponse,
         summary="Start or manage a PowerShell workspace command.",
         description=(
-            "Run PowerShell 7 work. start returns output if the command finishes quickly; when "
-            "it returns a running operation_id, follow with get/logs until a terminal state."
+            "Run PowerShell 7 work. action is required every call. start requires "
+            "idempotency_key, workspace_id and script and returns output when it finishes quickly; "
+            "a running operation_id must be followed with get using returned log offsets. "
+            "get/logs/cancel require operation_id; logs is for rereads."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )
@@ -836,8 +932,9 @@ def register_workspace_actions(app: FastAPI) -> None:
         response_model=WorkspaceApplyPatchResponse,
         summary="Apply a controlled Codex text patch.",
         description=(
-            "Apply a multi-file text patch with dry-run and rollback on failure. Returns "
-            "changed_files and diff_stat; this does not commit or publish changes."
+            "Apply bounded multi-file UTF-8 edits after inspect/read. patch uses the raw Workspace "
+            "patch grammar: *** Begin Patch / Update|Add|Delete File / *** End Patch; it is not a "
+            "git/unified diff or Markdown fence. Prefer dry_run for broad edits."
         ),
         openapi_extra={"x-openai-isConsequential": False},
     )

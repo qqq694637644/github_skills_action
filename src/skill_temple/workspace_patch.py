@@ -58,7 +58,31 @@ def sha256_hex(data: bytes) -> str:
 
 def target_path(root: Path, path: str) -> Path:
     candidate = Path(path).expanduser()
-    return candidate if candidate.is_absolute() else root / candidate
+    if candidate.is_absolute():
+        raise WorkspaceToolError(
+            "WORKSPACE_PATH_OUTSIDE_ROOT",
+            f"Workspace paths must be relative to the workspace root: {path}",
+            status_code=403,
+        )
+
+    resolved_root = root.resolve()
+    resolved = (resolved_root / candidate).resolve(strict=False)
+    if resolved != resolved_root and not resolved.is_relative_to(resolved_root):
+        raise WorkspaceToolError(
+            "WORKSPACE_PATH_OUTSIDE_ROOT",
+            f"Workspace path resolves outside the workspace root: {path}",
+            status_code=403,
+        )
+    return resolved
+
+
+def path_is_within_workspace(root: Path, path: Path) -> bool:
+    resolved_root = root.resolve()
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return False
+    return resolved == resolved_root or resolved.is_relative_to(resolved_root)
 
 
 def assert_payload_size(data: bytes, *, max_bytes: int, label: str) -> None:
@@ -232,14 +256,20 @@ def prepare_text_patch(
                     status_code=409,
                 )
             assert_text_bytes(original, path=operation.path)
+            line_ending = _detect_line_ending(original)
             original_text = (
                 original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
             )
             lines, trailing = _split_text_lines(original_text)
             new_lines = _apply_hunks(lines, operation.hunks, operation.path)
-            current[operation.path] = _join_lines(
+            rendered = _join_lines(
                 new_lines,
                 trailing_newline=trailing,
+            )
+            current[operation.path] = normalize_line_endings(
+                rendered,
+                line_ending=line_ending,
+                previous_bytes=None,
             ).encode("utf-8")
     return [
         PreparedFileChange(
@@ -428,14 +458,7 @@ def _missing_parent_dirs(path: Path) -> set[Path]:
 
 def normalize_line_endings(content: str, *, line_ending: str, previous_bytes: bytes | None) -> str:
     if line_ending == "preserve":
-        if (
-            previous_bytes
-            and b"\r\n" in previous_bytes
-            and previous_bytes.count(b"\r\n") >= previous_bytes.count(b"\n")
-        ):
-            line_ending = "crlf"
-        else:
-            return content
+        line_ending = _detect_line_ending(previous_bytes) if previous_bytes is not None else "lf"
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     if line_ending == "lf":
         return normalized
@@ -446,6 +469,15 @@ def normalize_line_endings(content: str, *, line_ending: str, previous_bytes: by
         f"Unsupported line ending mode: {line_ending}",
         status_code=422,
     )
+
+
+def _detect_line_ending(data: bytes) -> Literal["lf", "crlf"]:
+    crlf_count = data.count(b"\r\n")
+    lf_count = data.count(b"\n") - crlf_count
+    cr_count = data.count(b"\r") - crlf_count
+    if crlf_count > 0 and crlf_count >= lf_count + cr_count:
+        return "crlf"
+    return "lf"
 
 
 def _collect_operation_body(lines: list[str], start: int) -> tuple[list[str], int]:

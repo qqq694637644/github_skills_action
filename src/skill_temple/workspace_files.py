@@ -18,6 +18,7 @@ from .workspace_patch import (
     describe_changes,
     normalize_line_endings,
     parse_codex_patch,
+    path_is_within_workspace,
     prepare_text_patch,
     prepare_write_change,
     sha256_hex,
@@ -64,6 +65,8 @@ class LocalWorkspaceService:
         max_bytes: int | None,
     ) -> dict[str, Any]:
         root = self.root(workspace_id)
+        for path in paths:
+            target_path(root, path)
         file_budget = max_bytes_per_file or _DEFAULT_FILE_BYTES
         response_budget = max_bytes or _DEFAULT_OUTPUT_BYTES
         files = [
@@ -535,7 +538,11 @@ class LocalWorkspaceService:
                 if depth_from_base >= max_depth:
                     dirs[:] = []
                     continue
-                dirs[:] = sorted(dirs)
+                dirs[:] = [
+                    dirname
+                    for dirname in sorted(dirs)
+                    if path_is_within_workspace(root, current_path / dirname)
+                ]
                 for dirname in dirs:
                     child = current_path / dirname
                     entries.append(
@@ -550,6 +557,8 @@ class LocalWorkspaceService:
                         return entries, True
                 for filename in sorted(files):
                     child = current_path / filename
+                    if not path_is_within_workspace(root, child):
+                        continue
                     try:
                         size = child.stat().st_size
                     except OSError:
@@ -580,10 +589,7 @@ class LocalWorkspaceService:
 
 
 def _display_path(root: Path, path: Path) -> str:
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        return str(path).replace("\\", "/")
+    return path.relative_to(root).as_posix()
 
 
 async def _run_bounded_command(

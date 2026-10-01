@@ -12,6 +12,7 @@ description: 维护当前持久 Workspace 中的真实 GitHub 仓库并推进代
 - 仓库状态、branch、commit、push、PR 查询/创建/更新/merge：读取 `references/git-and-pr.md`。
 - checks、workflow runs/jobs、dispatch/rerun/watch、workflow 文件、Actions cache：读取 `references/actions.md`。
 - workflow/job 大日志、artifact 或其他大 GitHub 输出：读取 `references/outputs.md`。
+- 第一次写文件、应用 Patch、执行命令，或 Workspace Action 返回 schema/参数错误：读取 `references/workspace-actions.md`。
 - 只加载当前任务需要的组合；通用代码定位、读取和编辑仍按全局 Workspace 工作循环执行。
 
 ## 任务路由

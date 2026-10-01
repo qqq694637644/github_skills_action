@@ -46,6 +46,27 @@ gh pr view 123
 
 `workspaceCommand` 是宿主权限下的原生 PowerShell：后端不检查命令字符串、不区分网络命令，也不清洗子进程环境。实际权限边界就是运行服务的操作系统账户以及该账户已经配置的 CLI/凭据。
 
+### Workspace Action 参数契约
+
+`workspaceApplyPatch.patch` 使用项目自己的原始 Patch grammar，不是 `git diff` / unified diff，也不要包在 Markdown code fence 中：
+
+```text
+*** Begin Patch
+*** Update File: src/example.py
+@@
+-old_value = 1
++old_value = 2
+*** End Patch
+```
+
+Update section 必须包含 `@@` hunk；Add section 的内容行必须以 `+` 开头；Delete 只有在 `allow_delete=true` 时允许。较大或格式敏感的修改建议先 `dry_run=true`，真实应用后仍以实际 `git diff` 为准。
+
+`workspaceCommand` 每次调用都必须传 `action`。`action=start` 还要求 `idempotency_key`、`workspace_id`、`script`；`get` / `logs` / `cancel` 要求 `operation_id`。长任务应把上次返回的 `next_stdout_offset` / `next_stderr_offset` 继续传给 `get`，避免重复读取旧日志。
+
+`workspaceWriteFile(mode="overwrite_if_sha256_matches")` 必须同时传 `expected_sha256`。`line_ending="preserve"` 会保持已有文件的主要 LF/CRLF 风格；新文件则规范为 LF。需要固定格式时显式使用 `lf` 或 `crlf`。
+
+文件类 Workspace Actions 的路径必须保持在对应 Workspace root 内：绝对路径、`..` 逃逸，以及最终解析到 root 外的 symlink/junction 都会被拒绝。`workspaceCommand` 则仍按上面的设计使用宿主 OS 账户权限，不受该文件路径边界限制。
+
 ## Skill 目录
 
 ```text

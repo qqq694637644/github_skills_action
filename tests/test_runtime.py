@@ -245,6 +245,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("**Read**", prompt)
         self.assertIn("`workspaceSearch`", prompt)
         self.assertIn("主要工具", prompt)
+        self.assertIn("*** Begin Patch", prompt)
+        self.assertIn("每次调用都必须显式传 `action`", prompt)
         self.assertLess(len(prompt.encode("utf-8")), 6_000)
         for tool_detail in ["regex=false", "case_sensitive", "PCRE2", "max_matches"]:
             with self.subTest(tool_detail=tool_detail):
@@ -261,6 +263,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("push 后重新读取 PR head 和 checks", skill)
         self.assertIn("只有真实 run/check 成功时才能报告 CI 通过", skill)
         self.assertIn("只在用户明确要求时执行", skill)
+        self.assertIn("references/workspace-actions.md", skill)
 
     def test_openapi_exposes_only_skill_loading_and_workspace_actions(self) -> None:
         schema = create_app().openapi()

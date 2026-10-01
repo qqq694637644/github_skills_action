@@ -103,6 +103,69 @@ class WorkspaceActionsTests(unittest.TestCase):
             openapi["paths"]["/v1/workspace/command"]["post"]["description"],
         )
 
+    def test_openapi_documents_workspace_write_patch_and_command_contract(self) -> None:
+        openapi = create_app().openapi()
+        schemas = openapi["components"]["schemas"]
+
+        prepare_branches = schemas["PrepareWorkspaceRequest"]["anyOf"]
+        self.assertEqual(
+            {tuple(branch["required"]) for branch in prepare_branches},
+            {("workspace_id",), ("idempotency_key",)},
+        )
+
+        write = schemas["WorkspaceWriteFileRequest"]
+        self.assertIn("dominant LF/CRLF", write["properties"]["line_ending"]["description"])
+        self.assertEqual(
+            write["properties"]["expected_sha256"]["anyOf"][0]["pattern"],
+            "^[0-9a-fA-F]{64}$",
+        )
+        self.assertTrue(
+            any(
+                item.get("if", {}).get("properties", {}).get("mode", {}).get("const")
+                == "overwrite_if_sha256_matches"
+                and item["if"].get("required") == ["mode"]
+                and item["then"]["required"] == ["expected_sha256"]
+                for item in write["allOf"]
+            )
+        )
+
+        patch_schema = schemas["WorkspaceApplyPatchRequest"]
+        patch_description = patch_schema["properties"]["patch"]["description"]
+        self.assertIn("Raw Workspace patch text", patch_description)
+        self.assertIn("*** Begin Patch", patch_description)
+        self.assertIn("*** End Patch", patch_description)
+        self.assertIn("not git/unified diff", patch_description)
+        self.assertIn(
+            "raw Workspace patch grammar",
+            openapi["paths"]["/v1/workspace/apply-patch"]["post"]["description"],
+        )
+
+        command = schemas["WorkspaceCommandRequest"]
+        self.assertIn(
+            "Required on every workspaceCommand call",
+            command["properties"]["action"]["description"],
+        )
+        self.assertTrue(
+            any(
+                item.get("if", {}).get("properties", {}).get("action", {}).get("const")
+                == "start"
+                and item["if"].get("required") == ["action"]
+                and set(item["then"]["required"])
+                == {"idempotency_key", "workspace_id", "script"}
+                for item in command["allOf"]
+            )
+        )
+        for action in ("get", "logs", "cancel"):
+            self.assertTrue(
+                any(
+                    item.get("if", {}).get("properties", {}).get("action", {}).get("const")
+                    == action
+                    and item["if"].get("required") == ["action"]
+                    and item["then"]["required"] == ["operation_id"]
+                    for item in command["allOf"]
+                )
+            )
+
     def test_missing_workspace_root_is_structured(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             client = TestClient(create_app())
@@ -346,6 +409,17 @@ class WorkspaceActionsTests(unittest.TestCase):
             )
             self.assertEqual(mismatch.status_code, 409)
 
+            missing_hash = client.post(
+                "/v1/workspace/write-file",
+                json={
+                    "workspace_id": workspace_id,
+                    "path": "nested/a.txt",
+                    "content": "changed",
+                    "mode": "overwrite_if_sha256_matches",
+                },
+            )
+            self.assertEqual(missing_hash.status_code, 422)
+
             updated = client.post(
                 "/v1/workspace/write-file",
                 json={
@@ -361,6 +435,171 @@ class WorkspaceActionsTests(unittest.TestCase):
             self.assertEqual(updated.status_code, 200, updated.text)
             self.assertFalse(updated.json()["written"])
             self.assertEqual((workspace_root / "nested" / "a.txt").read_bytes(), b"one\r\ntwo\r\n")
+
+    def test_write_and_patch_preserve_existing_line_endings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            client = self._client(root)
+            workspace_id = self._prepare_workspace(client, "line-ending-workspace")
+            workspace_root = root / workspace_id
+            target = workspace_root / "windows.txt"
+            target.write_bytes(b"alpha\r\nbeta\r\n")
+
+            overwritten = client.post(
+                "/v1/workspace/write-file",
+                json={
+                    "workspace_id": workspace_id,
+                    "path": "windows.txt",
+                    "content": "alpha\nbeta2\n",
+                    "mode": "overwrite",
+                    "line_ending": "preserve",
+                },
+            )
+            self.assertEqual(overwritten.status_code, 200, overwritten.text)
+            self.assertEqual(target.read_bytes(), b"alpha\r\nbeta2\r\n")
+
+            patched = client.post(
+                "/v1/workspace/apply-patch",
+                json={
+                    "workspace_id": workspace_id,
+                    "patch": (
+                        "*** Begin Patch\n"
+                        "*** Update File: windows.txt\n"
+                        "@@\n"
+                        "-beta2\n"
+                        "+gamma\n"
+                        "*** End Patch"
+                    ),
+                },
+            )
+            self.assertEqual(patched.status_code, 200, patched.text)
+            self.assertEqual(target.read_bytes(), b"alpha\r\ngamma\r\n")
+
+            mixed = workspace_root / "mixed.txt"
+            mixed.write_bytes(b"one\r\ntwo\r\nthree\n")
+            mixed_overwrite = client.post(
+                "/v1/workspace/write-file",
+                json={
+                    "workspace_id": workspace_id,
+                    "path": "mixed.txt",
+                    "content": "one\ntwo\nthree2\n",
+                    "mode": "overwrite",
+                    "line_ending": "preserve",
+                },
+            )
+            self.assertEqual(mixed_overwrite.status_code, 200, mixed_overwrite.text)
+            self.assertEqual(mixed.read_bytes(), b"one\r\ntwo\r\nthree2\r\n")
+
+            new_file = client.post(
+                "/v1/workspace/write-file",
+                json={
+                    "workspace_id": workspace_id,
+                    "path": "new.txt",
+                    "content": "one\r\ntwo\r\n",
+                    "mode": "create_only",
+                    "line_ending": "preserve",
+                },
+            )
+            self.assertEqual(new_file.status_code, 200, new_file.text)
+            self.assertEqual((workspace_root / "new.txt").read_bytes(), b"one\ntwo\n")
+
+            forced_crlf = client.post(
+                "/v1/workspace/write-file",
+                json={
+                    "workspace_id": workspace_id,
+                    "path": "forced-crlf.txt",
+                    "content": "one\ntwo\n",
+                    "mode": "create_only",
+                    "line_ending": "crlf",
+                },
+            )
+            self.assertEqual(forced_crlf.status_code, 200, forced_crlf.text)
+            self.assertEqual(
+                (workspace_root / "forced-crlf.txt").read_bytes(),
+                b"one\r\ntwo\r\n",
+            )
+
+    def test_workspace_file_actions_reject_paths_outside_workspace_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            client = self._client(root)
+            workspace_id = self._prepare_workspace(client, "workspace-boundary")
+            workspace_root = root / workspace_id
+            outside = root / "escape.txt"
+            outside.write_text("outside\n", encoding="utf-8")
+
+            for path in ("../escape.txt", str(outside.resolve())):
+                with self.subTest(action="write", path=path):
+                    response = client.post(
+                        "/v1/workspace/write-file",
+                        json={
+                            "workspace_id": workspace_id,
+                            "path": path,
+                            "content": "blocked\n",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        response.json()["detail"]["error"]["code"],
+                        "WORKSPACE_PATH_OUTSIDE_ROOT",
+                    )
+
+                with self.subTest(action="read", path=path):
+                    response = client.post(
+                        "/v1/workspace/read-files",
+                        json={"workspace_id": workspace_id, "paths": [path]},
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+
+                with self.subTest(action="search", path=path):
+                    response = client.post(
+                        "/v1/workspace/search",
+                        json={
+                            "workspace_id": workspace_id,
+                            "query": "outside",
+                            "paths": [path],
+                        },
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+
+                with self.subTest(action="inspect", path=path):
+                    response = client.post(
+                        "/v1/workspace/inspect",
+                        json={"workspace_id": workspace_id, "paths": [path]},
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+
+            patch_response = client.post(
+                "/v1/workspace/apply-patch",
+                json={
+                    "workspace_id": workspace_id,
+                    "patch": (
+                        "*** Begin Patch\n"
+                        "*** Add File: ../escape-patch.txt\n"
+                        "+blocked\n"
+                        "*** End Patch"
+                    ),
+                },
+            )
+            self.assertEqual(patch_response.status_code, 403, patch_response.text)
+            self.assertFalse((root / "escape-patch.txt").exists())
+
+            symlink = workspace_root / "outside-link"
+            try:
+                symlink.symlink_to(root, target_is_directory=True)
+            except OSError:
+                return
+
+            linked_write = client.post(
+                "/v1/workspace/write-file",
+                json={
+                    "workspace_id": workspace_id,
+                    "path": "outside-link/symlink-escape.txt",
+                    "content": "blocked\n",
+                },
+            )
+            self.assertEqual(linked_write.status_code, 403, linked_write.text)
+            self.assertFalse((root / "symlink-escape.txt").exists())
 
     def test_apply_patch_add_update_delete_dry_run_and_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

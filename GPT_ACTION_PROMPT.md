@@ -37,6 +37,8 @@ Skills are strictly manual-only.
 5. **Verify**：先运行最直接的相关检查，再按改动风险扩大到测试、lint、类型检查、构建或集成验证。失败时读取真实错误并针对性修复，不在没有新信息时重复同一失败步骤。
 6. **Recheck**：Action 返回截断、分页或 continuation 时结果不完整；`workspaceCommand(action="start")` 若返回完整 stdout/stderr 与终态则可直接使用，若返回 `state="running"` 的 `operation_id`，必须继续用 `get/logs` 跟进到终态。发生外部写操作后重新读取真实远端状态，不根据命令意图推断成功。
 
+`workspaceApplyPatch.patch` 使用原始 Workspace Patch grammar：首行 `*** Begin Patch`、末行 `*** End Patch`，中间使用 `*** Update File:` / `*** Add File:` / `*** Delete File:`；不要发送普通 git/unified diff 或 Markdown code fence。`workspaceCommand` 每次调用都必须显式传 `action`；`start` 还需要 `idempotency_key`、`workspace_id`、`script`，`get/logs/cancel` 需要 `operation_id`。
+
 大日志或大命令输出优先保存到 workspace，再用 `workspaceSearch` 和分段读取缩小信息量，不把整份输出塞回上下文。不得输出 token、password、private key 或其他 credential/secret 值。
 
 ## 完成与回答

@@ -17,6 +17,8 @@
   // src/constants.js
   var ENDPOINTS_KEY = "gptActionMonitorEndpointsV3";
   var GLOBAL_ACTIVE_ENDPOINT_KEY = "gptActionMonitorGlobalActiveEndpointV3";
+  var PAGE_BINDINGS_KEY = "gptActionMonitorPageBindingsV1";
+  var MAX_PAGE_BINDINGS = 20;
   var POSITION_KEY = "gptActionMonitorPosition";
   var POLL_WAIT_SECONDS = 55;
   var RETRY_MS = 3e3;
@@ -1211,6 +1213,89 @@ ${result}`;
     const normalized = String(endpointId || "").trim();
     GM_setValue(GLOBAL_ACTIVE_ENDPOINT_KEY, normalized);
     return normalized;
+  }
+  function normalizePageBinding(binding) {
+    if (!binding || typeof binding !== "object") return null;
+    const url = String(binding.url || "").trim();
+    const endpointId = String(binding.endpointId || "").trim();
+    const rawWorkspaceId = String(binding.workspaceId || "").trim();
+    const workspaceId = /^ws_[0-9a-f]{16}$/.test(rawWorkspaceId) ? rawWorkspaceId : "";
+    const workspaceEndpointId = String(binding.workspaceEndpointId || "").trim();
+    const modifiedAt = Number(binding.modifiedAt);
+    if (!url || !Number.isFinite(modifiedAt)) return null;
+    return {
+      url,
+      endpointId,
+      workspaceId,
+      workspaceEndpointId: workspaceId ? workspaceEndpointId : "",
+      modifiedAt
+    };
+  }
+  function loadPageBindings() {
+    const stored = GM_getValue(PAGE_BINDINGS_KEY, []);
+    if (!Array.isArray(stored)) return [];
+    return stored.map(normalizePageBinding).filter(Boolean).sort((left, right) => right.modifiedAt - left.modifiedAt).slice(0, MAX_PAGE_BINDINGS);
+  }
+  function loadPageBinding(url) {
+    const key = String(url || "").trim();
+    return loadPageBindings().find((binding) => binding.url === key) || null;
+  }
+  function savePageBinding(url, binding, modifiedAt = Date.now()) {
+    const key = String(url || "").trim();
+    if (!key) return null;
+    const endpointId = String(binding?.endpointId || "").trim();
+    const workspaceId = String(binding?.workspaceId || "").trim();
+    const workspaceEndpointId = String(binding?.workspaceEndpointId || "").trim();
+    const stored = loadPageBindings();
+    const current = stored.find((item) => item.url === key) || null;
+    const existing = stored.filter((item) => item.url !== key);
+    if (!endpointId && !workspaceId) {
+      if (current) GM_setValue(PAGE_BINDINGS_KEY, existing);
+      return null;
+    }
+    if (current && current.endpointId === endpointId && current.workspaceId === workspaceId && current.workspaceEndpointId === workspaceEndpointId) {
+      return current;
+    }
+    const next = normalizePageBinding({
+      url: key,
+      endpointId,
+      workspaceId,
+      workspaceEndpointId,
+      modifiedAt
+    });
+    if (!next) return null;
+    const bindings = [next, ...existing].sort((left, right) => right.modifiedAt - left.modifiedAt).slice(0, MAX_PAGE_BINDINGS);
+    GM_setValue(PAGE_BINDINGS_KEY, bindings);
+    return next;
+  }
+  function prunePageBindings(validEndpointIds, modifiedAt = Date.now()) {
+    const validIds = new Set(validEndpointIds || []);
+    const bindings = loadPageBindings();
+    let changed = false;
+    const next = [];
+    for (const binding of bindings) {
+      const item = { ...binding };
+      let itemChanged = false;
+      if (item.endpointId && !validIds.has(item.endpointId)) {
+        item.endpointId = "";
+        changed = true;
+        itemChanged = true;
+      }
+      if (item.workspaceEndpointId && !validIds.has(item.workspaceEndpointId)) {
+        item.workspaceId = "";
+        item.workspaceEndpointId = "";
+        changed = true;
+        itemChanged = true;
+      }
+      if (!item.endpointId && !item.workspaceId) continue;
+      if (itemChanged) item.modifiedAt = modifiedAt;
+      next.push(item);
+    }
+    const limited = next.sort((left, right) => right.modifiedAt - left.modifiedAt).slice(0, MAX_PAGE_BINDINGS);
+    if (changed || limited.length !== bindings.length) {
+      GM_setValue(PAGE_BINDINGS_KEY, limited);
+    }
+    return limited;
   }
   function getEndpoint(endpoints, endpointId) {
     return endpoints.find((endpoint) => endpoint.id === endpointId) || null;
@@ -2413,7 +2498,7 @@ ${result}`;
     getState,
     onSaveEndpoints,
     onSetGlobalEndpoint,
-    onUseLocalEndpoint,
+    onUsePageEndpoint,
     onRestoreGlobalEndpoint
   }) {
     let overlay = null;
@@ -2444,7 +2529,7 @@ ${result}`;
           <button class="gam-icon-button gam-settings-close" type="button" aria-label="\u5173\u95ED\u914D\u7F6E">\xD7</button>
         </div>
         <div class="gam-settings-body">
-          <p class="gam-settings-note">\u63A5\u53E3\u914D\u7F6E\u6C38\u4E45\u4FDD\u5B58\uFF1B\u4FDD\u5B58\u914D\u7F6E\u4E0D\u4F1A\u6539\u53D8\u5F53\u524D\u4F7F\u7528\u7684\u63A5\u53E3\u3002\u5168\u5C40\u9ED8\u8BA4\u6C38\u4E45\u751F\u6548\uFF0C\u5F53\u524D\u9875\u9762\u63A5\u53E3\u53EA\u5728\u672C\u6B21\u9875\u9762\u52A0\u8F7D\u671F\u95F4\u4E34\u65F6\u8986\u76D6\u3002</p>
+          <p class="gam-settings-note">\u63A5\u53E3\u914D\u7F6E\u6C38\u4E45\u4FDD\u5B58\uFF1B\u4FDD\u5B58\u914D\u7F6E\u4E0D\u4F1A\u6539\u53D8\u5F53\u524D\u4F7F\u7528\u7684\u63A5\u53E3\u3002\u5168\u5C40\u9ED8\u8BA4\u7528\u4E8E\u672A\u7ED1\u5B9A\u7F51\u5740\uFF1B\u5F53\u524D\u7F51\u5740\u53EF\u5355\u72EC\u7ED1\u5B9A\u63A5\u53E3\u548C Workspace\u3002\u6700\u591A\u4FDD\u7559 20 \u6761\u7F51\u5740\u8BB0\u5F55\uFF0C\u8D85\u51FA\u540E\u81EA\u52A8\u5220\u9664\u6700\u4E45\u672A\u4FEE\u6539\u7684\u8BB0\u5F55\u3002</p>
           <form class="gam-editor">
             <section class="gam-settings-section">
               <div class="gam-section-heading">\u63A5\u53E3\u914D\u7F6E</div>
@@ -2481,12 +2566,12 @@ ${result}`;
               <div class="gam-section-heading">\u4F7F\u7528\u72B6\u6001</div>
               <div class="gam-usage-grid">
                 <span>\u5168\u5C40\u9ED8\u8BA4</span><strong class="gam-global-value"></strong>
-                <span>\u5F53\u524D\u9875\u9762</span><strong class="gam-current-value"></strong>
+                <span>\u5F53\u524D\u7F51\u5740</span><strong class="gam-current-value"></strong>
                 <span>\u5F53\u524D\u7F16\u8F91</span><strong class="gam-editing-value"></strong>
               </div>
               <div class="gam-usage-actions">
                 <button class="gam-button gam-set-global" type="button">\u8BBE\u4E3A\u5168\u5C40\u9ED8\u8BA4</button>
-                <button class="gam-button gam-use-local" type="button">\u4EC5\u5F53\u524D\u9875\u9762\u4F7F\u7528</button>
+                <button class="gam-button gam-use-page" type="button">\u7ED1\u5B9A\u5F53\u524D\u7F51\u5740</button>
                 <button class="gam-button gam-restore-global" type="button">\u6062\u590D\u5168\u5C40\u9ED8\u8BA4</button>
               </div>
               <div class="gam-usage-note"></div>
@@ -2509,7 +2594,7 @@ ${result}`;
       const usageNote = overlay.querySelector(".gam-usage-note");
       const testButton = overlay.querySelector(".gam-test");
       const setGlobalButton = overlay.querySelector(".gam-set-global");
-      const useLocalButton = overlay.querySelector(".gam-use-local");
+      const usePageButton = overlay.querySelector(".gam-use-page");
       const restoreGlobalButton = overlay.querySelector(".gam-restore-global");
       const globalValue = overlay.querySelector(".gam-global-value");
       const currentValue = overlay.querySelector(".gam-current-value");
@@ -2547,7 +2632,7 @@ ${result}`;
           option.value = endpoint.id;
           const markers = [];
           if (endpoint.id === state.globalActiveEndpointId) markers.push("\u5168\u5C40\u9ED8\u8BA4");
-          if (endpoint.id === state.localActiveEndpointId) markers.push("\u5F53\u524D\u9875\u9762");
+          if (endpoint.id === state.pageActiveEndpointId) markers.push("\u5F53\u524D\u7F51\u5740");
           const suffix = markers.length ? `\uFF08${markers.join(" / ")}\uFF09` : "";
           option.textContent = `${endpoint.name || `\u63A5\u53E3 ${index + 1}`}${suffix}`;
           return option;
@@ -2565,20 +2650,20 @@ ${result}`;
         const effectiveName = endpointName(state.endpoints, state.effectiveEndpointId);
         const editingName = currentDraftEndpoint()?.name || "\u672A\u547D\u540D\u63A5\u53E3";
         globalValue.textContent = globalName || "\u672A\u8BBE\u7F6E";
-        currentValue.textContent = effectiveName ? `${effectiveName}${state.localActiveEndpointId ? " \xB7 \u4E34\u65F6" : " \xB7 \u8DDF\u968F\u5168\u5C40"}` : "\u672A\u8BBE\u7F6E";
+        currentValue.textContent = effectiveName ? `${effectiveName}${state.pageActiveEndpointId ? " \xB7 \u5DF2\u7ED1\u5B9A" : " \xB7 \u8DDF\u968F\u5168\u5C40"}` : "\u672A\u8BBE\u7F6E";
         editingValue.textContent = `${editingName}${dirty ? " \xB7 \u672A\u4FDD\u5B58" : ""}`;
         const activationBlocked = dirty || !persistedEditing;
         setGlobalButton.disabled = activationBlocked || editingEndpointId === state.globalActiveEndpointId;
-        useLocalButton.disabled = activationBlocked || editingEndpointId === state.localActiveEndpointId;
-        restoreGlobalButton.disabled = !state.localActiveEndpointId;
+        usePageButton.disabled = activationBlocked || editingEndpointId === state.pageActiveEndpointId;
+        restoreGlobalButton.disabled = !state.pageActiveEndpointId;
         if (dirty) {
           usageNote.textContent = "\u5F53\u524D\u6709\u672A\u4FDD\u5B58\u7684\u914D\u7F6E\u66F4\u6539\u3002\u751F\u6548\u64CD\u4F5C\u53EA\u9488\u5BF9\u5DF2\u4FDD\u5B58\u914D\u7F6E\uFF0C\u8BF7\u5148\u4FDD\u5B58\u914D\u7F6E\u3002";
         } else if (!persistedEditing) {
           usageNote.textContent = "\u8FD9\u662F\u5C1A\u672A\u4FDD\u5B58\u7684\u65B0\u63A5\u53E3\uFF0C\u8BF7\u5148\u4FDD\u5B58\u914D\u7F6E\u540E\u518D\u8BBE\u7F6E\u751F\u6548\u3002";
-        } else if (state.localActiveEndpointId) {
-          usageNote.textContent = "\u5F53\u524D\u9875\u9762\u6B63\u5728\u4F7F\u7528\u4E34\u65F6\u63A5\u53E3\uFF1B\u5237\u65B0\u9875\u9762\u540E\u5C40\u90E8\u8986\u76D6\u81EA\u52A8\u5931\u6548\u3002";
+        } else if (state.pageActiveEndpointId) {
+          usageNote.textContent = `\u5F53\u524D\u7F51\u5740\u5DF2\u7ED1\u5B9A\u6B64\u63A5\u53E3\uFF0C\u5237\u65B0\u6216\u91CD\u65B0\u6253\u5F00\u8BE5\u7F51\u5740\u4ECD\u4F1A\u751F\u6548\u3002`;
         } else {
-          usageNote.textContent = "\u5F53\u524D\u9875\u9762\u8DDF\u968F\u5168\u5C40\u9ED8\u8BA4\u63A5\u53E3\u3002";
+          usageNote.textContent = "\u5F53\u524D\u7F51\u5740\u672A\u7ED1\u5B9A\u63A5\u53E3\uFF0C\u4F7F\u7528\u5168\u5C40\u9ED8\u8BA4\u3002Workspace \u9009\u62E9\u4ECD\u4F1A\u6309\u7F51\u5740\u4FDD\u5B58\u3002";
         }
         renderEndpointSelect();
       }
@@ -2613,7 +2698,7 @@ ${result}`;
           const state = getState();
           const markers = [];
           if (editingEndpointId === state.globalActiveEndpointId) markers.push("\u5168\u5C40\u9ED8\u8BA4");
-          if (editingEndpointId === state.localActiveEndpointId) markers.push("\u5F53\u524D\u9875\u9762");
+          if (editingEndpointId === state.pageActiveEndpointId) markers.push("\u5F53\u524D\u7F51\u5740");
           const suffix = markers.length ? `\uFF08${markers.join(" / ")}\uFF09` : "";
           option.textContent = `${nameInput.value.trim() || "\u672A\u547D\u540D\u63A5\u53E3"}${suffix}`;
         }
@@ -2700,9 +2785,9 @@ ${result}`;
           showError(error instanceof Error ? error.message : String(error));
         }
       });
-      useLocalButton.addEventListener("click", () => {
+      usePageButton.addEventListener("click", () => {
         try {
-          onUseLocalEndpoint(editingEndpointId);
+          onUsePageEndpoint(editingEndpointId);
           clearMessage();
           renderUsageState();
         } catch (error) {
@@ -2968,14 +3053,19 @@ ${result}`;
     "use strict";
     let endpoints = loadEndpoints();
     let globalActiveEndpointId = loadGlobalActiveEndpointId();
-    let localActiveEndpointId = null;
+    let currentPageUrl = pageUrl();
+    let pageActiveEndpointId = null;
     let activeWorkspaceId = null;
     let monitorMounted = false;
     let actionLogClient = null;
     let activitySessionKey = null;
     let activitySessionCursor = null;
+    function pageUrl() {
+      const pathname = window.location.pathname.length > 1 ? window.location.pathname.replace(/\/+$/, "") : window.location.pathname;
+      return `${window.location.origin}${pathname}`;
+    }
     function getEffectiveEndpointId() {
-      return localActiveEndpointId ?? globalActiveEndpointId;
+      return pageActiveEndpointId || globalActiveEndpointId;
     }
     function getEffectiveEndpoint() {
       return getEndpoint(endpoints, getEffectiveEndpointId());
@@ -2984,6 +3074,21 @@ ${result}`;
       if (!endpoint) return "";
       return `${endpoint.id}\0${endpoint.backend}\0${endpoint.token}`;
     }
+    function persistCurrentPageBinding() {
+      const endpoint = getEffectiveEndpoint();
+      savePageBinding(currentPageUrl, {
+        endpointId: pageActiveEndpointId || "",
+        workspaceId: activeWorkspaceId || "",
+        workspaceEndpointId: activeWorkspaceId ? endpoint?.id || "" : ""
+      });
+    }
+    function loadCurrentPageBinding() {
+      const binding = loadPageBinding(currentPageUrl);
+      pageActiveEndpointId = binding?.endpointId && getEndpoint(endpoints, binding.endpointId) ? binding.endpointId : null;
+      const endpoint = getEffectiveEndpoint();
+      activeWorkspaceId = binding?.workspaceId && binding.workspaceEndpointId === endpoint?.id ? binding.workspaceId : null;
+    }
+    loadCurrentPageBinding();
     const composerAdapter = createComposerAdapter();
     const skillCatalogClient = createSkillCatalogClient({
       getProfile: getEffectiveEndpoint
@@ -3056,6 +3161,7 @@ ${result}`;
       }
       resetWorkspaceStream();
       activeWorkspaceId = workspaceId;
+      persistCurrentPageBinding();
       workspaceMenu.updateTrigger();
       if (monitorMounted && document.visibilityState === "visible") startActionLog();
       return true;
@@ -3074,41 +3180,64 @@ ${result}`;
         throw new Error("\u4E0D\u80FD\u5220\u9664\u5F53\u524D\u5168\u5C40\u9ED8\u8BA4\u63A5\u53E3\uFF0C\u8BF7\u5148\u5C06\u5176\u4ED6\u63A5\u53E3\u8BBE\u4E3A\u5168\u5C40\u9ED8\u8BA4\u3002");
       }
       endpoints = saveEndpoints(nextEndpoints);
-      if (localActiveEndpointId && !endpoints.some((endpoint) => endpoint.id === localActiveEndpointId)) {
-        localActiveEndpointId = null;
+      prunePageBindings(endpoints.map((endpoint) => endpoint.id));
+      if (pageActiveEndpointId && !endpoints.some((endpoint) => endpoint.id === pageActiveEndpointId)) {
+        pageActiveEndpointId = null;
       }
       reconcileEffectiveEndpoint(previousSignature);
+      persistCurrentPageBinding();
     }
     function setGlobalActiveEndpoint(endpointId) {
       if (!getEndpoint(endpoints, endpointId)) throw new Error("\u8BF7\u5148\u4FDD\u5B58\u8FD9\u4E2A\u63A5\u53E3\u914D\u7F6E\u3002");
       const previousSignature = connectionSignature(getEffectiveEndpoint());
       globalActiveEndpointId = saveGlobalActiveEndpointId(endpointId);
-      localActiveEndpointId = null;
       reconcileEffectiveEndpoint(previousSignature);
+      persistCurrentPageBinding();
     }
-    function useLocalEndpoint(endpointId) {
+    function usePageEndpoint(endpointId) {
       if (!getEndpoint(endpoints, endpointId)) throw new Error("\u8BF7\u5148\u4FDD\u5B58\u8FD9\u4E2A\u63A5\u53E3\u914D\u7F6E\u3002");
       const previousSignature = connectionSignature(getEffectiveEndpoint());
-      localActiveEndpointId = endpointId;
+      pageActiveEndpointId = endpointId;
       reconcileEffectiveEndpoint(previousSignature);
+      persistCurrentPageBinding();
     }
     function restoreGlobalEndpoint() {
       const previousSignature = connectionSignature(getEffectiveEndpoint());
-      localActiveEndpointId = null;
+      pageActiveEndpointId = null;
       reconcileEffectiveEndpoint(previousSignature);
+      persistCurrentPageBinding();
     }
     const settingsPanel = createSettingsPanel({
       getState: () => ({
         endpoints,
         globalActiveEndpointId,
-        localActiveEndpointId,
-        effectiveEndpointId: getEffectiveEndpointId()
+        pageActiveEndpointId,
+        effectiveEndpointId: getEffectiveEndpointId(),
+        pageUrl: currentPageUrl
       }),
       onSaveEndpoints: saveEndpointLibrary,
       onSetGlobalEndpoint: setGlobalActiveEndpoint,
-      onUseLocalEndpoint: useLocalEndpoint,
+      onUsePageEndpoint: usePageEndpoint,
       onRestoreGlobalEndpoint: restoreGlobalEndpoint
     });
+    function handlePageNavigation() {
+      const nextPageUrl = pageUrl();
+      if (nextPageUrl === currentPageUrl) return;
+      resetWorkspaceStream();
+      activeWorkspaceId = null;
+      workspaceClient.clear();
+      workspaceMenu.reset();
+      skillsMenu.close();
+      settingsPanel.close();
+      currentPageUrl = nextPageUrl;
+      loadCurrentPageBinding();
+      workspaceMenu.updateTrigger();
+      if (!getEffectiveEndpoint()?.backend) {
+        deactivateMonitor();
+        return;
+      }
+      if (document.visibilityState === "visible") activateMonitor();
+    }
     function startActionLog() {
       const profile = getEffectiveEndpoint();
       if (!monitorMounted || actionLogClient || !profile?.backend || !activeWorkspaceId) return;
@@ -3170,6 +3299,8 @@ ${result}`;
     window.addEventListener("resize", () => {
       if (monitorMounted) monitorUi.keepInViewport();
     });
+    window.navigation?.addEventListener?.("navigatesuccess", handlePageNavigation);
+    window.addEventListener("popstate", handlePageNavigation);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") resume();
       else suspend();

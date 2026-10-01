@@ -11,8 +11,11 @@ import { loadSkillsCall } from './src/adapters/composer.js';
 import {
   loadEndpoints,
   loadGlobalActiveEndpointId,
+  loadPageBinding,
+  loadPageBindings,
   saveEndpoints,
   saveGlobalActiveEndpointId,
+  savePageBinding,
   validateBackend,
 } from './src/profile/profile-store.js';
 import { summarize } from './src/formatter/action-formatter.js';
@@ -65,6 +68,44 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   saveGlobalActiveEndpointId('beta');
   assert.equal(loadGlobalActiveEndpointId(), 'beta');
   assert.deepEqual(loadEndpoints(), endpoints);
+
+  savePageBinding('https://chatgpt.com/c/alpha', {
+    endpointId: 'alpha',
+    workspaceId: 'ws_0123456789abcdef',
+    workspaceEndpointId: 'alpha',
+  }, 100);
+  assert.deepEqual(loadPageBinding('https://chatgpt.com/c/alpha'), {
+    url: 'https://chatgpt.com/c/alpha',
+    endpointId: 'alpha',
+    workspaceId: 'ws_0123456789abcdef',
+    workspaceEndpointId: 'alpha',
+    modifiedAt: 100,
+  });
+  savePageBinding('https://chatgpt.com/c/alpha', {
+    endpointId: 'alpha',
+    workspaceId: 'ws_0123456789abcdef',
+    workspaceEndpointId: 'alpha',
+  }, 150);
+  assert.equal(loadPageBinding('https://chatgpt.com/c/alpha').modifiedAt, 100);
+
+  for (let index = 0; index < 20; index += 1) {
+    savePageBinding(`https://chatgpt.com/c/${index}`, {
+      endpointId: index % 2 ? 'alpha' : 'beta',
+      workspaceId: '',
+      workspaceEndpointId: '',
+    }, 200 + index);
+  }
+  const pageBindings = loadPageBindings();
+  assert.equal(pageBindings.length, 20);
+  assert.equal(pageBindings.some((binding) => binding.url === 'https://chatgpt.com/c/alpha'), false);
+  assert.equal(pageBindings[0].url, 'https://chatgpt.com/c/19');
+
+  savePageBinding('https://chatgpt.com/c/19', {
+    endpointId: '',
+    workspaceId: '',
+    workspaceEndpointId: '',
+  }, 999);
+  assert.equal(loadPageBinding('https://chatgpt.com/c/19'), null);
 }
 
 // Skill catalog reads are cached in-page, while explicit refresh performs a

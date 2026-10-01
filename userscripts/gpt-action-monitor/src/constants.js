@@ -1,5 +1,7 @@
 export const ENDPOINTS_KEY = 'gptActionMonitorEndpointsV3';
 export const GLOBAL_ACTIVE_ENDPOINT_KEY = 'gptActionMonitorGlobalActiveEndpointV3';
+export const PAGE_BINDINGS_KEY = 'gptActionMonitorPageBindingsV1';
+export const MAX_PAGE_BINDINGS = 20;
 export const POSITION_KEY = 'gptActionMonitorPosition';
 export const POLL_WAIT_SECONDS = 55;
 export const RETRY_MS = 3000;

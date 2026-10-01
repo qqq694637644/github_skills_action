@@ -71,7 +71,7 @@ export function createSettingsPanel({
   getState,
   onSaveEndpoints,
   onSetGlobalEndpoint,
-  onUseLocalEndpoint,
+  onUsePageEndpoint,
   onRestoreGlobalEndpoint,
 }) {
   let overlay = null;
@@ -110,7 +110,7 @@ export function createSettingsPanel({
           <button class="gam-icon-button gam-settings-close" type="button" aria-label="关闭配置">×</button>
         </div>
         <div class="gam-settings-body">
-          <p class="gam-settings-note">接口配置永久保存；保存配置不会改变当前使用的接口。全局默认永久生效，当前页面接口只在本次页面加载期间临时覆盖。</p>
+          <p class="gam-settings-note">接口配置永久保存；保存配置不会改变当前使用的接口。全局默认用于未绑定网址；当前网址可单独绑定接口和 Workspace。最多保留 20 条网址记录，超出后自动删除最久未修改的记录。</p>
           <form class="gam-editor">
             <section class="gam-settings-section">
               <div class="gam-section-heading">接口配置</div>
@@ -147,12 +147,12 @@ export function createSettingsPanel({
               <div class="gam-section-heading">使用状态</div>
               <div class="gam-usage-grid">
                 <span>全局默认</span><strong class="gam-global-value"></strong>
-                <span>当前页面</span><strong class="gam-current-value"></strong>
+                <span>当前网址</span><strong class="gam-current-value"></strong>
                 <span>当前编辑</span><strong class="gam-editing-value"></strong>
               </div>
               <div class="gam-usage-actions">
                 <button class="gam-button gam-set-global" type="button">设为全局默认</button>
-                <button class="gam-button gam-use-local" type="button">仅当前页面使用</button>
+                <button class="gam-button gam-use-page" type="button">绑定当前网址</button>
                 <button class="gam-button gam-restore-global" type="button">恢复全局默认</button>
               </div>
               <div class="gam-usage-note"></div>
@@ -177,7 +177,7 @@ export function createSettingsPanel({
     const usageNote = overlay.querySelector('.gam-usage-note');
     const testButton = overlay.querySelector('.gam-test');
     const setGlobalButton = overlay.querySelector('.gam-set-global');
-    const useLocalButton = overlay.querySelector('.gam-use-local');
+    const usePageButton = overlay.querySelector('.gam-use-page');
     const restoreGlobalButton = overlay.querySelector('.gam-restore-global');
     const globalValue = overlay.querySelector('.gam-global-value');
     const currentValue = overlay.querySelector('.gam-current-value');
@@ -222,7 +222,7 @@ export function createSettingsPanel({
         option.value = endpoint.id;
         const markers = [];
         if (endpoint.id === state.globalActiveEndpointId) markers.push('全局默认');
-        if (endpoint.id === state.localActiveEndpointId) markers.push('当前页面');
+        if (endpoint.id === state.pageActiveEndpointId) markers.push('当前网址');
         const suffix = markers.length ? `（${markers.join(' / ')}）` : '';
         option.textContent = `${endpoint.name || `接口 ${index + 1}`}${suffix}`;
         return option;
@@ -243,25 +243,25 @@ export function createSettingsPanel({
 
       globalValue.textContent = globalName || '未设置';
       currentValue.textContent = effectiveName
-        ? `${effectiveName}${state.localActiveEndpointId ? ' · 临时' : ' · 跟随全局'}`
+        ? `${effectiveName}${state.pageActiveEndpointId ? ' · 已绑定' : ' · 跟随全局'}`
         : '未设置';
       editingValue.textContent = `${editingName}${dirty ? ' · 未保存' : ''}`;
 
       const activationBlocked = dirty || !persistedEditing;
       setGlobalButton.disabled = activationBlocked
         || editingEndpointId === state.globalActiveEndpointId;
-      useLocalButton.disabled = activationBlocked
-        || editingEndpointId === state.localActiveEndpointId;
-      restoreGlobalButton.disabled = !state.localActiveEndpointId;
+      usePageButton.disabled = activationBlocked
+        || editingEndpointId === state.pageActiveEndpointId;
+      restoreGlobalButton.disabled = !state.pageActiveEndpointId;
 
       if (dirty) {
         usageNote.textContent = '当前有未保存的配置更改。生效操作只针对已保存配置，请先保存配置。';
       } else if (!persistedEditing) {
         usageNote.textContent = '这是尚未保存的新接口，请先保存配置后再设置生效。';
-      } else if (state.localActiveEndpointId) {
-        usageNote.textContent = '当前页面正在使用临时接口；刷新页面后局部覆盖自动失效。';
+      } else if (state.pageActiveEndpointId) {
+        usageNote.textContent = `当前网址已绑定此接口，刷新或重新打开该网址仍会生效。`;
       } else {
-        usageNote.textContent = '当前页面跟随全局默认接口。';
+        usageNote.textContent = '当前网址未绑定接口，使用全局默认。Workspace 选择仍会按网址保存。';
       }
 
       renderEndpointSelect();
@@ -300,7 +300,7 @@ export function createSettingsPanel({
         const state = getState();
         const markers = [];
         if (editingEndpointId === state.globalActiveEndpointId) markers.push('全局默认');
-        if (editingEndpointId === state.localActiveEndpointId) markers.push('当前页面');
+        if (editingEndpointId === state.pageActiveEndpointId) markers.push('当前网址');
         const suffix = markers.length ? `（${markers.join(' / ')}）` : '';
         option.textContent = `${nameInput.value.trim() || '未命名接口'}${suffix}`;
       }
@@ -388,9 +388,9 @@ export function createSettingsPanel({
         showError(error instanceof Error ? error.message : String(error));
       }
     });
-    useLocalButton.addEventListener('click', () => {
+    usePageButton.addEventListener('click', () => {
       try {
-        onUseLocalEndpoint(editingEndpointId);
+        onUsePageEndpoint(editingEndpointId);
         clearMessage();
         renderUsageState();
       } catch (error) {

@@ -8,8 +8,11 @@ import {
   getEndpoint,
   loadEndpoints,
   loadGlobalActiveEndpointId,
+  loadPageBinding,
+  prunePageBindings,
   saveEndpoints,
   saveGlobalActiveEndpointId,
+  savePageBinding,
 } from './profile/profile-store.js';
 import { createMonitorPanel } from './ui/monitor-panel.js';
 import { createSettingsPanel } from './ui/settings-panel.js';
@@ -21,15 +24,23 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
 
   let endpoints = loadEndpoints();
   let globalActiveEndpointId = loadGlobalActiveEndpointId();
-  let localActiveEndpointId = null;
+  let currentPageUrl = pageUrl();
+  let pageActiveEndpointId = null;
   let activeWorkspaceId = null;
   let monitorMounted = false;
   let actionLogClient = null;
   let activitySessionKey = null;
   let activitySessionCursor = null;
 
+  function pageUrl() {
+    const pathname = window.location.pathname.length > 1
+      ? window.location.pathname.replace(/\/+$/, '')
+      : window.location.pathname;
+    return `${window.location.origin}${pathname}`;
+  }
+
   function getEffectiveEndpointId() {
-    return localActiveEndpointId ?? globalActiveEndpointId;
+    return pageActiveEndpointId || globalActiveEndpointId;
   }
 
   function getEffectiveEndpoint() {
@@ -40,6 +51,29 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     if (!endpoint) return '';
     return `${endpoint.id}\u0000${endpoint.backend}\u0000${endpoint.token}`;
   }
+
+  function persistCurrentPageBinding() {
+    const endpoint = getEffectiveEndpoint();
+    savePageBinding(currentPageUrl, {
+      endpointId: pageActiveEndpointId || '',
+      workspaceId: activeWorkspaceId || '',
+      workspaceEndpointId: activeWorkspaceId ? endpoint?.id || '' : '',
+    });
+  }
+
+  function loadCurrentPageBinding() {
+    const binding = loadPageBinding(currentPageUrl);
+    pageActiveEndpointId = binding?.endpointId && getEndpoint(endpoints, binding.endpointId)
+      ? binding.endpointId
+      : null;
+    const endpoint = getEffectiveEndpoint();
+    activeWorkspaceId = binding?.workspaceId
+      && binding.workspaceEndpointId === endpoint?.id
+      ? binding.workspaceId
+      : null;
+  }
+
+  loadCurrentPageBinding();
 
   const composerAdapter = createComposerAdapter();
   const skillCatalogClient = createSkillCatalogClient({
@@ -122,6 +156,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
 
     resetWorkspaceStream();
     activeWorkspaceId = workspaceId;
+    persistCurrentPageBinding();
     workspaceMenu.updateTrigger();
     if (monitorMounted && document.visibilityState === 'visible') startActionLog();
     return true;
@@ -146,48 +181,75 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     }
 
     endpoints = saveEndpoints(nextEndpoints);
+    prunePageBindings(endpoints.map((endpoint) => endpoint.id));
     if (
-      localActiveEndpointId
-      && !endpoints.some((endpoint) => endpoint.id === localActiveEndpointId)
+      pageActiveEndpointId
+      && !endpoints.some((endpoint) => endpoint.id === pageActiveEndpointId)
     ) {
-      localActiveEndpointId = null;
+      pageActiveEndpointId = null;
     }
     reconcileEffectiveEndpoint(previousSignature);
+    persistCurrentPageBinding();
   }
 
   function setGlobalActiveEndpoint(endpointId) {
     if (!getEndpoint(endpoints, endpointId)) throw new Error('请先保存这个接口配置。');
     const previousSignature = connectionSignature(getEffectiveEndpoint());
     globalActiveEndpointId = saveGlobalActiveEndpointId(endpointId);
-    localActiveEndpointId = null;
     reconcileEffectiveEndpoint(previousSignature);
+    persistCurrentPageBinding();
   }
 
-  function useLocalEndpoint(endpointId) {
+  function usePageEndpoint(endpointId) {
     if (!getEndpoint(endpoints, endpointId)) throw new Error('请先保存这个接口配置。');
     const previousSignature = connectionSignature(getEffectiveEndpoint());
-    localActiveEndpointId = endpointId;
+    pageActiveEndpointId = endpointId;
     reconcileEffectiveEndpoint(previousSignature);
+    persistCurrentPageBinding();
   }
 
   function restoreGlobalEndpoint() {
     const previousSignature = connectionSignature(getEffectiveEndpoint());
-    localActiveEndpointId = null;
+    pageActiveEndpointId = null;
     reconcileEffectiveEndpoint(previousSignature);
+    persistCurrentPageBinding();
   }
 
   const settingsPanel = createSettingsPanel({
     getState: () => ({
       endpoints,
       globalActiveEndpointId,
-      localActiveEndpointId,
+      pageActiveEndpointId,
       effectiveEndpointId: getEffectiveEndpointId(),
+      pageUrl: currentPageUrl,
     }),
     onSaveEndpoints: saveEndpointLibrary,
     onSetGlobalEndpoint: setGlobalActiveEndpoint,
-    onUseLocalEndpoint: useLocalEndpoint,
+    onUsePageEndpoint: usePageEndpoint,
     onRestoreGlobalEndpoint: restoreGlobalEndpoint,
   });
+
+  function handlePageNavigation() {
+    const nextPageUrl = pageUrl();
+    if (nextPageUrl === currentPageUrl) return;
+
+    resetWorkspaceStream();
+    activeWorkspaceId = null;
+    workspaceClient.clear();
+    workspaceMenu.reset();
+    skillsMenu.close();
+    settingsPanel.close();
+
+    currentPageUrl = nextPageUrl;
+    loadCurrentPageBinding();
+    workspaceMenu.updateTrigger();
+
+    if (!getEffectiveEndpoint()?.backend) {
+      deactivateMonitor();
+      return;
+    }
+    if (document.visibilityState === 'visible') activateMonitor();
+  }
 
   function startActionLog() {
     const profile = getEffectiveEndpoint();
@@ -258,6 +320,8 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   window.addEventListener('resize', () => {
     if (monitorMounted) monitorUi.keepInViewport();
   });
+  window.navigation?.addEventListener?.('navigatesuccess', handlePageNavigation);
+  window.addEventListener('popstate', handlePageNavigation);
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') resume();

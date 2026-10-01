@@ -86,6 +86,7 @@
 
   // src/activity/activity-reducer.js
   var MAX_LIVE_OUTPUT_CHARS = 24e3;
+  var MAX_EXPLORATION_ENTRIES_PER_GROUP = 3;
   function clonePayload(payload) {
     return payload && typeof payload === "object" ? { ...payload } : {};
   }
@@ -205,6 +206,43 @@
   function breakExplorationGroup(state) {
     state.explorationGroupId = null;
   }
+  function appendExplorationEntries(state, entries, event, payload, maxHistory) {
+    let remaining = [...entries];
+    let latest = null;
+    let chunkIndex = 0;
+    while (remaining.length) {
+      const groupIndex = state.explorationGroupId ? state.recent.findIndex((cell2) => cell2.id === state.explorationGroupId) : -1;
+      const grouped = groupIndex >= 0 ? cloneCell(state.recent[groupIndex]) : null;
+      const capacity = grouped ? Math.max(0, MAX_EXPLORATION_ENTRIES_PER_GROUP - grouped.entries.length) : 0;
+      if (grouped && capacity > 0) {
+        grouped.entries.push(...remaining.splice(0, capacity));
+        grouped.updatedAt = event.timestamp || grouped.updatedAt;
+        grouped.payload.truncated = Boolean(grouped.payload.truncated || payload.truncated);
+        grouped.revision += 1;
+        state.recent[groupIndex] = grouped;
+        latest = grouped;
+        if (grouped.entries.length >= MAX_EXPLORATION_ENTRIES_PER_GROUP) {
+          breakExplorationGroup(state);
+        }
+        continue;
+      }
+      breakExplorationGroup(state);
+      const chunk = remaining.splice(0, MAX_EXPLORATION_ENTRIES_PER_GROUP);
+      const cell = structuredCell(event);
+      cell.id = `${event.activity_id}:group:${chunkIndex}`;
+      chunkIndex += 1;
+      cell.phase = "completed";
+      cell.payload = { ...cell.payload, ...payload };
+      cell.entries = chunk;
+      cell.updatedAt = event.timestamp || cell.updatedAt;
+      addRecent(state, cell, maxHistory);
+      latest = cell;
+      if (chunk.length < MAX_EXPLORATION_ENTRIES_PER_GROUP) {
+        state.explorationGroupId = cell.id;
+      }
+    }
+    return latest;
+  }
   function reduceCommand(state, event, maxHistory) {
     const existing = state.active.get(event.activity_id);
     if (event.phase === "started") {
@@ -233,14 +271,14 @@
     const payload = clonePayload(event.payload);
     if (event.phase === "started" || event.phase === "updated") {
       const existing = state.active.get(event.activity_id);
-      const cell2 = existing ? cloneCell(existing) : structuredCell(event);
-      cell2.phase = event.phase;
-      cell2.payload = { ...cell2.payload, ...payload };
-      cell2.entries = explorationEntries(payload, event.timestamp || cell2.updatedAt, event.phase);
-      cell2.updatedAt = event.timestamp || cell2.updatedAt;
-      cell2.revision += existing ? 1 : 0;
-      state.active.set(cell2.id, cell2);
-      return cell2;
+      const cell = existing ? cloneCell(existing) : structuredCell(event);
+      cell.phase = event.phase;
+      cell.payload = { ...cell.payload, ...payload };
+      cell.entries = explorationEntries(payload, event.timestamp || cell.updatedAt, event.phase);
+      cell.updatedAt = event.timestamp || cell.updatedAt;
+      cell.revision += existing ? 1 : 0;
+      state.active.set(cell.id, cell);
+      return cell;
     }
     const activeCell = state.active.get(event.activity_id);
     state.active.delete(event.activity_id);
@@ -255,26 +293,7 @@
       return addRecent(state, failed, maxHistory);
     }
     const entries = explorationEntries(payload, event.timestamp || "", event.phase);
-    const groupIndex = state.explorationGroupId ? state.recent.findIndex((cell2) => cell2.id === state.explorationGroupId) : -1;
-    if (groupIndex >= 0) {
-      const grouped = cloneCell(state.recent[groupIndex]);
-      grouped.entries.push(...entries);
-      grouped.updatedAt = event.timestamp || grouped.updatedAt;
-      grouped.payload.truncated = Boolean(grouped.payload.truncated || payload.truncated);
-      grouped.revision += 1;
-      state.recent[groupIndex] = grouped;
-      return grouped;
-    }
-    const cell = activeCell ? cloneCell(activeCell) : structuredCell(event);
-    cell.id = event.activity_id;
-    cell.phase = "completed";
-    cell.payload = { ...cell.payload, ...payload };
-    cell.entries = entries;
-    cell.updatedAt = event.timestamp || cell.updatedAt;
-    cell.revision += activeCell ? 1 : 0;
-    addRecent(state, cell, maxHistory);
-    state.explorationGroupId = cell.id;
-    return cell;
+    return appendExplorationEntries(state, entries, event, payload, maxHistory);
   }
   function reduceGeneric(state, event, maxHistory) {
     const existing = state.active.get(event.activity_id);
@@ -1104,40 +1123,28 @@ ${text.slice(-HOVER_TEXT_LIMIT)}`;
   }
 
   // src/adapters/composer.js
-  var CONTENTEDITABLE_SELECTOR = '[data-composer-body] #prompt-textarea[contenteditable="true"], #prompt-textarea[contenteditable="true"]';
-  var TEXTAREA_SELECTOR = '[data-composer-body] textarea[name="prompt-textarea"], textarea[name="prompt-textarea"]';
+  var PRIMARY_EDITOR_SELECTOR = '#prompt-textarea.ProseMirror[contenteditable="true"]';
+  var FALLBACK_EDITOR_SELECTOR = '#prompt-textarea[contenteditable="true"][role="textbox"]';
   function containsNode(root, node) {
     if (!root || !node) return false;
     if (root === node) return true;
     return typeof root.contains === "function" ? root.contains(node) : false;
   }
   function createComposerAdapter() {
+    let savedEditor = null;
     let savedRange = null;
-    let savedTextareaSelection = null;
-    function findContenteditable() {
-      return document.querySelector(CONTENTEDITABLE_SELECTOR);
-    }
-    function findTextarea() {
-      const textarea = document.querySelector(TEXTAREA_SELECTOR);
-      return textarea && textarea.offsetParent !== null ? textarea : null;
+    function findEditor() {
+      return document.querySelector(PRIMARY_EDITOR_SELECTOR) || document.querySelector(FALLBACK_EDITOR_SELECTOR);
     }
     function captureSelection() {
+      savedEditor = null;
       savedRange = null;
-      savedTextareaSelection = null;
-      const textarea = findTextarea();
-      if (textarea && document.activeElement === textarea) {
-        savedTextareaSelection = {
-          element: textarea,
-          start: textarea.selectionStart,
-          end: textarea.selectionEnd
-        };
-        return true;
-      }
-      const editor = findContenteditable();
+      const editor = findEditor();
       const selection = window.getSelection?.();
       if (!editor || !selection || selection.rangeCount === 0) return false;
       const range = selection.getRangeAt(0);
       if (!containsNode(editor, range.commonAncestorContainer)) return false;
+      savedEditor = editor;
       savedRange = range.cloneRange();
       return true;
     }
@@ -1152,7 +1159,7 @@ ${text.slice(-HOVER_TEXT_LIMIT)}`;
       return true;
     }
     function restoreRange(editor) {
-      if (!savedRange || !containsNode(editor, savedRange.commonAncestorContainer)) {
+      if (editor !== savedEditor || !savedRange || !containsNode(editor, savedRange.commonAncestorContainer)) {
         return placeCaretAtEnd(editor);
       }
       const selection = window.getSelection?.();
@@ -1161,30 +1168,14 @@ ${text.slice(-HOVER_TEXT_LIMIT)}`;
       selection.addRange(savedRange);
       return true;
     }
-    function insertIntoTextarea(textarea, text) {
-      const saved = savedTextareaSelection?.element === textarea ? savedTextareaSelection : null;
-      const start = saved?.start ?? textarea.selectionStart ?? textarea.value.length;
-      const end = saved?.end ?? textarea.selectionEnd ?? start;
-      textarea.focus({ preventScroll: true });
-      textarea.setRangeText(text, start, end, "end");
-      textarea.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
-      return true;
-    }
     function insertText(text) {
-      const textarea = findTextarea();
-      if (textarea) {
-        const inserted2 = insertIntoTextarea(textarea, text);
-        savedTextareaSelection = null;
-        savedRange = null;
-        return inserted2;
-      }
-      const editor = findContenteditable();
+      const editor = savedEditor?.isConnected ? savedEditor : findEditor();
       if (!editor) return false;
       editor.focus({ preventScroll: true });
-      restoreRange(editor);
+      if (!restoreRange(editor)) return false;
       const inserted = typeof document.execCommand === "function" ? document.execCommand("insertText", false, text) : false;
+      savedEditor = null;
       savedRange = null;
-      savedTextareaSelection = null;
       return Boolean(inserted);
     }
     return { captureSelection, insertText };

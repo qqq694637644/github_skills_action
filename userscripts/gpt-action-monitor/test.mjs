@@ -141,11 +141,15 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   await Promise.all([first, refresh]);
 }
 
-// Composer selection is captured only when the Skills menu is opened and is
-// restored for insertion; there is no persistent selection listener.
+// Skills target the current ChatGPT ProseMirror composer only. The editor that
+// owns the captured selection stays pinned through the menu click so a
+// fallback/duplicate input cannot steal the insertion target.
 {
   const { document, window } = installDomFixture();
   const editor = new FakeElement('div');
+  editor.isConnected = true;
+  const alternateEditor = new FakeElement('div');
+  alternateEditor.isConnected = true;
   const range = {
     commonAncestorContainer: editor,
     cloneRange() { return this; },
@@ -159,9 +163,18 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
     addRange(value) { restoredRange = value; },
   };
   editor.contains = (node) => node === editor;
-  document.querySelector = (selector) => (
-    selector.includes('contenteditable="true"') ? editor : null
-  );
+  let primaryLookupCount = 0;
+  document.querySelector = (selector) => {
+    if (selector === '#prompt-textarea.ProseMirror[contenteditable="true"]') {
+      primaryLookupCount += 1;
+      return primaryLookupCount === 1 ? editor : alternateEditor;
+    }
+    if (selector === '#prompt-textarea[contenteditable="true"][role="textbox"]') {
+      return alternateEditor;
+    }
+    if (selector.includes('textarea')) throw new Error('textarea composer fallback must not be queried');
+    return null;
+  };
   document.execCommand = (command, _showUi, value) => {
     assert.equal(command, 'insertText');
     insertedText = value;
@@ -174,6 +187,44 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.equal(composer.insertText(loadSkillsCall('github-maintenance')), true);
   assert.equal(restoredRange, range);
   assert.equal(insertedText, 'loadSkills(["github-maintenance"])');
+  assert.equal(primaryLookupCount, 1);
+}
+
+// If ChatGPT omits the ProseMirror class, accept only the same prompt editor
+// shape with role=textbox; do not fall back to textarea-based composers.
+{
+  const { document, window } = installDomFixture();
+  const editor = new FakeElement('div');
+  editor.isConnected = true;
+  editor.contains = (node) => node === editor;
+  const range = {
+    commonAncestorContainer: editor,
+    cloneRange() { return this; },
+  };
+  const selection = {
+    rangeCount: 1,
+    getRangeAt: () => range,
+    removeAllRanges() {},
+    addRange() {},
+  };
+  const seenSelectors = [];
+  document.querySelector = (selector) => {
+    seenSelectors.push(selector);
+    if (selector === '#prompt-textarea.ProseMirror[contenteditable="true"]') return null;
+    if (selector === '#prompt-textarea[contenteditable="true"][role="textbox"]') return editor;
+    if (selector.includes('textarea')) throw new Error('textarea composer fallback must not be queried');
+    return null;
+  };
+  document.execCommand = () => true;
+  window.getSelection = () => selection;
+
+  const composer = createComposerAdapter();
+  assert.equal(composer.captureSelection(), true);
+  assert.equal(composer.insertText('loadSkills(["fallback"])'), true);
+  assert.deepEqual(seenSelectors, [
+    '#prompt-textarea.ProseMirror[contenteditable="true"]',
+    '#prompt-textarea[contenteditable="true"][role="textbox"]',
+  ]);
 }
 
 // Structured command events update one active cell in place and move it to
@@ -367,8 +418,9 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
   assert.equal(preparingWorkspace.title, 'Preparing workspace');
 }
 
-// Consecutive inspect/search/read activity is coalesced into one Codex-style
-// Explored history cell; a non-exploration cell breaks the group.
+// Exploration remains compact, but a rendered Explored group is capped at the
+// three visible rows. New exploration spills into a new history cell instead
+// of replacing information that was already shown to the user.
 {
   const activityStore = createActivityStore();
   activityStore.ingest([{
@@ -414,10 +466,21 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
       },
     },
   ]);
-  assert.equal(activityStore.snapshot().recent.length, 1);
-  assert.equal(activityStore.snapshot().recent[0].entries.length, 4);
-  assert.equal(presentActivity(activityStore.snapshot().recent[0]).title, 'Explored');
-  const searchEntry = activityStore.snapshot().recent[0].entries[1];
+  const explorationHistory = activityStore.snapshot().recent;
+  assert.equal(explorationHistory.length, 2);
+  assert.deepEqual(explorationHistory.map((cell) => cell.entries.length), [1, 3]);
+  assert.equal(explorationHistory.every((cell) => presentActivity(cell).lines.length <= 3), true);
+  assert.equal(presentActivity(explorationHistory[0]).title, 'Explored');
+  assert.deepEqual(
+    explorationHistory.flatMap((cell) => cell.entries).map((entry) => `${entry.verb} ${entry.label}`),
+    [
+      'Read runtime.py',
+      'Search workspaceCommand',
+      'Search workspaceCommand',
+      'Read workspace_actions.py',
+    ],
+  );
+  const searchEntry = explorationHistory[1].entries[1];
   assert.match(explorationEntryHoverText(searchEntry), /调用\nSearch workspaceCommand/);
   assert.match(explorationEntryHoverText(searchEntry), /结果\n11 matches/);
 
@@ -439,7 +502,7 @@ assert.match(MONITOR_CSS, /\.gam-recent-section\s*\{[\s\S]*?overflow-y:\s*auto/)
       payload: { operation: 'search', query: 'activity_id', match_count: 4 },
     },
   }]);
-  assert.equal(activityStore.snapshot().recent.length, 3);
+  assert.equal(activityStore.snapshot().recent.length, 4);
 }
 
 // Patch summaries match the Codex-style aggregate and keep only the first

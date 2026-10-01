@@ -1,5 +1,5 @@
-const CONTENTEDITABLE_SELECTOR = '[data-composer-body] #prompt-textarea[contenteditable="true"], #prompt-textarea[contenteditable="true"]';
-const TEXTAREA_SELECTOR = '[data-composer-body] textarea[name="prompt-textarea"], textarea[name="prompt-textarea"]';
+const PRIMARY_EDITOR_SELECTOR = '#prompt-textarea.ProseMirror[contenteditable="true"]';
+const FALLBACK_EDITOR_SELECTOR = '#prompt-textarea[contenteditable="true"][role="textbox"]';
 
 function containsNode(root, node) {
   if (!root || !node) return false;
@@ -8,37 +8,25 @@ function containsNode(root, node) {
 }
 
 export function createComposerAdapter() {
+  let savedEditor = null;
   let savedRange = null;
-  let savedTextareaSelection = null;
 
-  function findContenteditable() {
-    return document.querySelector(CONTENTEDITABLE_SELECTOR);
-  }
-
-  function findTextarea() {
-    const textarea = document.querySelector(TEXTAREA_SELECTOR);
-    return textarea && textarea.offsetParent !== null ? textarea : null;
+  function findEditor() {
+    return document.querySelector(PRIMARY_EDITOR_SELECTOR)
+      || document.querySelector(FALLBACK_EDITOR_SELECTOR);
   }
 
   function captureSelection() {
+    savedEditor = null;
     savedRange = null;
-    savedTextareaSelection = null;
 
-    const textarea = findTextarea();
-    if (textarea && document.activeElement === textarea) {
-      savedTextareaSelection = {
-        element: textarea,
-        start: textarea.selectionStart,
-        end: textarea.selectionEnd,
-      };
-      return true;
-    }
-
-    const editor = findContenteditable();
+    const editor = findEditor();
     const selection = window.getSelection?.();
     if (!editor || !selection || selection.rangeCount === 0) return false;
     const range = selection.getRangeAt(0);
     if (!containsNode(editor, range.commonAncestorContainer)) return false;
+
+    savedEditor = editor;
     savedRange = range.cloneRange();
     return true;
   }
@@ -55,7 +43,11 @@ export function createComposerAdapter() {
   }
 
   function restoreRange(editor) {
-    if (!savedRange || !containsNode(editor, savedRange.commonAncestorContainer)) {
+    if (
+      editor !== savedEditor
+      || !savedRange
+      || !containsNode(editor, savedRange.commonAncestorContainer)
+    ) {
       return placeCaretAtEnd(editor);
     }
     const selection = window.getSelection?.();
@@ -65,34 +57,17 @@ export function createComposerAdapter() {
     return true;
   }
 
-  function insertIntoTextarea(textarea, text) {
-    const saved = savedTextareaSelection?.element === textarea ? savedTextareaSelection : null;
-    const start = saved?.start ?? textarea.selectionStart ?? textarea.value.length;
-    const end = saved?.end ?? textarea.selectionEnd ?? start;
-    textarea.focus({ preventScroll: true });
-    textarea.setRangeText(text, start, end, 'end');
-    textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-    return true;
-  }
-
   function insertText(text) {
-    const textarea = findTextarea();
-    if (textarea) {
-      const inserted = insertIntoTextarea(textarea, text);
-      savedTextareaSelection = null;
-      savedRange = null;
-      return inserted;
-    }
-
-    const editor = findContenteditable();
+    const editor = savedEditor?.isConnected ? savedEditor : findEditor();
     if (!editor) return false;
+
     editor.focus({ preventScroll: true });
-    restoreRange(editor);
+    if (!restoreRange(editor)) return false;
     const inserted = typeof document.execCommand === 'function'
       ? document.execCommand('insertText', false, text)
       : false;
+    savedEditor = null;
     savedRange = null;
-    savedTextareaSelection = null;
     return Boolean(inserted);
   }
 

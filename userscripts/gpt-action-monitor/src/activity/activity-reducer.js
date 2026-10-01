@@ -1,6 +1,7 @@
 import { summarize } from '../formatter/action-formatter.js';
 
 const MAX_LIVE_OUTPUT_CHARS = 24_000;
+const MAX_EXPLORATION_ENTRIES_PER_GROUP = 3;
 
 function clonePayload(payload) {
   return payload && typeof payload === 'object' ? { ...payload } : {};
@@ -136,6 +137,52 @@ function breakExplorationGroup(state) {
   state.explorationGroupId = null;
 }
 
+function appendExplorationEntries(state, entries, event, payload, maxHistory) {
+  let remaining = [...entries];
+  let latest = null;
+  let chunkIndex = 0;
+
+  while (remaining.length) {
+    const groupIndex = state.explorationGroupId
+      ? state.recent.findIndex((cell) => cell.id === state.explorationGroupId)
+      : -1;
+    const grouped = groupIndex >= 0 ? cloneCell(state.recent[groupIndex]) : null;
+    const capacity = grouped
+      ? Math.max(0, MAX_EXPLORATION_ENTRIES_PER_GROUP - grouped.entries.length)
+      : 0;
+
+    if (grouped && capacity > 0) {
+      grouped.entries.push(...remaining.splice(0, capacity));
+      grouped.updatedAt = event.timestamp || grouped.updatedAt;
+      grouped.payload.truncated = Boolean(grouped.payload.truncated || payload.truncated);
+      grouped.revision += 1;
+      state.recent[groupIndex] = grouped;
+      latest = grouped;
+      if (grouped.entries.length >= MAX_EXPLORATION_ENTRIES_PER_GROUP) {
+        breakExplorationGroup(state);
+      }
+      continue;
+    }
+
+    breakExplorationGroup(state);
+    const chunk = remaining.splice(0, MAX_EXPLORATION_ENTRIES_PER_GROUP);
+    const cell = structuredCell(event);
+    cell.id = `${event.activity_id}:group:${chunkIndex}`;
+    chunkIndex += 1;
+    cell.phase = 'completed';
+    cell.payload = { ...cell.payload, ...payload };
+    cell.entries = chunk;
+    cell.updatedAt = event.timestamp || cell.updatedAt;
+    addRecent(state, cell, maxHistory);
+    latest = cell;
+    if (chunk.length < MAX_EXPLORATION_ENTRIES_PER_GROUP) {
+      state.explorationGroupId = cell.id;
+    }
+  }
+
+  return latest;
+}
+
 function reduceCommand(state, event, maxHistory) {
   const existing = state.active.get(event.activity_id);
   if (event.phase === 'started') {
@@ -190,29 +237,7 @@ function reduceExploration(state, event, maxHistory) {
   }
 
   const entries = explorationEntries(payload, event.timestamp || '', event.phase);
-  const groupIndex = state.explorationGroupId
-    ? state.recent.findIndex((cell) => cell.id === state.explorationGroupId)
-    : -1;
-  if (groupIndex >= 0) {
-    const grouped = cloneCell(state.recent[groupIndex]);
-    grouped.entries.push(...entries);
-    grouped.updatedAt = event.timestamp || grouped.updatedAt;
-    grouped.payload.truncated = Boolean(grouped.payload.truncated || payload.truncated);
-    grouped.revision += 1;
-    state.recent[groupIndex] = grouped;
-    return grouped;
-  }
-
-  const cell = activeCell ? cloneCell(activeCell) : structuredCell(event);
-  cell.id = event.activity_id;
-  cell.phase = 'completed';
-  cell.payload = { ...cell.payload, ...payload };
-  cell.entries = entries;
-  cell.updatedAt = event.timestamp || cell.updatedAt;
-  cell.revision += activeCell ? 1 : 0;
-  addRecent(state, cell, maxHistory);
-  state.explorationGroupId = cell.id;
-  return cell;
+  return appendExplorationEntries(state, entries, event, payload, maxHistory);
 }
 
 function reduceGeneric(state, event, maxHistory) {

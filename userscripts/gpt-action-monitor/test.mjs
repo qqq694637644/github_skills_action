@@ -687,27 +687,53 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   client.stop();
 }
 
-// A page without a selected Workspace must stay idle instead of opening an
-// unfiltered action-log connection. Selecting a Workspace is the network and
-// information-flow boundary for the monitor.
+// Without a selected Workspace, the client enters discovery mode and asks the
+// server only for completed prepare_workspace events.
 {
   const { timers } = installDomFixture();
-  let requests = 0;
-  globalThis.GM_xmlhttpRequest = () => {
-    requests += 1;
+  const requestedUrls = [];
+  const received = [];
+  globalThis.GM_xmlhttpRequest = ({ url, onload }) => {
+    requestedUrls.push(url);
+    onload({
+      status: 200,
+      responseText: JSON.stringify({
+        last_id: 52,
+        items: [
+          {
+            id: 51,
+            event: {
+              phase: 'completed',
+              payload: { operation: 'prepare_workspace', workspace_id: 'ws_0123456789abcdef' },
+            },
+          },
+          {
+            id: 52,
+            event: {
+              phase: 'completed',
+              payload: { operation: 'read' },
+            },
+          },
+        ],
+      }),
+    });
     return { abort() {} };
   };
   const client = createActionLogClient({
     getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
     getWorkspaceId: () => null,
-    onItems: () => {},
+    onItems: (items) => received.push(...items),
     onHint: () => {},
+    initialCursor: 50,
   });
   client.start();
   const [timerId, runPoll] = timers.entries().next().value;
   timers.delete(timerId);
   runPoll();
-  assert.equal(requests, 0);
-  assert.equal(timers.size, 0);
+  assert.equal(requestedUrls.length, 1);
+  assert.equal(requestedUrls[0].includes('operation=prepare_workspace'), true);
+  assert.equal(requestedUrls[0].includes('phase=completed'), true);
+  assert.equal(requestedUrls[0].includes('workspace_id='), false);
+  assert.deepEqual(received.map((item) => item.id), [51]);
   client.stop();
 }

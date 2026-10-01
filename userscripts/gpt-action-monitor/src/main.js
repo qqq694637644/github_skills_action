@@ -104,7 +104,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   });
   monitorUi = createMonitorPanel({
     activityStore,
-    isActive: () => monitorMounted && Boolean(activeWorkspaceId),
+    isActive: () => monitorMounted,
     skillsMenu,
     workspaceMenu,
     onSelectWorkspace: selectWorkspace,
@@ -118,11 +118,11 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     actionLogClient = null;
   }
 
-  function resetWorkspaceStream() {
+  function resetWorkspaceStream({ preserveCursor = false } = {}) {
     stopActionLog();
     activityStore.clear();
     activitySessionKey = null;
-    activitySessionCursor = null;
+    if (!preserveCursor) activitySessionCursor = null;
     monitorUi.resetSession();
     monitorUi.clearAttention();
     monitorUi.setStatus('idle');
@@ -156,7 +156,8 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       return true;
     }
 
-    resetWorkspaceStream();
+    const fromDiscovery = !activeWorkspaceId;
+    resetWorkspaceStream({ preserveCursor: fromDiscovery });
     activeWorkspaceId = workspaceId;
     persistCurrentPageBinding();
     workspaceMenu.updateTrigger();
@@ -166,10 +167,11 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
 
   function resetWorkspaceSelection() {
     if (!activeWorkspaceId) return true;
-    resetWorkspaceStream();
+    resetWorkspaceStream({ preserveCursor: true });
     activeWorkspaceId = null;
     persistCurrentPageBinding();
     workspaceMenu.updateTrigger();
+    if (monitorMounted && document.visibilityState === 'visible') startActionLog();
     return true;
   }
 
@@ -264,13 +266,12 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
 
   function startActionLog() {
     const profile = getEffectiveEndpoint();
-    if (!monitorMounted || actionLogClient || !profile?.backend || !activeWorkspaceId) return;
+    if (!monitorMounted || actionLogClient || !profile?.backend) return;
 
-    const nextSessionKey = `${profile.id}:${profile.backend}:${activeWorkspaceId}`;
+    const nextSessionKey = `${profile.id}:${profile.backend}:${activeWorkspaceId || 'discovery'}`;
     if (activitySessionKey !== nextSessionKey) {
       activityStore.clear();
       activitySessionKey = nextSessionKey;
-      activitySessionCursor = null;
     }
 
     actionLogClient = createActionLogClient({

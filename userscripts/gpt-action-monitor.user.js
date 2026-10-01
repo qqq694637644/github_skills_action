@@ -906,16 +906,18 @@ ${result}`;
       if (stopped || requestHandle || document.visibilityState !== "visible") return;
       const profile = getProfile();
       const workspaceId = getWorkspaceId?.();
-      if (!profile || !workspaceId) return;
+      if (!profile) return;
+      const discovery = !workspaceId;
       const headers = {};
       if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
       const generation = ++requestGeneration;
       const priming = needsCursorPrime;
       const wait = priming ? 0 : POLL_WAIT_SECONDS;
       const after = priming ? Number.MAX_SAFE_INTEGER : lastId;
+      const filter = discovery ? "operation=prepare_workspace&phase=completed" : `workspace_id=${encodeURIComponent(workspaceId)}`;
       requestHandle = GM_xmlhttpRequest({
         method: "GET",
-        url: `${profile.backend}/v1/action-logs?workspace_id=${encodeURIComponent(workspaceId)}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
+        url: `${profile.backend}/v1/action-logs?${filter}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
         headers,
         timeout: (wait + 5) * 1e3,
         onload(response) {
@@ -944,7 +946,12 @@ ${result}`;
               schedulePoll(0);
               return;
             }
-            const items = Array.isArray(body.items) ? body.items.filter((item) => item?.event?.workspace_id === workspaceId) : [];
+            const items = Array.isArray(body.items) ? body.items.filter((item) => {
+              if (discovery) {
+                return item?.event?.phase === "completed" && item?.event?.payload?.operation === "prepare_workspace";
+              }
+              return item?.event?.workspace_id === workspaceId;
+            }) : [];
             onItems(items);
             schedulePoll();
           } catch (error) {
@@ -2989,7 +2996,7 @@ ${result}`;
   // src/ui/workspace-menu.js
   function shortWorkspaceId(workspaceId) {
     if (!workspaceId) return "Workspace \u25BE";
-    return `${workspaceId.slice(0, 11)}\u2026 \u25BE`;
+    return `\u2026${workspaceId.slice(-10)} \u25BE`;
   }
   function createWorkspaceMenu({
     loadWorkspaces,
@@ -3212,7 +3219,7 @@ ${result}`;
     });
     monitorUi = createMonitorPanel({
       activityStore,
-      isActive: () => monitorMounted && Boolean(activeWorkspaceId),
+      isActive: () => monitorMounted,
       skillsMenu,
       workspaceMenu,
       onSelectWorkspace: selectWorkspace
@@ -3224,11 +3231,11 @@ ${result}`;
       actionLogClient.stop();
       actionLogClient = null;
     }
-    function resetWorkspaceStream() {
+    function resetWorkspaceStream({ preserveCursor = false } = {}) {
       stopActionLog();
       activityStore.clear();
       activitySessionKey = null;
-      activitySessionCursor = null;
+      if (!preserveCursor) activitySessionCursor = null;
       monitorUi.resetSession();
       monitorUi.clearAttention();
       monitorUi.setStatus("idle");
@@ -3256,7 +3263,8 @@ ${result}`;
         workspaceMenu.updateTrigger();
         return true;
       }
-      resetWorkspaceStream();
+      const fromDiscovery = !activeWorkspaceId;
+      resetWorkspaceStream({ preserveCursor: fromDiscovery });
       activeWorkspaceId = workspaceId;
       persistCurrentPageBinding();
       workspaceMenu.updateTrigger();
@@ -3265,10 +3273,11 @@ ${result}`;
     }
     function resetWorkspaceSelection() {
       if (!activeWorkspaceId) return true;
-      resetWorkspaceStream();
+      resetWorkspaceStream({ preserveCursor: true });
       activeWorkspaceId = null;
       persistCurrentPageBinding();
       workspaceMenu.updateTrigger();
+      if (monitorMounted && document.visibilityState === "visible") startActionLog();
       return true;
     }
     function deactivateMonitor() {
@@ -3345,12 +3354,11 @@ ${result}`;
     }
     function startActionLog() {
       const profile = getEffectiveEndpoint();
-      if (!monitorMounted || actionLogClient || !profile?.backend || !activeWorkspaceId) return;
-      const nextSessionKey = `${profile.id}:${profile.backend}:${activeWorkspaceId}`;
+      if (!monitorMounted || actionLogClient || !profile?.backend) return;
+      const nextSessionKey = `${profile.id}:${profile.backend}:${activeWorkspaceId || "discovery"}`;
       if (activitySessionKey !== nextSessionKey) {
         activityStore.clear();
         activitySessionKey = nextSessionKey;
-        activitySessionCursor = null;
       }
       actionLogClient = createActionLogClient({
         getProfile: getEffectiveEndpoint,

@@ -1,6 +1,6 @@
 function shortWorkspaceId(workspaceId) {
   if (!workspaceId) return 'Workspace ▾';
-  return `${workspaceId.slice(0, 11)}… ▾`;
+  return `…${workspaceId.slice(-10)} ▾`;
 }
 
 export function createWorkspaceMenu({

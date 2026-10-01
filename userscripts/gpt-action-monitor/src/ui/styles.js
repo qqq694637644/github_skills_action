@@ -191,7 +191,10 @@ export const MONITOR_CSS = `
       display: flex;
       align-items: center;
       gap: 3px;
+      min-width: 0;
     }
+    #gpt-action-monitor .gam-workspace-button,
+    #gpt-action-monitor .gam-workspace-refresh,
     #gpt-action-monitor .gam-skills-button,
     #gpt-action-monitor .gam-skills-refresh {
       border: 0;
@@ -200,14 +203,29 @@ export const MONITOR_CSS = `
       color: inherit;
       cursor: pointer;
     }
+    #gpt-action-monitor .gam-workspace-button,
     #gpt-action-monitor .gam-skills-button {
       height: 28px;
       padding: 0 7px;
       font-size: 11px;
       font-weight: 600;
     }
+    #gpt-action-monitor .gam-workspace-button {
+      min-width: 0;
+      max-width: 132px;
+      flex: 0 1 132px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 560;
+    }
+    #gpt-action-monitor .gam-workspace-button:hover,
+    #gpt-action-monitor .gam-workspace-button:focus-visible,
     #gpt-action-monitor .gam-skills-button:hover,
     #gpt-action-monitor .gam-skills-button:focus-visible,
+    #gpt-action-monitor .gam-workspace-refresh:hover,
+    #gpt-action-monitor .gam-workspace-refresh:focus-visible,
     #gpt-action-monitor .gam-skills-refresh:hover,
     #gpt-action-monitor .gam-skills-refresh:focus-visible {
       background: color-mix(in srgb, CanvasText 7%, transparent);
@@ -321,10 +339,10 @@ export const MONITOR_CSS = `
       opacity: .48;
     }
     #gpt-action-monitor .gam-activity-detail-line:first-child::before { content: "└ "; }
+    #gpt-action-monitor .gam-workspace-picker,
     #gpt-action-monitor .gam-skills-picker {
       position: absolute;
       top: 34px;
-      right: 8px;
       width: 220px;
       z-index: 3;
       max-height: 240px;
@@ -334,7 +352,14 @@ export const MONITOR_CSS = `
       border-radius: 10px;
       box-shadow: 0 8px 24px color-mix(in srgb, CanvasText 12%, transparent);
     }
+    #gpt-action-monitor .gam-workspace-picker {
+      right: 8px;
+      width: min(245px, calc(100% - 16px));
+    }
+    #gpt-action-monitor .gam-skills-picker { right: 8px; }
+    #gpt-action-monitor .gam-workspace-picker[hidden],
     #gpt-action-monitor .gam-skills-picker[hidden] { display: none; }
+    #gpt-action-monitor .gam-workspace-picker-header,
     #gpt-action-monitor .gam-skills-picker-header {
       height: 34px;
       flex: 0 0 34px;
@@ -345,6 +370,7 @@ export const MONITOR_CSS = `
       border-bottom: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
       font-size: 11px;
     }
+    #gpt-action-monitor .gam-workspace-refresh,
     #gpt-action-monitor .gam-skills-refresh {
       width: 26px;
       height: 26px;
@@ -353,12 +379,14 @@ export const MONITOR_CSS = `
       line-height: 1;
       opacity: .55;
     }
+    #gpt-action-monitor .gam-workspace-list,
     #gpt-action-monitor .gam-skills-list {
       min-height: 0;
       overflow-y: auto;
       padding: 5px;
       scrollbar-width: thin;
     }
+    #gpt-action-monitor .gam-workspace-item,
     #gpt-action-monitor .gam-skill-item {
       width: 100%;
       min-height: 32px;
@@ -372,6 +400,31 @@ export const MONITOR_CSS = `
       cursor: pointer;
       text-align: left;
     }
+    #gpt-action-monitor .gam-workspace-item {
+      position: relative;
+      padding-left: 25px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #gpt-action-monitor .gam-workspace-item::before {
+      content: "";
+      position: absolute;
+      left: 10px;
+      top: 50%;
+      width: 6px;
+      height: 6px;
+      border: 1px solid color-mix(in srgb, CanvasText 35%, transparent);
+      border-radius: 50%;
+      transform: translateY(-50%);
+    }
+    #gpt-action-monitor .gam-workspace-item[data-selected="true"]::before {
+      border-color: currentColor;
+      background: currentColor;
+    }
+    #gpt-action-monitor .gam-workspace-item:hover,
+    #gpt-action-monitor .gam-workspace-item:focus-visible,
     #gpt-action-monitor .gam-skill-item:hover,
     #gpt-action-monitor .gam-skill-item:focus-visible {
       background: color-mix(in srgb, CanvasText 7%, transparent);
@@ -384,6 +437,7 @@ export const MONITOR_CSS = `
       white-space: nowrap;
       font-weight: 600;
     }
+    #gpt-action-monitor .gam-workspace-state,
     #gpt-action-monitor .gam-skills-state {
       padding: 12px 10px;
       color: color-mix(in srgb, CanvasText 58%, transparent);

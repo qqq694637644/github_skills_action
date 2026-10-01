@@ -420,6 +420,15 @@ def register_workspace_actions(app: FastAPI) -> None:
 
     app.router.add_event_handler("shutdown", service.shutdown)
 
+    @app.get("/v1/action-workspaces", include_in_schema=False)
+    def action_workspaces() -> dict[str, list[dict[str, str]]]:
+        return {
+            "workspaces": [
+                {"workspace_id": workspace_id}
+                for workspace_id in service.list_workspace_ids()
+            ]
+        }
+
     @app.post(
         "/v1/workspace/prepare",
         operation_id="prepareWorkspace",
@@ -644,6 +653,7 @@ def register_workspace_actions(app: FastAPI) -> None:
             phase="started",
             payload={
                 "operation": "inspect",
+                "workspace_id": request.workspace_id,
                 "paths": request.paths,
                 "queries": request.queries,
             },
@@ -724,6 +734,7 @@ def register_workspace_actions(app: FastAPI) -> None:
             phase="started",
             payload={
                 "operation": "search",
+                "workspace_id": request.workspace_id,
                 "query": request.query,
                 "paths": request.paths,
             },
@@ -800,7 +811,11 @@ def register_workspace_actions(app: FastAPI) -> None:
             activity_id=activity_id,
             kind="exploration",
             phase="started",
-            payload={"operation": "read", "paths": request.paths},
+            payload={
+                "operation": "read",
+                "workspace_id": request.workspace_id,
+                "paths": request.paths,
+            },
             legacy_action="workspaceReadFiles",
             legacy_fields={"phase": "started", "paths": request.paths},
         )
@@ -867,7 +882,12 @@ def register_workspace_actions(app: FastAPI) -> None:
             activity_id=activity_id,
             kind="write",
             phase="started",
-            payload={"path": request.path, "mode": request.mode, "dry_run": request.dry_run},
+            payload={
+                "workspace_id": request.workspace_id,
+                "path": request.path,
+                "mode": request.mode,
+                "dry_run": request.dry_run,
+            },
             legacy_action="workspaceWriteFile",
             legacy_fields={"phase": "started", "path": request.path, "mode": request.mode},
         )
@@ -947,6 +967,7 @@ def register_workspace_actions(app: FastAPI) -> None:
             kind="patch",
             phase="started",
             payload={
+                "workspace_id": request.workspace_id,
                 "dry_run": request.dry_run,
                 "allow_delete": request.allow_delete,
                 "patch_bytes": len(request.patch.encode("utf-8")),

@@ -2,6 +2,7 @@ import { POLL_WAIT_SECONDS, RETRY_MS } from '../constants.js';
 
 export function createActionLogClient({
   getProfile,
+  getWorkspaceId,
   onItems,
   onHint,
   onStatus,
@@ -69,7 +70,8 @@ export function createActionLogClient({
   function poll() {
     if (stopped || requestHandle || document.visibilityState !== 'visible') return;
     const profile = getProfile();
-    if (!profile) return;
+    const workspaceId = getWorkspaceId?.();
+    if (!profile || !workspaceId) return;
 
     const headers = {};
     if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
@@ -80,7 +82,7 @@ export function createActionLogClient({
 
     requestHandle = GM_xmlhttpRequest({
       method: 'GET',
-      url: `${profile.backend}/v1/action-logs?after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
+      url: `${profile.backend}/v1/action-logs?workspace_id=${encodeURIComponent(workspaceId)}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
       headers,
       timeout: (wait + 5) * 1000,
       onload(response) {
@@ -109,7 +111,10 @@ export function createActionLogClient({
             schedulePoll(0);
             return;
           }
-          onItems(body.items || []);
+          const items = Array.isArray(body.items)
+            ? body.items.filter((item) => item?.event?.workspace_id === workspaceId)
+            : [];
+          onItems(items);
           schedulePoll();
         } catch (error) {
           scheduleRetry(`响应解析失败：${String(error)}`);

@@ -21,7 +21,7 @@ function testProfileConnection(profile, statusElement, button) {
 
   GM_xmlhttpRequest({
     method: 'GET',
-    url: `${validation.backend}/v1/action-logs?after=${Number.MAX_SAFE_INTEGER}&wait=0&limit=1`,
+    url: `${validation.backend}/v1/action-workspaces`,
     headers,
     timeout: 7000,
     onload(response) {

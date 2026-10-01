@@ -2,7 +2,12 @@ import { ACTIVITY_VISIBLE_MS, COMPACT_WIDTH, POSITION_KEY, UI_COALESCE_MS } from
 import { MONITOR_CSS } from './styles.js';
 import { createActivityPanel } from './activity-panel.js';
 
-export function createMonitorPanel({ activityStore, isActive, skillsMenu = null }) {
+export function createMonitorPanel({
+  activityStore,
+  isActive,
+  skillsMenu = null,
+  workspaceMenu = null,
+}) {
   const panel = document.createElement('div');
   panel.id = 'gpt-action-monitor';
   panel.dataset.status = 'idle';
@@ -20,6 +25,7 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
       <div class="gam-header">
         <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
         <div class="gam-header-controls">
+          <button class="gam-workspace-button" type="button" aria-haspopup="menu" aria-label="选择 Workspace">Workspace ▾</button>
           <button class="gam-skills-button" type="button" aria-haspopup="menu" aria-label="打开 Skills">Skills ›</button>
           <button class="gam-close" type="button" title="收起" aria-label="收起 GPT Activity">−</button>
         </div>
@@ -34,6 +40,7 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
 
   const handle = panel.querySelector('.gam-handle');
   const close = panel.querySelector('.gam-close');
+  const workspaceButton = panel.querySelector('.gam-workspace-button');
   const skillsButton = panel.querySelector('.gam-skills-button');
   const header = panel.querySelector('.gam-header');
   const expanded = panel.querySelector('.gam-expanded');
@@ -42,7 +49,9 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
   const currentAction = panel.querySelector('.gam-current-action');
   const currentDetail = panel.querySelector('.gam-current-detail');
   const activityPanel = createActivityPanel({ root: activityRoot });
+  if (workspaceMenu?.element) panel.querySelector('.gam-expanded').appendChild(workspaceMenu.element);
   if (skillsMenu?.element) panel.querySelector('.gam-expanded').appendChild(skillsMenu.element);
+  workspaceMenu?.bindTrigger?.(workspaceButton);
   skillsMenu?.bindTrigger?.(skillsButton);
 
   let manualOpen = false;
@@ -116,7 +125,9 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
     dragHandle.addEventListener('pointerdown', (event) => {
       if (
         event.button !== 0
-        || event.target.closest('.gam-close, .gam-skills-button, .gam-skills-menu')
+        || event.target.closest(
+          '.gam-close, .gam-workspace-button, .gam-workspace-picker, .gam-skills-button, .gam-skills-picker',
+        )
       ) return;
       const startRect = panel.getBoundingClientRect();
       const startX = event.clientX;
@@ -255,6 +266,7 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
     const openRect = panel.getBoundingClientRect();
     const rightEdge = openRect.right;
     manualOpen = false;
+    workspaceMenu?.close();
     skillsMenu?.close();
     panel.classList.remove('gam-open');
     if (panel.classList.contains('gam-detached')) {
@@ -363,6 +375,7 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
     if (panel.dataset.status === 'active') setStatus('idle');
     panel.classList.remove('gam-open', 'gam-chip-visible', 'gam-dragging');
     manualOpen = false;
+    workspaceMenu?.close();
     skillsMenu?.close();
     activityPanel.clear();
     panel.remove();
@@ -373,10 +386,20 @@ export function createMonitorPanel({ activityStore, isActive, skillsMenu = null 
   makeDraggable(header);
   makeResizableFromBottomLeft(resizeHandle);
   handle.addEventListener('click', openHistory);
+  workspaceButton.addEventListener('pointerdown', (event) => {
+    if (event.button === 0) event.preventDefault();
+  });
+  workspaceButton.addEventListener('click', () => {
+    skillsMenu?.close();
+    workspaceMenu?.toggle();
+  });
   skillsButton.addEventListener('pointerdown', (event) => {
     if (event.button === 0) event.preventDefault();
   });
-  skillsButton.addEventListener('click', () => skillsMenu?.toggle());
+  skillsButton.addEventListener('click', () => {
+    workspaceMenu?.close();
+    skillsMenu?.toggle();
+  });
   close.addEventListener('click', closeHistory);
   expanded.addEventListener('pointerup', () => {
     if (!manualOpen) return;

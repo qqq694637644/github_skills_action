@@ -6,11 +6,11 @@ The installable Tampermonkey script is published as the `gpt-action-monitor.user
 
 - `src/main.js` — lifecycle/bootstrap only.
 - `src/activity/` — structured activity state reduction and Codex-style presentation.
-- `src/api/` — action-log transport and polling.
+- `src/api/` — workspace discovery, action-log transport, and polling.
 - `src/api/skill-catalog-client.js` — on-demand Skill catalog reads with persistent backend caching and explicit refresh.
 - `src/adapters/` — ChatGPT composer insertion.
 - `src/formatter/` — legacy text-event parsing used only as a compatibility fallback.
-- `src/profile/` — single-backend persistence and validation.
+- `src/profile/` — multi-endpoint persistence and validation.
 - `src/ui/` — Activity Inspector, monitor shell, Skills/settings UI, and styles.
 - `metadata.txt` — Tampermonkey metadata header.
 - `build.mjs` — bundles the modular source into the installable single-file userscript.
@@ -34,3 +34,5 @@ The expanded monitor also includes a `Skills` menu. The configured backend catal
 The backend field is the REST API base URL and is used as-is. For example, with `https://githubaction.giize.com/mcp-app`, the monitor requests `https://githubaction.giize.com/mcp-app/v1/action-logs`. MCP transport paths are configured separately by the MCP client/server deployment.
 
 Monitor settings can keep multiple named backend endpoints while polling only one at a time. Choosing an endpoint with **全局** makes it the persistent default in userscript storage. Choosing **局部** switches only the current loaded page in memory; it is not written to browser/session storage, so a page refresh immediately restores the global default.
+
+The Activity Inspector also requires one page-local Workspace selection. The Workspace picker is lazy-loaded from `/v1/action-workspaces`; no activity long-poll starts until a Workspace is selected. Once selected, `/v1/action-logs` includes that `workspace_id`, the backend filters before returning events, and the client defensively accepts only matching structured events. Switching Workspace aborts the old long-poll and clears the current activity stream. The selection is intentionally memory-only, so a page refresh returns to an unselected Workspace state.

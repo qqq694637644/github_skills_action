@@ -26,6 +26,7 @@ class ActivityEvent(TypedDict):
     kind: ActivityKind
     phase: ActivityPhase
     timestamp: str
+    workspace_id: str | None
     payload: dict[str, Any]
 
 
@@ -132,6 +133,26 @@ def _append_action_event(line: str, event: ActivityEvent | None) -> None:
         _ACTION_EVENTS_CONDITION.notify_all()
 
 
+def _workspace_id_from_activity(
+    activity: Mapping[str, Any] | None,
+    fields: Mapping[str, Any] | None = None,
+) -> str | None:
+    if activity is not None:
+        direct = activity.get("workspace_id")
+        if isinstance(direct, str) and direct:
+            return direct
+        payload = activity.get("payload")
+        if isinstance(payload, Mapping):
+            nested = payload.get("workspace_id")
+            if isinstance(nested, str) and nested:
+                return nested
+    if fields is not None:
+        fallback = fields.get("workspace_id")
+        if isinstance(fallback, str) and fallback:
+            return fallback
+    return None
+
+
 def log_action(
     action: str,
     /,
@@ -154,6 +175,7 @@ def log_action(
             "kind": activity["kind"],
             "phase": activity.get("phase", "completed"),
             "timestamp": activity.get("timestamp") or datetime.now(UTC).isoformat(),
+            "workspace_id": _workspace_id_from_activity(activity, fields),
             "payload": activity.get("payload") or {},
         }
     _append_action_event(line, event)
@@ -180,28 +202,52 @@ def log_activity(
             "kind": kind,
             "phase": phase,
             "timestamp": datetime.now(UTC).isoformat(),
+            "workspace_id": _workspace_id_from_activity({"payload": payload}, legacy_fields),
             "payload": payload,
         },
     )
 
 
 def wait_for_action_events(
-    *, after: int = 0, timeout: float = 25.0, limit: int = 50
+    *,
+    after: int = 0,
+    timeout: float = 25.0,
+    limit: int = 50,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
-    """Return action events newer than ``after``, waiting briefly when none exist."""
+    """Return newer events, optionally filtered to one workspace, with a global cursor."""
 
-    def collect() -> list[dict[str, Any]]:
-        return [event.copy() for event in _ACTION_EVENTS if event["id"] > after][:limit]
+    def matches_workspace(item: ActionEventItem) -> bool:
+        if workspace_id is None:
+            return True
+        event = item.get("event")
+        return event is not None and event.get("workspace_id") == workspace_id
+
+    def collect(start_after: int) -> tuple[list[dict[str, Any]], int]:
+        items: list[dict[str, Any]] = []
+        scanned_id = min(start_after, _ACTION_EVENT_ID)
+        for item in _ACTION_EVENTS:
+            if item["id"] <= start_after:
+                continue
+            scanned_id = item["id"]
+            if matches_workspace(item):
+                items.append(item.copy())
+                if len(items) >= limit:
+                    break
+        return items, scanned_id
 
     with _ACTION_EVENTS_CONDITION:
-        items = collect()
+        items, last_id = collect(after)
         if not items and timeout > 0:
+            wait_after = last_id
             _ACTION_EVENTS_CONDITION.wait_for(
-                lambda: any(event["id"] > after for event in _ACTION_EVENTS),
+                lambda: any(
+                    item["id"] > wait_after and matches_workspace(item)
+                    for item in _ACTION_EVENTS
+                ),
                 timeout=timeout,
             )
-            items = collect()
-        last_id = items[-1]["id"] if items else _ACTION_EVENT_ID
+            items, last_id = collect(wait_after)
 
     return {"items": items, "last_id": last_id}
 

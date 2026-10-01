@@ -716,6 +716,7 @@
   // src/api/action-log-client.js
   function createActionLogClient({
     getProfile,
+    getWorkspaceId,
     onItems,
     onHint,
     onStatus,
@@ -777,7 +778,8 @@
     function poll() {
       if (stopped || requestHandle || document.visibilityState !== "visible") return;
       const profile = getProfile();
-      if (!profile) return;
+      const workspaceId = getWorkspaceId?.();
+      if (!profile || !workspaceId) return;
       const headers = {};
       if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
       const generation = ++requestGeneration;
@@ -786,7 +788,7 @@
       const after = priming ? Number.MAX_SAFE_INTEGER : lastId;
       requestHandle = GM_xmlhttpRequest({
         method: "GET",
-        url: `${profile.backend}/v1/action-logs?after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
+        url: `${profile.backend}/v1/action-logs?workspace_id=${encodeURIComponent(workspaceId)}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
         headers,
         timeout: (wait + 5) * 1e3,
         onload(response) {
@@ -815,7 +817,8 @@
               schedulePoll(0);
               return;
             }
-            onItems(body.items || []);
+            const items = Array.isArray(body.items) ? body.items.filter((item) => item?.event?.workspace_id === workspaceId) : [];
+            onItems(items);
             schedulePoll();
           } catch (error) {
             scheduleRetry(`\u54CD\u5E94\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`);
@@ -918,6 +921,78 @@
       return request;
     }
     return { list };
+  }
+
+  // src/api/workspace-client.js
+  function createWorkspaceClient({ getProfile }) {
+    let cachedKey = "";
+    let cached = null;
+    let pending = null;
+    let generation = 0;
+    function profileKey(profile) {
+      return `${profile?.id || ""}\0${profile?.backend || ""}`;
+    }
+    function requestWorkspaces(profile) {
+      const headers = {};
+      if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: "GET",
+          url: `${profile.backend}/v1/action-workspaces`,
+          headers,
+          timeout: 7e3,
+          onload(response) {
+            if (response.status === 401) {
+              reject(new Error("\u8BA4\u8BC1\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5 Bearer Token\u3002"));
+              return;
+            }
+            if (response.status < 200 || response.status >= 300) {
+              reject(new Error(`\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\u3002`));
+              return;
+            }
+            try {
+              const body = JSON.parse(response.responseText);
+              const workspaces = Array.isArray(body.workspaces) ? body.workspaces : [];
+              resolve(workspaces.map((item) => String(item?.workspace_id || "").trim()).filter((workspaceId) => /^ws_[0-9a-f]{16}$/.test(workspaceId)));
+            } catch (error) {
+              reject(new Error(`Workspace \u5217\u8868\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`));
+            }
+          },
+          onerror() {
+            reject(new Error("\u65E0\u6CD5\u8FDE\u63A5\u540E\u7AEF\u3002"));
+          },
+          ontimeout() {
+            reject(new Error("\u8BFB\u53D6 Workspace \u5217\u8868\u8D85\u65F6\u3002"));
+          }
+        });
+      });
+    }
+    async function list({ refresh = false } = {}) {
+      const profile = getProfile();
+      if (!profile) throw new Error("\u6CA1\u6709\u6D3B\u52A8\u7684\u540E\u7AEF\u914D\u7F6E\u3002");
+      const key = profileKey(profile);
+      if (!refresh && cachedKey === key && cached) return cached;
+      if (!refresh && pending?.key === key) return pending.promise;
+      const requestGeneration = generation;
+      const request = requestWorkspaces(profile).then((workspaces) => {
+        if (generation === requestGeneration) {
+          cachedKey = key;
+          cached = workspaces;
+        }
+        return workspaces;
+      }).finally(() => {
+        if (pending?.promise === request) pending = null;
+      });
+      pending = { key, promise: request };
+      return request;
+    }
+    function clear() {
+      generation += 1;
+      cachedKey = "";
+      cached = null;
+      pending = null;
+    }
+    return { list, clear };
   }
 
   // src/adapters/composer.js
@@ -1269,7 +1344,10 @@
       display: flex;
       align-items: center;
       gap: 3px;
+      min-width: 0;
     }
+    #gpt-action-monitor .gam-workspace-button,
+    #gpt-action-monitor .gam-workspace-refresh,
     #gpt-action-monitor .gam-skills-button,
     #gpt-action-monitor .gam-skills-refresh {
       border: 0;
@@ -1278,14 +1356,29 @@
       color: inherit;
       cursor: pointer;
     }
+    #gpt-action-monitor .gam-workspace-button,
     #gpt-action-monitor .gam-skills-button {
       height: 28px;
       padding: 0 7px;
       font-size: 11px;
       font-weight: 600;
     }
+    #gpt-action-monitor .gam-workspace-button {
+      min-width: 0;
+      max-width: 132px;
+      flex: 0 1 132px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 560;
+    }
+    #gpt-action-monitor .gam-workspace-button:hover,
+    #gpt-action-monitor .gam-workspace-button:focus-visible,
     #gpt-action-monitor .gam-skills-button:hover,
     #gpt-action-monitor .gam-skills-button:focus-visible,
+    #gpt-action-monitor .gam-workspace-refresh:hover,
+    #gpt-action-monitor .gam-workspace-refresh:focus-visible,
     #gpt-action-monitor .gam-skills-refresh:hover,
     #gpt-action-monitor .gam-skills-refresh:focus-visible {
       background: color-mix(in srgb, CanvasText 7%, transparent);
@@ -1399,10 +1492,10 @@
       opacity: .48;
     }
     #gpt-action-monitor .gam-activity-detail-line:first-child::before { content: "\u2514 "; }
+    #gpt-action-monitor .gam-workspace-picker,
     #gpt-action-monitor .gam-skills-picker {
       position: absolute;
       top: 34px;
-      right: 8px;
       width: 220px;
       z-index: 3;
       max-height: 240px;
@@ -1412,7 +1505,14 @@
       border-radius: 10px;
       box-shadow: 0 8px 24px color-mix(in srgb, CanvasText 12%, transparent);
     }
+    #gpt-action-monitor .gam-workspace-picker {
+      right: 8px;
+      width: min(245px, calc(100% - 16px));
+    }
+    #gpt-action-monitor .gam-skills-picker { right: 8px; }
+    #gpt-action-monitor .gam-workspace-picker[hidden],
     #gpt-action-monitor .gam-skills-picker[hidden] { display: none; }
+    #gpt-action-monitor .gam-workspace-picker-header,
     #gpt-action-monitor .gam-skills-picker-header {
       height: 34px;
       flex: 0 0 34px;
@@ -1423,6 +1523,7 @@
       border-bottom: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
       font-size: 11px;
     }
+    #gpt-action-monitor .gam-workspace-refresh,
     #gpt-action-monitor .gam-skills-refresh {
       width: 26px;
       height: 26px;
@@ -1431,12 +1532,14 @@
       line-height: 1;
       opacity: .55;
     }
+    #gpt-action-monitor .gam-workspace-list,
     #gpt-action-monitor .gam-skills-list {
       min-height: 0;
       overflow-y: auto;
       padding: 5px;
       scrollbar-width: thin;
     }
+    #gpt-action-monitor .gam-workspace-item,
     #gpt-action-monitor .gam-skill-item {
       width: 100%;
       min-height: 32px;
@@ -1450,6 +1553,31 @@
       cursor: pointer;
       text-align: left;
     }
+    #gpt-action-monitor .gam-workspace-item {
+      position: relative;
+      padding-left: 25px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #gpt-action-monitor .gam-workspace-item::before {
+      content: "";
+      position: absolute;
+      left: 10px;
+      top: 50%;
+      width: 6px;
+      height: 6px;
+      border: 1px solid color-mix(in srgb, CanvasText 35%, transparent);
+      border-radius: 50%;
+      transform: translateY(-50%);
+    }
+    #gpt-action-monitor .gam-workspace-item[data-selected="true"]::before {
+      border-color: currentColor;
+      background: currentColor;
+    }
+    #gpt-action-monitor .gam-workspace-item:hover,
+    #gpt-action-monitor .gam-workspace-item:focus-visible,
     #gpt-action-monitor .gam-skill-item:hover,
     #gpt-action-monitor .gam-skill-item:focus-visible {
       background: color-mix(in srgb, CanvasText 7%, transparent);
@@ -1462,6 +1590,7 @@
       white-space: nowrap;
       font-weight: 600;
     }
+    #gpt-action-monitor .gam-workspace-state,
     #gpt-action-monitor .gam-skills-state {
       padding: 12px 10px;
       color: color-mix(in srgb, CanvasText 58%, transparent);
@@ -1713,7 +1842,12 @@
   }
 
   // src/ui/monitor-panel.js
-  function createMonitorPanel({ activityStore, isActive, skillsMenu = null }) {
+  function createMonitorPanel({
+    activityStore,
+    isActive,
+    skillsMenu = null,
+    workspaceMenu = null
+  }) {
     const panel = document.createElement("div");
     panel.id = "gpt-action-monitor";
     panel.dataset.status = "idle";
@@ -1731,6 +1865,7 @@
       <div class="gam-header">
         <span><span class="gam-dot gam-header-dot"></span>GPT Actions</span>
         <div class="gam-header-controls">
+          <button class="gam-workspace-button" type="button" aria-haspopup="menu" aria-label="\u9009\u62E9 Workspace">Workspace \u25BE</button>
           <button class="gam-skills-button" type="button" aria-haspopup="menu" aria-label="\u6253\u5F00 Skills">Skills \u203A</button>
           <button class="gam-close" type="button" title="\u6536\u8D77" aria-label="\u6536\u8D77 GPT Activity">\u2212</button>
         </div>
@@ -1743,6 +1878,7 @@
     style.textContent = MONITOR_CSS;
     const handle = panel.querySelector(".gam-handle");
     const close = panel.querySelector(".gam-close");
+    const workspaceButton = panel.querySelector(".gam-workspace-button");
     const skillsButton = panel.querySelector(".gam-skills-button");
     const header = panel.querySelector(".gam-header");
     const expanded = panel.querySelector(".gam-expanded");
@@ -1751,7 +1887,9 @@
     const currentAction = panel.querySelector(".gam-current-action");
     const currentDetail = panel.querySelector(".gam-current-detail");
     const activityPanel = createActivityPanel({ root: activityRoot });
+    if (workspaceMenu?.element) panel.querySelector(".gam-expanded").appendChild(workspaceMenu.element);
     if (skillsMenu?.element) panel.querySelector(".gam-expanded").appendChild(skillsMenu.element);
+    workspaceMenu?.bindTrigger?.(workspaceButton);
     skillsMenu?.bindTrigger?.(skillsButton);
     let manualOpen = false;
     let suppressHandleClick = false;
@@ -1814,7 +1952,9 @@
     }
     function makeDraggable(dragHandle, { suppressClick = false } = {}) {
       dragHandle.addEventListener("pointerdown", (event) => {
-        if (event.button !== 0 || event.target.closest(".gam-close, .gam-skills-button, .gam-skills-menu")) return;
+        if (event.button !== 0 || event.target.closest(
+          ".gam-close, .gam-workspace-button, .gam-workspace-picker, .gam-skills-button, .gam-skills-picker"
+        )) return;
         const startRect = panel.getBoundingClientRect();
         const startX = event.clientX;
         const startY = event.clientY;
@@ -1938,6 +2078,7 @@
       const openRect = panel.getBoundingClientRect();
       const rightEdge = openRect.right;
       manualOpen = false;
+      workspaceMenu?.close();
       skillsMenu?.close();
       panel.classList.remove("gam-open");
       if (panel.classList.contains("gam-detached")) {
@@ -2034,6 +2175,7 @@
       if (panel.dataset.status === "active") setStatus("idle");
       panel.classList.remove("gam-open", "gam-chip-visible", "gam-dragging");
       manualOpen = false;
+      workspaceMenu?.close();
       skillsMenu?.close();
       activityPanel.clear();
       panel.remove();
@@ -2043,10 +2185,20 @@
     makeDraggable(header);
     makeResizableFromBottomLeft(resizeHandle);
     handle.addEventListener("click", openHistory);
+    workspaceButton.addEventListener("pointerdown", (event) => {
+      if (event.button === 0) event.preventDefault();
+    });
+    workspaceButton.addEventListener("click", () => {
+      skillsMenu?.close();
+      workspaceMenu?.toggle();
+    });
     skillsButton.addEventListener("pointerdown", (event) => {
       if (event.button === 0) event.preventDefault();
     });
-    skillsButton.addEventListener("click", () => skillsMenu?.toggle());
+    skillsButton.addEventListener("click", () => {
+      workspaceMenu?.close();
+      skillsMenu?.toggle();
+    });
     close.addEventListener("click", closeHistory);
     expanded.addEventListener("pointerup", () => {
       if (!manualOpen) return;
@@ -2085,7 +2237,7 @@
     if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
     GM_xmlhttpRequest({
       method: "GET",
-      url: `${validation.backend}/v1/action-logs?after=${Number.MAX_SAFE_INTEGER}&wait=0&limit=1`,
+      url: `${validation.backend}/v1/action-workspaces`,
       headers,
       timeout: 7e3,
       onload(response) {
@@ -2433,12 +2585,144 @@
     return { element: root, open: openMenu, close, toggle, bindTrigger };
   }
 
+  // src/ui/workspace-menu.js
+  function shortWorkspaceId(workspaceId) {
+    if (!workspaceId) return "Workspace \u25BE";
+    return `${workspaceId.slice(0, 11)}\u2026 \u25BE`;
+  }
+  function createWorkspaceMenu({ loadWorkspaces, getSelectedId, onSelect }) {
+    const root = document.createElement("div");
+    root.className = "gam-workspace-picker";
+    root.hidden = true;
+    root.innerHTML = `
+    <div class="gam-workspace-picker-header">
+      <strong>Workspace</strong>
+      <button class="gam-workspace-refresh" type="button" title="\u5237\u65B0 Workspace \u5217\u8868" aria-label="\u5237\u65B0 Workspace \u5217\u8868">\u21BB</button>
+    </div>
+    <div class="gam-workspace-state" hidden></div>
+    <div class="gam-workspace-list" role="menu" aria-label="Workspaces"></div>
+  `;
+    const refreshButton = root.querySelector(".gam-workspace-refresh");
+    const state = root.querySelector(".gam-workspace-state");
+    const list = root.querySelector(".gam-workspace-list");
+    let open = false;
+    let hasRendered = false;
+    let requestGeneration = 0;
+    let triggerElement = null;
+    function preserveFocus(event) {
+      if (event.button === 0) event.preventDefault();
+    }
+    function setState(message) {
+      state.textContent = message;
+      state.hidden = false;
+    }
+    function clearState() {
+      state.hidden = true;
+      state.textContent = "";
+    }
+    function render(workspaces) {
+      list.replaceChildren();
+      clearState();
+      if (!workspaces.length) {
+        setState("\u6CA1\u6709\u53EF\u7528 Workspace\u3002");
+        hasRendered = true;
+        return;
+      }
+      const selectedId = getSelectedId?.() || "";
+      for (const workspaceId of workspaces) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "gam-workspace-item";
+        item.dataset.selected = workspaceId === selectedId ? "true" : "false";
+        item.setAttribute("role", "menuitemradio");
+        item.setAttribute("aria-checked", workspaceId === selectedId ? "true" : "false");
+        item.textContent = workspaceId;
+        item.title = workspaceId;
+        item.addEventListener("pointerdown", preserveFocus);
+        item.addEventListener("click", () => {
+          if (onSelect(workspaceId) !== false) close();
+        });
+        list.appendChild(item);
+      }
+      hasRendered = true;
+    }
+    async function refresh({ force = false } = {}) {
+      const generation = ++requestGeneration;
+      if (force) setState("\u5237\u65B0\u4E2D\u2026");
+      else if (!hasRendered) setState("\u52A0\u8F7D Workspace\u2026");
+      try {
+        const workspaces = await loadWorkspaces({ refresh: force });
+        if (!open || generation !== requestGeneration) return;
+        render(workspaces);
+      } catch (error) {
+        if (!open || generation !== requestGeneration) return;
+        setState(error instanceof Error ? error.message : String(error));
+      }
+    }
+    function close() {
+      if (!open) return;
+      open = false;
+      requestGeneration += 1;
+      root.hidden = true;
+      document.removeEventListener("pointerdown", outsidePointer, true);
+      document.removeEventListener("keydown", escapeKey, true);
+    }
+    function outsidePointer(event) {
+      if (root.contains(event.target) || triggerElement?.contains?.(event.target)) return;
+      close();
+    }
+    function escapeKey(event) {
+      if (event.key === "Escape") close();
+    }
+    function openMenu() {
+      if (open) return;
+      open = true;
+      root.hidden = false;
+      document.addEventListener("pointerdown", outsidePointer, true);
+      document.addEventListener("keydown", escapeKey, true);
+      refresh();
+    }
+    function toggle() {
+      if (open) close();
+      else openMenu();
+    }
+    function bindTrigger(element) {
+      triggerElement = element;
+    }
+    function updateTrigger() {
+      if (!triggerElement) return;
+      const workspaceId = getSelectedId?.() || "";
+      triggerElement.textContent = shortWorkspaceId(workspaceId);
+      triggerElement.title = workspaceId || "\u9009\u62E9 Workspace";
+    }
+    function reset() {
+      close();
+      hasRendered = false;
+      requestGeneration += 1;
+      list.replaceChildren();
+      clearState();
+      updateTrigger();
+    }
+    refreshButton.addEventListener("pointerdown", preserveFocus);
+    refreshButton.addEventListener("click", () => refresh({ force: true }));
+    return {
+      element: root,
+      open: openMenu,
+      close,
+      toggle,
+      bindTrigger,
+      updateTrigger,
+      reset
+    };
+  }
+
   // src/main.js
   (function() {
     "use strict";
     let config = loadConfig();
     let localEndpointId = null;
-    let monitorActive = false;
+    let activeWorkspaceId = null;
+    let monitorMounted = false;
     let actionLogClient = null;
     let activitySessionKey = null;
     let activitySessionCursor = null;
@@ -2447,6 +2731,9 @@
     }
     const composerAdapter = createComposerAdapter();
     const skillCatalogClient = createSkillCatalogClient({
+      getProfile: getActiveEndpoint
+    });
+    const workspaceClient = createWorkspaceClient({
       getProfile: getActiveEndpoint
     });
     const activityStore = createActivityStore();
@@ -2462,29 +2749,72 @@
         return inserted;
       }
     });
+    const workspaceMenu = createWorkspaceMenu({
+      loadWorkspaces: (options) => workspaceClient.list(options),
+      getSelectedId: () => activeWorkspaceId,
+      onSelect: selectWorkspace
+    });
     monitorUi = createMonitorPanel({
       activityStore,
-      isActive: () => monitorActive,
-      skillsMenu
+      isActive: () => monitorMounted && Boolean(activeWorkspaceId),
+      skillsMenu,
+      workspaceMenu
     });
-    function deactivateMonitor() {
-      if (!monitorActive) return;
-      const cursor = actionLogClient?.getCursor?.();
+    function stopActionLog() {
+      if (!actionLogClient) return;
+      const cursor = actionLogClient.getCursor?.();
       if (Number.isInteger(cursor)) activitySessionCursor = cursor;
-      monitorActive = false;
-      actionLogClient?.stop();
+      actionLogClient.stop();
       actionLogClient = null;
+    }
+    function resetWorkspaceStream() {
+      stopActionLog();
+      activityStore.clear();
+      activitySessionKey = null;
+      activitySessionCursor = null;
+      monitorUi.resetSession();
+      monitorUi.clearAttention();
+      monitorUi.setStatus("idle");
+    }
+    function selectWorkspace(workspaceId) {
+      if (!/^ws_[0-9a-f]{16}$/.test(workspaceId)) return false;
+      if (workspaceId === activeWorkspaceId) {
+        workspaceMenu.updateTrigger();
+        return true;
+      }
+      resetWorkspaceStream();
+      activeWorkspaceId = workspaceId;
+      workspaceMenu.updateTrigger();
+      if (monitorMounted && document.visibilityState === "visible") startActionLog();
+      return true;
+    }
+    function deactivateMonitor() {
+      stopActionLog();
+      if (!monitorMounted) return;
+      monitorMounted = false;
       skillsMenu.close();
+      workspaceMenu.close();
       monitorUi.unmount();
     }
     function applySettings({ nextConfig, selectedEndpointId, scope }) {
+      const previousEndpoint = getActiveEndpoint();
       const persisted = {
         ...nextConfig,
         selectedEndpointId: scope === "global" ? selectedEndpointId : config.selectedEndpointId
       };
       config = saveConfig(persisted);
       localEndpointId = scope === "local" ? selectedEndpointId : null;
+      const nextEndpoint = getActiveEndpoint();
+      const endpointChanged = previousEndpoint?.id !== nextEndpoint?.id || previousEndpoint?.backend !== nextEndpoint?.backend;
       deactivateMonitor();
+      if (endpointChanged) {
+        activeWorkspaceId = null;
+        activityStore.clear();
+        activitySessionKey = null;
+        activitySessionCursor = null;
+        workspaceClient.clear();
+        workspaceMenu.reset();
+      }
       if (document.visibilityState === "visible") activateMonitor();
     }
     const settingsPanel = createSettingsPanel({
@@ -2495,20 +2825,18 @@
       }),
       onApplySettings: applySettings
     });
-    function activateMonitor() {
+    function startActionLog() {
       const profile = getActiveEndpoint();
-      if (monitorActive || !profile?.backend) return;
-      monitorActive = true;
-      const nextSessionKey = `${profile.id}:${profile.backend}`;
+      if (!monitorMounted || actionLogClient || !profile?.backend || !activeWorkspaceId) return;
+      const nextSessionKey = `${profile.id}:${profile.backend}:${activeWorkspaceId}`;
       if (activitySessionKey !== nextSessionKey) {
         activityStore.clear();
         activitySessionKey = nextSessionKey;
         activitySessionCursor = null;
       }
-      monitorUi.mount();
-      monitorUi.setStatus("idle");
       actionLogClient = createActionLogClient({
         getProfile: getActiveEndpoint,
+        getWorkspaceId: () => activeWorkspaceId,
         initialCursor: activitySessionCursor,
         onCursor: (cursor) => {
           activitySessionCursor = cursor;
@@ -2528,23 +2856,35 @@
       });
       if (document.visibilityState === "visible") actionLogClient.start();
     }
+    function activateMonitor() {
+      const profile = getActiveEndpoint();
+      if (!profile?.backend) return;
+      if (!monitorMounted) {
+        monitorMounted = true;
+        monitorUi.mount();
+        monitorUi.setStatus("idle");
+        workspaceMenu.updateTrigger();
+      }
+      startActionLog();
+    }
     function suspend() {
       actionLogClient?.suspend();
       monitorUi.suspendActivity();
     }
     function resume() {
-      if (!monitorActive) {
+      if (!monitorMounted) {
         activateMonitor();
         return;
       }
       monitorUi.resumeActivity();
       const active = activityStore.snapshot().active.at(0);
       if (active) monitorUi.queueActivity(compactActivity(active));
-      actionLogClient?.resume();
+      if (actionLogClient) actionLogClient.resume();
+      else startActionLog();
     }
     GM_registerMenuCommand("\u2699 \u76D1\u63A7\u914D\u7F6E...", settingsPanel.open);
     window.addEventListener("resize", () => {
-      if (monitorActive) monitorUi.keepInViewport();
+      if (monitorMounted) monitorUi.keepInViewport();
     });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") resume();

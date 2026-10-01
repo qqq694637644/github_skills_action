@@ -232,11 +232,17 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
 
     @app.get("/v1/action-logs", include_in_schema=False)
     def action_logs(
+        workspace_id: str | None = Query(default=None, pattern=r"^ws_[0-9a-f]{16}$"),
         after: int = Query(default=0, ge=0),
         wait: float = Query(default=55.0, ge=0.0, le=60.0),
         limit: int = Query(default=50, ge=1, le=100),
     ) -> dict[str, Any]:
-        return wait_for_action_events(after=after, timeout=wait, limit=limit)
+        return wait_for_action_events(
+            after=after,
+            timeout=wait,
+            limit=limit,
+            workspace_id=workspace_id,
+        )
 
     @app.get("/console", response_class=HTMLResponse, include_in_schema=False)
     def console() -> HTMLResponse:

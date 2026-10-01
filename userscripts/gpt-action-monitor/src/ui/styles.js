@@ -339,53 +339,6 @@ export const MONITOR_CSS = `
       opacity: .48;
     }
     #gpt-action-monitor .gam-activity-detail-line:first-child::before { content: "└ "; }
-    #gpt-action-monitor .gam-activity-tooltip {
-      position: fixed;
-      z-index: 8;
-      width: min(520px, calc(100vw - 16px));
-      max-height: min(520px, 72vh);
-      box-sizing: border-box;
-      padding: 11px 12px 12px;
-      overflow: hidden;
-      border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
-      border-radius: 9px;
-      background: color-mix(in srgb, Canvas 97%, CanvasText 3%);
-      color: CanvasText;
-      box-shadow: 0 8px 28px rgba(0, 0, 0, .16);
-      pointer-events: none;
-    }
-    #gpt-action-monitor .gam-activity-tooltip[hidden] { display: none; }
-    #gpt-action-monitor .gam-activity-tooltip-time-row {
-      display: grid;
-      grid-template-columns: auto 1fr;
-      gap: 10px;
-      align-items: baseline;
-      margin-bottom: 10px;
-      color: color-mix(in srgb, CanvasText 64%, transparent);
-      font-size: 11px;
-    }
-    #gpt-action-monitor .gam-activity-tooltip-time-row strong {
-      color: CanvasText;
-      font: 600 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    #gpt-action-monitor .gam-activity-tooltip-section + .gam-activity-tooltip-section {
-      margin-top: 10px;
-    }
-    #gpt-action-monitor .gam-activity-tooltip-label {
-      margin-bottom: 3px;
-      color: color-mix(in srgb, CanvasText 58%, transparent);
-      font-size: 11px;
-      font-weight: 600;
-    }
-    #gpt-action-monitor .gam-activity-tooltip pre {
-      max-height: 220px;
-      margin: 0;
-      overflow: hidden;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      color: CanvasText;
-      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
     #gpt-action-monitor .gam-workspace-picker,
     #gpt-action-monitor .gam-skills-picker {
       position: absolute;

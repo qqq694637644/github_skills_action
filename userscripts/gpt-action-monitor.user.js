@@ -705,50 +705,6 @@
     if (cell.kind === "legacy") return legacyPresentation(cell);
     return genericPresentation(cell);
   }
-  function hoverCommandOutput(cell) {
-    const liveOutput = String(cell.liveOutput || "").trimEnd();
-    if (liveOutput.trim()) return liveOutput;
-    const payload = cell.payload || {};
-    const previews = [
-      ...payload.stdout_preview || [],
-      ...payload.stderr_preview || []
-    ].map((line) => String(line || "").trimEnd()).filter((line) => line.trim());
-    if (previews.length) return previews.join("\n");
-    if (payload.error_message) return String(payload.error_message);
-    if (payload.diagnostic) return String(payload.diagnostic);
-    return "(no output)";
-  }
-  function hoverCallText(cell, presentation) {
-    const payload = cell.payload || {};
-    if (cell.kind === "command") return String(payload.command || "command");
-    if (cell.kind === "exploration") {
-      const entries = (cell.entries || []).map((entry) => {
-        const detail = entry.detail ? ` \xB7 ${entry.detail}` : "";
-        return `${entry.verb} ${entry.label}${detail}`;
-      });
-      return entries.join("\n") || presentation.title;
-    }
-    if (cell.kind === "write") return `workspaceWriteFile ${payload.path || ""}`.trim();
-    if (cell.kind === "patch") return payload.dry_run ? "workspaceApplyPatch (dry run)" : "workspaceApplyPatch";
-    if (cell.kind === "skill") {
-      const target = payload.path || (payload.skill_ids || []).join(", ") || payload.skill_id || "";
-      return [payload.operation || "skill", target].filter(Boolean).join(" ");
-    }
-    return String(payload.operation || presentation.title);
-  }
-  function presentActivityHover(cell) {
-    const presentation = presentActivity(cell);
-    const active = cell?.phase === "started" || cell?.phase === "updated";
-    let output = presentation.lines.join("\n");
-    if (cell?.kind === "command") output = hoverCommandOutput(cell);
-    else if (!output) output = String(cell?.payload?.diagnostic || cell?.payload?.error_message || "(no output)");
-    return {
-      updatedAt: cell?.updatedAt || cell?.startedAt || "",
-      call: hoverCallText(cell || {}, presentation),
-      outputLabel: active ? "\u5F53\u524D\u8F93\u51FA" : "\u7ED3\u679C",
-      output
-    };
-  }
   function compactActivity(cell) {
     const presentation = presentActivity(cell);
     return {
@@ -1532,53 +1488,6 @@
       opacity: .48;
     }
     #gpt-action-monitor .gam-activity-detail-line:first-child::before { content: "\u2514 "; }
-    #gpt-action-monitor .gam-activity-tooltip {
-      position: fixed;
-      z-index: 8;
-      width: min(520px, calc(100vw - 16px));
-      max-height: min(520px, 72vh);
-      box-sizing: border-box;
-      padding: 11px 12px 12px;
-      overflow: hidden;
-      border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
-      border-radius: 9px;
-      background: color-mix(in srgb, Canvas 97%, CanvasText 3%);
-      color: CanvasText;
-      box-shadow: 0 8px 28px rgba(0, 0, 0, .16);
-      pointer-events: none;
-    }
-    #gpt-action-monitor .gam-activity-tooltip[hidden] { display: none; }
-    #gpt-action-monitor .gam-activity-tooltip-time-row {
-      display: grid;
-      grid-template-columns: auto 1fr;
-      gap: 10px;
-      align-items: baseline;
-      margin-bottom: 10px;
-      color: color-mix(in srgb, CanvasText 64%, transparent);
-      font-size: 11px;
-    }
-    #gpt-action-monitor .gam-activity-tooltip-time-row strong {
-      color: CanvasText;
-      font: 600 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    #gpt-action-monitor .gam-activity-tooltip-section + .gam-activity-tooltip-section {
-      margin-top: 10px;
-    }
-    #gpt-action-monitor .gam-activity-tooltip-label {
-      margin-bottom: 3px;
-      color: color-mix(in srgb, CanvasText 58%, transparent);
-      font-size: 11px;
-      font-weight: 600;
-    }
-    #gpt-action-monitor .gam-activity-tooltip pre {
-      max-height: 220px;
-      margin: 0;
-      overflow: hidden;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      color: CanvasText;
-      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
     #gpt-action-monitor .gam-workspace-picker,
     #gpt-action-monitor .gam-skills-picker {
       position: absolute;
@@ -1837,13 +1746,6 @@
     `;
 
   // src/ui/activity-panel.js
-  function formatLocalTime(timestamp) {
-    if (!timestamp) return "--:--:--";
-    const date = new Date(timestamp);
-    if (Number.isNaN(date.getTime())) return "--:--:--";
-    const pad = (value) => String(value).padStart(2, "0");
-    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-  }
   function createCellNode() {
     const node = document.createElement("div");
     node.className = "gam-activity-cell";
@@ -1862,7 +1764,6 @@
   }
   function updateCellNode(node, cell) {
     const presentation = presentActivity(cell);
-    node._gam.cell = cell;
     const signature = JSON.stringify([
       cell.revision,
       cell.phase,
@@ -1877,7 +1778,7 @@
     node.dataset.kind = cell.kind;
     node._gam.marker.textContent = presentation.marker || "\u2022";
     node._gam.label.textContent = presentation.title;
-    node.removeAttribute?.("title");
+    node.title = presentation.title;
     node._gam.details.replaceChildren();
     for (const line of presentation.lines) {
       const detail = document.createElement("div");
@@ -1923,82 +1824,17 @@
     const recentList = root.querySelector(".gam-recent-list");
     const nowNodes = /* @__PURE__ */ new Map();
     const recentNodes = /* @__PURE__ */ new Map();
-    const tooltip = document.createElement("div");
-    tooltip.className = "gam-activity-tooltip";
-    tooltip.hidden = true;
-    tooltip.innerHTML = `
-    <div class="gam-activity-tooltip-time-row">
-      <span>\u6700\u540E\u6D3B\u52A8</span>
-      <strong class="gam-activity-tooltip-time"></strong>
-    </div>
-    <div class="gam-activity-tooltip-section">
-      <div class="gam-activity-tooltip-label">\u8C03\u7528</div>
-      <pre class="gam-activity-tooltip-call"></pre>
-    </div>
-    <div class="gam-activity-tooltip-section">
-      <div class="gam-activity-tooltip-label gam-activity-tooltip-output-label"></div>
-      <pre class="gam-activity-tooltip-output"></pre>
-    </div>
-  `;
-    root.appendChild(tooltip);
-    const tooltipTime = tooltip.querySelector(".gam-activity-tooltip-time");
-    const tooltipCall = tooltip.querySelector(".gam-activity-tooltip-call");
-    const tooltipOutputLabel = tooltip.querySelector(".gam-activity-tooltip-output-label");
-    const tooltipOutput = tooltip.querySelector(".gam-activity-tooltip-output");
-    let hoveredNode = null;
-    function positionTooltip(node) {
-      const anchor = node.getBoundingClientRect();
-      const rect = tooltip.getBoundingClientRect();
-      const margin = 8;
-      let left = anchor.left - rect.width - margin;
-      if (left < margin) left = Math.min(anchor.right + margin, window.innerWidth - rect.width - margin);
-      const top = Math.min(
-        Math.max(anchor.top, margin),
-        Math.max(margin, window.innerHeight - rect.height - margin)
-      );
-      tooltip.style.left = `${Math.round(left)}px`;
-      tooltip.style.top = `${Math.round(top)}px`;
-    }
-    function showTooltip(node) {
-      const cell = node?._gam?.cell;
-      if (!cell) return;
-      const detail = presentActivityHover(cell);
-      tooltipTime.textContent = formatLocalTime(detail.updatedAt);
-      tooltipCall.textContent = detail.call;
-      tooltipOutputLabel.textContent = detail.outputLabel;
-      tooltipOutput.textContent = detail.output;
-      tooltip.hidden = false;
-      positionTooltip(node);
-      hoveredNode = node;
-    }
-    function hideTooltip() {
-      tooltip.hidden = true;
-      hoveredNode = null;
-    }
-    root.addEventListener("pointerover", (event) => {
-      const node = event.target.closest?.(".gam-activity-cell");
-      if (!node || node === hoveredNode) return;
-      showTooltip(node);
-    });
-    root.addEventListener("pointerout", (event) => {
-      const node = event.target.closest?.(".gam-activity-cell");
-      if (!node || node !== hoveredNode) return;
-      if (event.relatedTarget && node.contains?.(event.relatedTarget)) return;
-      hideTooltip();
-    });
     function render(snapshot) {
       syncList(nowList, snapshot.active || [], nowNodes);
       syncList(recentList, snapshot.recent || [], recentNodes);
       nowSection.hidden = !(snapshot.active || []).length;
       recentSection.hidden = !(snapshot.recent || []).length;
-      if (hoveredNode?._gam?.cell) showTooltip(hoveredNode);
     }
     function setHint(message) {
       hint.textContent = message || "";
       hint.hidden = !message;
     }
     function clear() {
-      hideTooltip();
       nowNodes.clear();
       recentNodes.clear();
       nowList.replaceChildren();

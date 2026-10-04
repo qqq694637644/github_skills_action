@@ -4,6 +4,8 @@ import { createActionLogClient } from './api/action-log-client.js';
 import { createSkillCatalogClient } from './api/skill-catalog-client.js';
 import { createWorkspaceClient } from './api/workspace-client.js';
 import { createComposerAdapter, loadSkillsCall } from './adapters/composer.js';
+import { createSoundAlert } from './alert/sound-alert.js';
+import { SOUND_ALERT_ENABLED_KEY } from './constants.js';
 import {
   getEndpoint,
   loadEndpoints,
@@ -31,6 +33,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   let actionLogClient = null;
   let activitySessionKey = null;
   let activitySessionCursor = null;
+  let soundAlertEnabled = Boolean(GM_getValue(SOUND_ALERT_ENABLED_KEY, false));
 
   function pageUrl() {
     const pathname = window.location.pathname.length > 1
@@ -84,6 +87,9 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   });
 
   const activityStore = createActivityStore();
+  const soundAlert = createSoundAlert({
+    isEnabled: () => soundAlertEnabled,
+  });
   let monitorUi = null;
   const skillsMenu = createSkillsMenu({
     loadSkills: (options) => skillCatalogClient.list(options),
@@ -121,6 +127,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   function resetWorkspaceStream({ preserveCursor = false } = {}) {
     stopActionLog();
     activityStore.clear();
+    soundAlert.reset();
     activitySessionKey = null;
     if (!preserveCursor) activitySessionCursor = null;
     monitorUi.resetSession();
@@ -243,6 +250,13 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     persistCurrentPageBinding();
   }
 
+  function setSoundAlertEnabled(enabled) {
+    soundAlertEnabled = Boolean(enabled);
+    GM_setValue(SOUND_ALERT_ENABLED_KEY, soundAlertEnabled);
+    soundAlert.settingsChanged();
+    if (soundAlertEnabled) soundAlert.unlock();
+  }
+
   const settingsPanel = createSettingsPanel({
     getState: () => ({
       endpoints,
@@ -250,11 +264,14 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       pageActiveEndpointId,
       effectiveEndpointId: getEffectiveEndpointId(),
       pageUrl: currentPageUrl,
+      soundAlertEnabled,
     }),
     onSaveEndpoints: saveEndpointLibrary,
     onSetGlobalEndpoint: setGlobalActiveEndpoint,
     onUsePageEndpoint: usePageEndpoint,
     onRestoreGlobalEndpoint: restoreGlobalEndpoint,
+    onSetSoundAlertEnabled: setSoundAlertEnabled,
+    onTestSound: () => soundAlert.test(),
   });
 
   function handlePageNavigation() {
@@ -294,9 +311,12 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       getWorkspaceId: () => activeWorkspaceId,
       initialCursor: activitySessionCursor,
       onCursor: (cursor) => { activitySessionCursor = cursor; },
+      shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
       onItems(items) {
         const latestTimestamp = latestEventTimestamp(items);
         if (latestTimestamp) monitorUi.setLastActivityTimestamp(latestTimestamp);
+        if (latestTimestamp && activeWorkspaceId) soundAlert.observe(latestTimestamp);
+        soundAlert.check();
         const newest = activityStore.ingest(items);
         if (newest) {
           monitorUi.clearHint();
@@ -328,8 +348,12 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   }
 
   function suspend() {
-    actionLogClient?.suspend();
     monitorUi.suspendActivity();
+    if (soundAlertEnabled && activeWorkspaceId) {
+      soundAlert.check();
+      return;
+    }
+    actionLogClient?.suspend();
   }
 
   function resume() {
@@ -345,6 +369,12 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   }
 
   GM_registerMenuCommand('⚙ 监控配置...', settingsPanel.open);
+
+  const unlockSound = () => {
+    if (soundAlertEnabled) soundAlert.unlock();
+  };
+  document.addEventListener('pointerdown', unlockSound, { capture: true });
+  document.addEventListener('keydown', unlockSound, { capture: true });
 
   window.addEventListener('resize', () => {
     if (monitorMounted) monitorUi.keepInViewport();

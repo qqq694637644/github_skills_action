@@ -9,6 +9,7 @@ export function createActionLogClient({
   onAttention,
   initialCursor = null,
   onCursor,
+  shouldPollWhenHidden = () => false,
 }) {
   let lastId = Number.isInteger(initialCursor) ? initialCursor : 0;
   let needsCursorPrime = !Number.isInteger(initialCursor);
@@ -68,7 +69,11 @@ export function createActionLogClient({
   }
 
   function poll() {
-    if (stopped || requestHandle || document.visibilityState !== 'visible') return;
+    if (
+      stopped
+      || requestHandle
+      || (document.visibilityState !== 'visible' && !shouldPollWhenHidden())
+    ) return;
     const profile = getProfile();
     const workspaceId = getWorkspaceId?.();
     if (!profile) return;

@@ -73,6 +73,8 @@ export function createSettingsPanel({
   onSetGlobalEndpoint,
   onUsePageEndpoint,
   onRestoreGlobalEndpoint,
+  onSetSoundAlertEnabled,
+  onTestSound,
 }) {
   let overlay = null;
   let style = null;
@@ -158,6 +160,18 @@ export function createSettingsPanel({
               <div class="gam-usage-note"></div>
             </section>
 
+            <section class="gam-settings-section gam-sound-section">
+              <div class="gam-section-heading">声音提醒</div>
+              <div class="gam-sound-row">
+                <label class="gam-sound-toggle">
+                  <input class="gam-sound-enabled" type="checkbox">
+                  <span>3 分钟无日志时播放提示音</span>
+                </label>
+                <button class="gam-button gam-test-sound" type="button">测试声音</button>
+              </div>
+              <div class="gam-sound-note">全局配置。已选择 Workspace 收到第一条日志后自动监测；有新日志会自动重新计时。</div>
+            </section>
+
             <div class="gam-form-message" aria-live="polite"></div>
           </form>
         </div>
@@ -182,6 +196,10 @@ export function createSettingsPanel({
     const globalValue = overlay.querySelector('.gam-global-value');
     const currentValue = overlay.querySelector('.gam-current-value');
     const editingValue = overlay.querySelector('.gam-editing-value');
+    const soundEnabledInput = overlay.querySelector('.gam-sound-enabled');
+    const testSoundButton = overlay.querySelector('.gam-test-sound');
+    const soundNote = overlay.querySelector('.gam-sound-note');
+    soundEnabledInput.checked = Boolean(initialState.soundAlertEnabled);
 
     function currentDraftEndpoint() {
       return draftEndpoints.find((endpoint) => endpoint.id === editingEndpointId) || null;
@@ -405,6 +423,21 @@ export function createSettingsPanel({
       } catch (error) {
         showError(error instanceof Error ? error.message : String(error));
       }
+    });
+    soundEnabledInput.addEventListener('change', () => {
+      const enabled = soundEnabledInput.checked;
+      onSetSoundAlertEnabled(enabled);
+      soundNote.textContent = enabled
+        ? '已全局开启。已选择 Workspace 收到第一条日志后自动监测；有新日志会自动重新计时。'
+        : '已全局关闭。关闭时后台继续使用原来的省电策略。';
+    });
+    testSoundButton.addEventListener('click', async () => {
+      testSoundButton.disabled = true;
+      const played = await onTestSound();
+      testSoundButton.disabled = false;
+      soundNote.textContent = played
+        ? '✓ 已播放测试提示音。'
+        : '浏览器未允许播放声音，请先与页面交互后重试。';
     });
     overlay.addEventListener('click', (event) => {
       if (event.target === overlay) close();

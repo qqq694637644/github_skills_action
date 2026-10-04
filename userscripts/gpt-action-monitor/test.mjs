@@ -8,6 +8,7 @@ import {
 import { createActionLogClient } from './src/api/action-log-client.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
 import { loadSkillsCall } from './src/adapters/composer.js';
+import { createSoundAlert } from './src/alert/sound-alert.js';
 import {
   loadEndpoints,
   loadGlobalActiveEndpointId,
@@ -38,6 +39,47 @@ assert.deepEqual(validateBackend('https://skills.example.com/'), {
 });
 assert.equal(validateBackend('ftp://skills.example.com').ok, false);
 assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintenance"])');
+
+// Sound alerts are armed by server activity timestamps, fire once per quiet
+// period, and re-arm only after a newer activity arrives.
+{
+  const { timers } = installDomFixture();
+  const base = Date.parse('2026-10-04T10:00:00Z');
+  let currentTime = base;
+  let enabled = true;
+  let plays = 0;
+  const alert = createSoundAlert({
+    isEnabled: () => enabled,
+    delayMs: 3 * 60 * 1000,
+    now: () => currentTime,
+    player: {
+      unlock: async () => true,
+      test: async () => true,
+      play: () => { plays += 1; return true; },
+    },
+  });
+
+  assert.equal(alert.observe('2026-10-04T10:00:00Z'), true);
+  currentTime = base + 3 * 60 * 1000;
+  const [firstTimerId, firstTimer] = timers.entries().next().value;
+  timers.delete(firstTimerId);
+  firstTimer();
+  assert.equal(plays, 1);
+  alert.check();
+  assert.equal(plays, 1);
+
+  currentTime = base + 3 * 60 * 1000 + 1000;
+  assert.equal(alert.observe('2026-10-04T10:03:01Z'), true);
+  currentTime += 3 * 60 * 1000;
+  const [secondTimerId, secondTimer] = timers.entries().next().value;
+  timers.delete(secondTimerId);
+  secondTimer();
+  assert.equal(plays, 2);
+
+  enabled = false;
+  alert.settingsChanged();
+  assert.equal(timers.size, 0);
+}
 
 // V3 deliberately separates the persistent endpoint library from the global
 // active endpoint and ignores the legacy combined profile storage key.
@@ -654,6 +696,31 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   assert.equal(timers.size, 0);
   client.resume();
   assert.equal(timers.size, 1);
+  client.stop();
+}
+
+// Sound alerts keep the one selected-workspace long-poll alive while the page
+// is hidden so inactivity can be measured without adding another request loop.
+{
+  const { document, timers } = installDomFixture();
+  document.visibilityState = 'hidden';
+  let requests = 0;
+  globalThis.GM_xmlhttpRequest = () => {
+    requests += 1;
+    return { abort() {} };
+  };
+  const client = createActionLogClient({
+    getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
+    getWorkspaceId: () => 'ws_0123456789abcdef',
+    onItems: () => {},
+    onHint: () => {},
+    shouldPollWhenHidden: () => true,
+  });
+  client.start();
+  const [timerId, runPoll] = timers.entries().next().value;
+  timers.delete(timerId);
+  runPoll();
+  assert.equal(requests, 1);
   client.stop();
 }
 

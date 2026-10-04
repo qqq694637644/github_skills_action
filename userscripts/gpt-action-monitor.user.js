@@ -18,12 +18,14 @@
   var ENDPOINTS_KEY = "gptActionMonitorEndpointsV3";
   var GLOBAL_ACTIVE_ENDPOINT_KEY = "gptActionMonitorGlobalActiveEndpointV3";
   var PAGE_BINDINGS_KEY = "gptActionMonitorPageBindingsV1";
+  var SOUND_ALERT_ENABLED_KEY = "gptActionMonitorSoundAlertEnabledV1";
   var MAX_PAGE_BINDINGS = 20;
   var POSITION_KEY = "gptActionMonitorPosition";
   var POLL_WAIT_SECONDS = 55;
   var RETRY_MS = 3e3;
   var ACTIVITY_VISIBLE_MS = 4e3;
   var UI_COALESCE_MS = 200;
+  var SOUND_ALERT_DELAY_MS = 3 * 60 * 1e3;
   var MAX_HISTORY = 100;
   var COMPACT_WIDTH = 30;
 
@@ -849,7 +851,8 @@ ${result}`;
     onStatus,
     onAttention,
     initialCursor = null,
-    onCursor
+    onCursor,
+    shouldPollWhenHidden = () => false
   }) {
     let lastId = Number.isInteger(initialCursor) ? initialCursor : 0;
     let needsCursorPrime = !Number.isInteger(initialCursor);
@@ -903,7 +906,7 @@ ${result}`;
       schedulePoll(RETRY_MS);
     }
     function poll() {
-      if (stopped || requestHandle || document.visibilityState !== "visible") return;
+      if (stopped || requestHandle || document.visibilityState !== "visible" && !shouldPollWhenHidden()) return;
       const profile = getProfile();
       const workspaceId = getWorkspaceId?.();
       if (!profile) return;
@@ -1188,6 +1191,138 @@ ${result}`;
   }
   function loadSkillsCall(skillId) {
     return `loadSkills(${JSON.stringify([skillId])})`;
+  }
+
+  // src/alert/sound-alert.js
+  function createWebAudioPlayer() {
+    let context = null;
+    function getContext() {
+      if (context) return context;
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return null;
+      context = new AudioContextClass();
+      return context;
+    }
+    async function unlock() {
+      const audioContext = getContext();
+      if (!audioContext) return false;
+      if (audioContext.state === "suspended") {
+        try {
+          await audioContext.resume();
+        } catch (_) {
+          return false;
+        }
+      }
+      return audioContext.state === "running";
+    }
+    function emit(audioContext) {
+      const start = audioContext.currentTime + 0.02;
+      const tones = [880, 1175, 880];
+      tones.forEach((frequency, index) => {
+        const toneStart = start + index * 0.3;
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(frequency, toneStart);
+        gain.gain.setValueAtTime(1e-4, toneStart);
+        gain.gain.exponentialRampToValueAtTime(0.18, toneStart + 0.025);
+        gain.gain.exponentialRampToValueAtTime(1e-4, toneStart + 0.2);
+        oscillator.connect(gain);
+        gain.connect(audioContext.destination);
+        oscillator.start(toneStart);
+        oscillator.stop(toneStart + 0.22);
+      });
+    }
+    function play() {
+      const audioContext = getContext();
+      if (!audioContext) return false;
+      if (audioContext.state === "running") {
+        emit(audioContext);
+        return true;
+      }
+      try {
+        audioContext.resume().then(() => {
+          if (audioContext.state === "running") emit(audioContext);
+        }).catch(() => {
+        });
+      } catch (_) {
+        return false;
+      }
+      return true;
+    }
+    async function test() {
+      if (!await unlock()) return false;
+      return play();
+    }
+    return { unlock, play, test };
+  }
+  function createSoundAlert({
+    isEnabled,
+    delayMs = SOUND_ALERT_DELAY_MS,
+    now = () => Date.now(),
+    player = createWebAudioPlayer()
+  }) {
+    let timer = null;
+    let lastActivityAt = null;
+    let alertedActivityAt = null;
+    function clearTimer() {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    }
+    function fireIfDue() {
+      clearTimer();
+      if (!isEnabled() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
+      const remaining = lastActivityAt + delayMs - now();
+      if (remaining > 0) {
+        timer = window.setTimeout(fireIfDue, remaining);
+        return;
+      }
+      alertedActivityAt = lastActivityAt;
+      player.play();
+    }
+    function schedule() {
+      clearTimer();
+      if (!isEnabled() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
+      const remaining = Math.max(0, lastActivityAt + delayMs - now());
+      timer = window.setTimeout(fireIfDue, remaining);
+    }
+    function observe(timestamp) {
+      const parsed = Date.parse(timestamp);
+      if (!Number.isFinite(parsed)) return false;
+      if (lastActivityAt !== null && parsed < lastActivityAt) return false;
+      if (parsed !== lastActivityAt) alertedActivityAt = null;
+      lastActivityAt = parsed;
+      schedule();
+      return true;
+    }
+    function check() {
+      if (!isEnabled()) {
+        clearTimer();
+        return;
+      }
+      if (lastActivityAt !== null && alertedActivityAt !== lastActivityAt) {
+        fireIfDue();
+      }
+    }
+    function reset() {
+      clearTimer();
+      lastActivityAt = null;
+      alertedActivityAt = null;
+    }
+    function settingsChanged() {
+      if (isEnabled()) schedule();
+      else clearTimer();
+    }
+    return {
+      observe,
+      check,
+      reset,
+      settingsChanged,
+      unlock: player.unlock,
+      test: player.test
+    };
   }
 
   // src/profile/profile-store.js
@@ -1935,11 +2070,33 @@ ${result}`;
       }
       #gam-settings-overlay .gam-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
       #gam-settings-overlay .gam-config-actions,
-      #gam-settings-overlay .gam-usage-actions {
+      #gam-settings-overlay .gam-usage-actions,
+      #gam-settings-overlay .gam-sound-row {
         display: flex;
         justify-content: flex-end;
         gap: 8px;
         flex-wrap: wrap;
+      }
+      #gam-settings-overlay .gam-sound-row {
+        align-items: center;
+        justify-content: space-between;
+      }
+      #gam-settings-overlay .gam-sound-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        cursor: pointer;
+      }
+      #gam-settings-overlay .gam-sound-enabled {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        flex: 0 0 auto;
+      }
+      #gam-settings-overlay .gam-sound-note {
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 12px;
       }
       #gam-settings-overlay .gam-usage-grid {
         display: grid;
@@ -2598,7 +2755,9 @@ ${result}`;
     onSaveEndpoints,
     onSetGlobalEndpoint,
     onUsePageEndpoint,
-    onRestoreGlobalEndpoint
+    onRestoreGlobalEndpoint,
+    onSetSoundAlertEnabled,
+    onTestSound
   }) {
     let overlay = null;
     let style = null;
@@ -2676,6 +2835,18 @@ ${result}`;
               <div class="gam-usage-note"></div>
             </section>
 
+            <section class="gam-settings-section gam-sound-section">
+              <div class="gam-section-heading">\u58F0\u97F3\u63D0\u9192</div>
+              <div class="gam-sound-row">
+                <label class="gam-sound-toggle">
+                  <input class="gam-sound-enabled" type="checkbox">
+                  <span>3 \u5206\u949F\u65E0\u65E5\u5FD7\u65F6\u64AD\u653E\u63D0\u793A\u97F3</span>
+                </label>
+                <button class="gam-button gam-test-sound" type="button">\u6D4B\u8BD5\u58F0\u97F3</button>
+              </div>
+              <div class="gam-sound-note">\u5168\u5C40\u914D\u7F6E\u3002\u5DF2\u9009\u62E9 Workspace \u6536\u5230\u7B2C\u4E00\u6761\u65E5\u5FD7\u540E\u81EA\u52A8\u76D1\u6D4B\uFF1B\u6709\u65B0\u65E5\u5FD7\u4F1A\u81EA\u52A8\u91CD\u65B0\u8BA1\u65F6\u3002</div>
+            </section>
+
             <div class="gam-form-message" aria-live="polite"></div>
           </form>
         </div>
@@ -2698,6 +2869,10 @@ ${result}`;
       const globalValue = overlay.querySelector(".gam-global-value");
       const currentValue = overlay.querySelector(".gam-current-value");
       const editingValue = overlay.querySelector(".gam-editing-value");
+      const soundEnabledInput = overlay.querySelector(".gam-sound-enabled");
+      const testSoundButton = overlay.querySelector(".gam-test-sound");
+      const soundNote = overlay.querySelector(".gam-sound-note");
+      soundEnabledInput.checked = Boolean(initialState.soundAlertEnabled);
       function currentDraftEndpoint() {
         return draftEndpoints.find((endpoint) => endpoint.id === editingEndpointId) || null;
       }
@@ -2901,6 +3076,17 @@ ${result}`;
         } catch (error) {
           showError(error instanceof Error ? error.message : String(error));
         }
+      });
+      soundEnabledInput.addEventListener("change", () => {
+        const enabled = soundEnabledInput.checked;
+        onSetSoundAlertEnabled(enabled);
+        soundNote.textContent = enabled ? "\u5DF2\u5168\u5C40\u5F00\u542F\u3002\u5DF2\u9009\u62E9 Workspace \u6536\u5230\u7B2C\u4E00\u6761\u65E5\u5FD7\u540E\u81EA\u52A8\u76D1\u6D4B\uFF1B\u6709\u65B0\u65E5\u5FD7\u4F1A\u81EA\u52A8\u91CD\u65B0\u8BA1\u65F6\u3002" : "\u5DF2\u5168\u5C40\u5173\u95ED\u3002\u5173\u95ED\u65F6\u540E\u53F0\u7EE7\u7EED\u4F7F\u7528\u539F\u6765\u7684\u7701\u7535\u7B56\u7565\u3002";
+      });
+      testSoundButton.addEventListener("click", async () => {
+        testSoundButton.disabled = true;
+        const played = await onTestSound();
+        testSoundButton.disabled = false;
+        soundNote.textContent = played ? "\u2713 \u5DF2\u64AD\u653E\u6D4B\u8BD5\u63D0\u793A\u97F3\u3002" : "\u6D4F\u89C8\u5668\u672A\u5141\u8BB8\u64AD\u653E\u58F0\u97F3\uFF0C\u8BF7\u5148\u4E0E\u9875\u9762\u4EA4\u4E92\u540E\u91CD\u8BD5\u3002";
       });
       overlay.addEventListener("click", (event) => {
         if (event.target === overlay) close();
@@ -3185,6 +3371,7 @@ ${result}`;
     let actionLogClient = null;
     let activitySessionKey = null;
     let activitySessionCursor = null;
+    let soundAlertEnabled = Boolean(GM_getValue(SOUND_ALERT_ENABLED_KEY, false));
     function pageUrl() {
       const pathname = window.location.pathname.length > 1 ? window.location.pathname.replace(/\/+$/, "") : window.location.pathname;
       return `${window.location.origin}${pathname}`;
@@ -3222,6 +3409,9 @@ ${result}`;
       getProfile: getEffectiveEndpoint
     });
     const activityStore = createActivityStore();
+    const soundAlert = createSoundAlert({
+      isEnabled: () => soundAlertEnabled
+    });
     let monitorUi = null;
     const skillsMenu = createSkillsMenu({
       loadSkills: (options) => skillCatalogClient.list(options),
@@ -3257,6 +3447,7 @@ ${result}`;
     function resetWorkspaceStream({ preserveCursor = false } = {}) {
       stopActionLog();
       activityStore.clear();
+      soundAlert.reset();
       activitySessionKey = null;
       if (!preserveCursor) activitySessionCursor = null;
       monitorUi.resetSession();
@@ -3358,18 +3549,27 @@ ${result}`;
       reconcileEffectiveEndpoint(previousSignature);
       persistCurrentPageBinding();
     }
+    function setSoundAlertEnabled(enabled) {
+      soundAlertEnabled = Boolean(enabled);
+      GM_setValue(SOUND_ALERT_ENABLED_KEY, soundAlertEnabled);
+      soundAlert.settingsChanged();
+      if (soundAlertEnabled) soundAlert.unlock();
+    }
     const settingsPanel = createSettingsPanel({
       getState: () => ({
         endpoints,
         globalActiveEndpointId,
         pageActiveEndpointId,
         effectiveEndpointId: getEffectiveEndpointId(),
-        pageUrl: currentPageUrl
+        pageUrl: currentPageUrl,
+        soundAlertEnabled
       }),
       onSaveEndpoints: saveEndpointLibrary,
       onSetGlobalEndpoint: setGlobalActiveEndpoint,
       onUsePageEndpoint: usePageEndpoint,
-      onRestoreGlobalEndpoint: restoreGlobalEndpoint
+      onRestoreGlobalEndpoint: restoreGlobalEndpoint,
+      onSetSoundAlertEnabled: setSoundAlertEnabled,
+      onTestSound: () => soundAlert.test()
     });
     function handlePageNavigation() {
       const nextPageUrl = pageUrl();
@@ -3404,9 +3604,12 @@ ${result}`;
         onCursor: (cursor) => {
           activitySessionCursor = cursor;
         },
+        shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
         onItems(items) {
           const latestTimestamp = latestEventTimestamp(items);
           if (latestTimestamp) monitorUi.setLastActivityTimestamp(latestTimestamp);
+          if (latestTimestamp && activeWorkspaceId) soundAlert.observe(latestTimestamp);
+          soundAlert.check();
           const newest = activityStore.ingest(items);
           if (newest) {
             monitorUi.clearHint();
@@ -3433,8 +3636,12 @@ ${result}`;
       startActionLog();
     }
     function suspend() {
-      actionLogClient?.suspend();
       monitorUi.suspendActivity();
+      if (soundAlertEnabled && activeWorkspaceId) {
+        soundAlert.check();
+        return;
+      }
+      actionLogClient?.suspend();
     }
     function resume() {
       if (!monitorMounted) {
@@ -3448,6 +3655,11 @@ ${result}`;
       else startActionLog();
     }
     GM_registerMenuCommand("\u2699 \u76D1\u63A7\u914D\u7F6E...", settingsPanel.open);
+    const unlockSound = () => {
+      if (soundAlertEnabled) soundAlert.unlock();
+    };
+    document.addEventListener("pointerdown", unlockSound, { capture: true });
+    document.addEventListener("keydown", unlockSound, { capture: true });
     window.addEventListener("resize", () => {
       if (monitorMounted) monitorUi.keepInViewport();
     });

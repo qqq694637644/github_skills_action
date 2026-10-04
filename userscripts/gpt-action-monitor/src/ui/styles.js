@@ -600,11 +600,33 @@ export const SETTINGS_CSS = `
       }
       #gam-settings-overlay .gam-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
       #gam-settings-overlay .gam-config-actions,
-      #gam-settings-overlay .gam-usage-actions {
+      #gam-settings-overlay .gam-usage-actions,
+      #gam-settings-overlay .gam-sound-row {
         display: flex;
         justify-content: flex-end;
         gap: 8px;
         flex-wrap: wrap;
+      }
+      #gam-settings-overlay .gam-sound-row {
+        align-items: center;
+        justify-content: space-between;
+      }
+      #gam-settings-overlay .gam-sound-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        cursor: pointer;
+      }
+      #gam-settings-overlay .gam-sound-enabled {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        flex: 0 0 auto;
+      }
+      #gam-settings-overlay .gam-sound-note {
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 12px;
       }
       #gam-settings-overlay .gam-usage-grid {
         display: grid;

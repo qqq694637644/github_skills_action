@@ -1,11 +1,13 @@
 export const ENDPOINTS_KEY = 'gptActionMonitorEndpointsV3';
 export const GLOBAL_ACTIVE_ENDPOINT_KEY = 'gptActionMonitorGlobalActiveEndpointV3';
 export const PAGE_BINDINGS_KEY = 'gptActionMonitorPageBindingsV1';
+export const SOUND_ALERT_ENABLED_KEY = 'gptActionMonitorSoundAlertEnabledV1';
 export const MAX_PAGE_BINDINGS = 20;
 export const POSITION_KEY = 'gptActionMonitorPosition';
 export const POLL_WAIT_SECONDS = 55;
 export const RETRY_MS = 3000;
 export const ACTIVITY_VISIBLE_MS = 4000;
 export const UI_COALESCE_MS = 200;
+export const SOUND_ALERT_DELAY_MS = 3 * 60 * 1000;
 export const MAX_HISTORY = 100;
 export const COMPACT_WIDTH = 30;

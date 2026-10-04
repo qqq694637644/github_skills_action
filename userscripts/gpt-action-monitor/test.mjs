@@ -48,16 +48,20 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   let currentTime = base;
   let enabled = true;
   let armed = false;
+  let delayMs = 3 * 60 * 1000;
+  let durationMs = 5 * 1000;
   let plays = 0;
+  const playedDurations = [];
   const alert = createSoundAlert({
     isEnabled: () => enabled,
     canArm: () => armed,
-    delayMs: 3 * 60 * 1000,
+    getDelayMs: () => delayMs,
+    getDurationMs: () => durationMs,
     now: () => currentTime,
     player: {
       unlock: async () => true,
-      test: async () => true,
-      play: () => { plays += 1; return true; },
+      test: async (duration) => { playedDurations.push(duration); return true; },
+      play: (duration) => { plays += 1; playedDurations.push(duration); return true; },
     },
   });
 
@@ -70,16 +74,23 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   timers.delete(firstTimerId);
   firstTimer();
   assert.equal(plays, 1);
+  assert.equal(playedDurations.at(-1), 5000);
   alert.check();
   assert.equal(plays, 1);
 
   currentTime = base + 3 * 60 * 1000 + 1000;
   assert.equal(alert.observe('2026-10-04T10:03:01Z'), true);
-  currentTime += 3 * 60 * 1000;
+  delayMs = 60 * 1000;
+  durationMs = 9 * 1000;
+  alert.settingsChanged();
+  currentTime += 60 * 1000;
   const [secondTimerId, secondTimer] = timers.entries().next().value;
   timers.delete(secondTimerId);
   secondTimer();
   assert.equal(plays, 2);
+  assert.equal(playedDurations.at(-1), 9000);
+  assert.equal(await alert.test(), true);
+  assert.equal(playedDurations.at(-1), 9000);
 
   enabled = false;
   alert.settingsChanged();

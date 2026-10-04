@@ -1,5 +1,3 @@
-import { SOUND_ALERT_DELAY_MS } from '../constants.js';
-
 function createWebAudioPlayer() {
   let context = null;
 
@@ -20,35 +18,43 @@ function createWebAudioPlayer() {
     return audioContext.state === 'running';
   }
 
-  function emit(audioContext) {
+  function emit(audioContext, durationMs) {
     const start = audioContext.currentTime + 0.02;
+    const end = start + Math.max(0.1, durationMs / 1000);
     const tones = [880, 1175, 880];
-    tones.forEach((frequency, index) => {
-      const toneStart = start + index * 0.3;
-      const oscillator = audioContext.createOscillator();
-      const gain = audioContext.createGain();
-      oscillator.type = 'sine';
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    oscillator.type = 'sine';
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+    gain.gain.setValueAtTime(0.0001, start);
+
+    let index = 0;
+    for (let toneStart = start; toneStart < end; toneStart += 0.3) {
+      if (end - toneStart < 0.03) break;
+      const frequency = tones[index % tones.length];
       oscillator.frequency.setValueAtTime(frequency, toneStart);
       gain.gain.setValueAtTime(0.0001, toneStart);
       gain.gain.exponentialRampToValueAtTime(0.18, toneStart + 0.025);
-      gain.gain.exponentialRampToValueAtTime(0.0001, toneStart + 0.2);
-      oscillator.connect(gain);
-      gain.connect(audioContext.destination);
-      oscillator.start(toneStart);
-      oscillator.stop(toneStart + 0.22);
-    });
+      gain.gain.exponentialRampToValueAtTime(0.0001, Math.min(toneStart + 0.2, end));
+      index += 1;
+      if (index % tones.length === 0) toneStart += 0.2;
+    }
+
+    oscillator.start(start);
+    oscillator.stop(end + 0.02);
   }
 
-  function play() {
+  function play(durationMs) {
     const audioContext = getContext();
     if (!audioContext) return false;
     if (audioContext.state === 'running') {
-      emit(audioContext);
+      emit(audioContext, durationMs);
       return true;
     }
     try {
       audioContext.resume().then(() => {
-        if (audioContext.state === 'running') emit(audioContext);
+        if (audioContext.state === 'running') emit(audioContext, durationMs);
       }).catch(() => {});
     } catch (_) {
       return false;
@@ -56,9 +62,9 @@ function createWebAudioPlayer() {
     return true;
   }
 
-  async function test() {
+  async function test(durationMs) {
     if (!(await unlock())) return false;
-    return play();
+    return play(durationMs);
   }
 
   return { unlock, play, test };
@@ -67,7 +73,8 @@ function createWebAudioPlayer() {
 export function createSoundAlert({
   isEnabled,
   canArm = () => true,
-  delayMs = SOUND_ALERT_DELAY_MS,
+  getDelayMs,
+  getDurationMs,
   now = () => Date.now(),
   player = createWebAudioPlayer(),
 }) {
@@ -90,13 +97,13 @@ export function createSoundAlert({
       || lastActivityAt === null
       || alertedActivityAt === lastActivityAt
     ) return;
-    const remaining = lastActivityAt + delayMs - now();
+    const remaining = lastActivityAt + getDelayMs() - now();
     if (remaining > 0) {
       timer = window.setTimeout(fireIfDue, remaining);
       return;
     }
     alertedActivityAt = lastActivityAt;
-    player.play();
+    player.play(getDurationMs());
   }
 
   function schedule() {
@@ -107,7 +114,7 @@ export function createSoundAlert({
       || lastActivityAt === null
       || alertedActivityAt === lastActivityAt
     ) return;
-    const remaining = Math.max(0, lastActivityAt + delayMs - now());
+    const remaining = Math.max(0, lastActivityAt + getDelayMs() - now());
     timer = window.setTimeout(fireIfDue, remaining);
   }
 
@@ -149,6 +156,6 @@ export function createSoundAlert({
     reset,
     settingsChanged,
     unlock: player.unlock,
-    test: player.test,
+    test: () => player.test(getDurationMs()),
   };
 }

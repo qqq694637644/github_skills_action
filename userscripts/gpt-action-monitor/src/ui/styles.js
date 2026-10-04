@@ -611,6 +611,27 @@ export const SETTINGS_CSS = `
         align-items: center;
         justify-content: space-between;
       }
+      #gam-settings-overlay .gam-sound-setting {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      #gam-settings-overlay .gam-sound-number {
+        width: 72px;
+        min-width: 72px;
+        padding: 6px 8px;
+        border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+        border-radius: 8px;
+        background: Canvas;
+        color: CanvasText;
+        font: inherit;
+        text-align: right;
+      }
+      #gam-settings-overlay .gam-sound-number:focus {
+        border-color: color-mix(in srgb, CanvasText 42%, transparent);
+        outline: none;
+      }
       #gam-settings-overlay .gam-sound-heading-row {
         display: flex;
         align-items: center;

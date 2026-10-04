@@ -74,6 +74,8 @@ export function createSettingsPanel({
   onUsePageEndpoint,
   onRestoreGlobalEndpoint,
   onSetSoundAlertEnabled,
+  onSetSoundAlertDelayMinutes,
+  onSetSoundAlertDurationSeconds,
   onTestSound,
 }) {
   let overlay = null;
@@ -169,7 +171,17 @@ export function createSettingsPanel({
                 </label>
               </div>
               <div class="gam-sound-row">
-                <span>3 分钟无日志时播放提示音</span>
+                <label class="gam-sound-setting">
+                  <input class="gam-sound-number gam-sound-delay" type="number" min="1" max="1440" step="1" inputmode="numeric">
+                  <span>分钟无日志时播放提示音</span>
+                </label>
+              </div>
+              <div class="gam-sound-row">
+                <label class="gam-sound-setting">
+                  <span>提醒持续</span>
+                  <input class="gam-sound-number gam-sound-duration" type="number" min="1" max="60" step="1" inputmode="numeric">
+                  <span>秒</span>
+                </label>
                 <button class="gam-button gam-test-sound" type="button">测试声音</button>
               </div>
               <div class="gam-sound-note">全局配置。已选择 Workspace 收到第一条日志后自动监测；有新日志会自动重新计时。</div>
@@ -200,9 +212,13 @@ export function createSettingsPanel({
     const currentValue = overlay.querySelector('.gam-current-value');
     const editingValue = overlay.querySelector('.gam-editing-value');
     const soundEnabledInput = overlay.querySelector('.gam-sound-enabled');
+    const soundDelayInput = overlay.querySelector('.gam-sound-delay');
+    const soundDurationInput = overlay.querySelector('.gam-sound-duration');
     const testSoundButton = overlay.querySelector('.gam-test-sound');
     const soundNote = overlay.querySelector('.gam-sound-note');
     soundEnabledInput.checked = Boolean(initialState.soundAlertEnabled);
+    soundDelayInput.value = String(initialState.soundAlertDelayMinutes);
+    soundDurationInput.value = String(initialState.soundAlertDurationSeconds);
 
     function currentDraftEndpoint() {
       return draftEndpoints.find((endpoint) => endpoint.id === editingEndpointId) || null;
@@ -433,6 +449,16 @@ export function createSettingsPanel({
       soundNote.textContent = enabled
         ? '已全局开启。已选择 Workspace 收到第一条日志后自动监测；有新日志会自动重新计时。'
         : '已全局关闭。关闭时后台继续使用原来的省电策略。';
+    });
+    soundDelayInput.addEventListener('change', () => {
+      const value = onSetSoundAlertDelayMinutes(soundDelayInput.value);
+      soundDelayInput.value = String(value);
+      soundNote.textContent = `无日志提醒已设为 ${value} 分钟。`;
+    });
+    soundDurationInput.addEventListener('change', () => {
+      const value = onSetSoundAlertDurationSeconds(soundDurationInput.value);
+      soundDurationInput.value = String(value);
+      soundNote.textContent = `提示音持续时间已设为 ${value} 秒。`;
     });
     testSoundButton.addEventListener('click', async () => {
       testSoundButton.disabled = true;

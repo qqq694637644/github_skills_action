@@ -19,13 +19,20 @@
   var GLOBAL_ACTIVE_ENDPOINT_KEY = "gptActionMonitorGlobalActiveEndpointV3";
   var PAGE_BINDINGS_KEY = "gptActionMonitorPageBindingsV1";
   var SOUND_ALERT_ENABLED_KEY = "gptActionMonitorSoundAlertEnabledV1";
+  var SOUND_ALERT_DELAY_MINUTES_KEY = "gptActionMonitorSoundAlertDelayMinutesV1";
+  var SOUND_ALERT_DURATION_SECONDS_KEY = "gptActionMonitorSoundAlertDurationSecondsV1";
   var MAX_PAGE_BINDINGS = 20;
   var POSITION_KEY = "gptActionMonitorPosition";
   var POLL_WAIT_SECONDS = 55;
   var RETRY_MS = 3e3;
   var ACTIVITY_VISIBLE_MS = 4e3;
   var UI_COALESCE_MS = 200;
-  var SOUND_ALERT_DELAY_MS = 3 * 60 * 1e3;
+  var DEFAULT_SOUND_ALERT_DELAY_MINUTES = 3;
+  var DEFAULT_SOUND_ALERT_DURATION_SECONDS = 5;
+  var MIN_SOUND_ALERT_DELAY_MINUTES = 1;
+  var MAX_SOUND_ALERT_DELAY_MINUTES = 1440;
+  var MIN_SOUND_ALERT_DURATION_SECONDS = 1;
+  var MAX_SOUND_ALERT_DURATION_SECONDS = 60;
   var MAX_HISTORY = 100;
   var COMPACT_WIDTH = 30;
 
@@ -1215,34 +1222,40 @@ ${result}`;
       }
       return audioContext.state === "running";
     }
-    function emit(audioContext) {
+    function emit(audioContext, durationMs) {
       const start = audioContext.currentTime + 0.02;
+      const end = start + Math.max(0.1, durationMs / 1e3);
       const tones = [880, 1175, 880];
-      tones.forEach((frequency, index) => {
-        const toneStart = start + index * 0.3;
-        const oscillator = audioContext.createOscillator();
-        const gain = audioContext.createGain();
-        oscillator.type = "sine";
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = "sine";
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      gain.gain.setValueAtTime(1e-4, start);
+      let index = 0;
+      for (let toneStart = start; toneStart < end; toneStart += 0.3) {
+        if (end - toneStart < 0.03) break;
+        const frequency = tones[index % tones.length];
         oscillator.frequency.setValueAtTime(frequency, toneStart);
         gain.gain.setValueAtTime(1e-4, toneStart);
         gain.gain.exponentialRampToValueAtTime(0.18, toneStart + 0.025);
-        gain.gain.exponentialRampToValueAtTime(1e-4, toneStart + 0.2);
-        oscillator.connect(gain);
-        gain.connect(audioContext.destination);
-        oscillator.start(toneStart);
-        oscillator.stop(toneStart + 0.22);
-      });
+        gain.gain.exponentialRampToValueAtTime(1e-4, Math.min(toneStart + 0.2, end));
+        index += 1;
+        if (index % tones.length === 0) toneStart += 0.2;
+      }
+      oscillator.start(start);
+      oscillator.stop(end + 0.02);
     }
-    function play() {
+    function play(durationMs) {
       const audioContext = getContext();
       if (!audioContext) return false;
       if (audioContext.state === "running") {
-        emit(audioContext);
+        emit(audioContext, durationMs);
         return true;
       }
       try {
         audioContext.resume().then(() => {
-          if (audioContext.state === "running") emit(audioContext);
+          if (audioContext.state === "running") emit(audioContext, durationMs);
         }).catch(() => {
         });
       } catch (_) {
@@ -1250,16 +1263,17 @@ ${result}`;
       }
       return true;
     }
-    async function test() {
+    async function test(durationMs) {
       if (!await unlock()) return false;
-      return play();
+      return play(durationMs);
     }
     return { unlock, play, test };
   }
   function createSoundAlert({
     isEnabled,
     canArm = () => true,
-    delayMs = SOUND_ALERT_DELAY_MS,
+    getDelayMs,
+    getDurationMs,
     now = () => Date.now(),
     player = createWebAudioPlayer()
   }) {
@@ -1275,18 +1289,18 @@ ${result}`;
     function fireIfDue() {
       clearTimer();
       if (!isEnabled() || !canArm() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
-      const remaining = lastActivityAt + delayMs - now();
+      const remaining = lastActivityAt + getDelayMs() - now();
       if (remaining > 0) {
         timer = window.setTimeout(fireIfDue, remaining);
         return;
       }
       alertedActivityAt = lastActivityAt;
-      player.play();
+      player.play(getDurationMs());
     }
     function schedule() {
       clearTimer();
       if (!isEnabled() || !canArm() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
-      const remaining = Math.max(0, lastActivityAt + delayMs - now());
+      const remaining = Math.max(0, lastActivityAt + getDelayMs() - now());
       timer = window.setTimeout(fireIfDue, remaining);
     }
     function observe(timestamp) {
@@ -1323,7 +1337,7 @@ ${result}`;
       reset,
       settingsChanged,
       unlock: player.unlock,
-      test: player.test
+      test: () => player.test(getDurationMs())
     };
   }
 
@@ -2083,6 +2097,27 @@ ${result}`;
         align-items: center;
         justify-content: space-between;
       }
+      #gam-settings-overlay .gam-sound-setting {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+      #gam-settings-overlay .gam-sound-number {
+        width: 72px;
+        min-width: 72px;
+        padding: 6px 8px;
+        border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+        border-radius: 8px;
+        background: Canvas;
+        color: CanvasText;
+        font: inherit;
+        text-align: right;
+      }
+      #gam-settings-overlay .gam-sound-number:focus {
+        border-color: color-mix(in srgb, CanvasText 42%, transparent);
+        outline: none;
+      }
       #gam-settings-overlay .gam-sound-heading-row {
         display: flex;
         align-items: center;
@@ -2801,6 +2836,8 @@ ${result}`;
     onUsePageEndpoint,
     onRestoreGlobalEndpoint,
     onSetSoundAlertEnabled,
+    onSetSoundAlertDelayMinutes,
+    onSetSoundAlertDurationSeconds,
     onTestSound
   }) {
     let overlay = null;
@@ -2888,7 +2925,17 @@ ${result}`;
                 </label>
               </div>
               <div class="gam-sound-row">
-                <span>3 \u5206\u949F\u65E0\u65E5\u5FD7\u65F6\u64AD\u653E\u63D0\u793A\u97F3</span>
+                <label class="gam-sound-setting">
+                  <input class="gam-sound-number gam-sound-delay" type="number" min="1" max="1440" step="1" inputmode="numeric">
+                  <span>\u5206\u949F\u65E0\u65E5\u5FD7\u65F6\u64AD\u653E\u63D0\u793A\u97F3</span>
+                </label>
+              </div>
+              <div class="gam-sound-row">
+                <label class="gam-sound-setting">
+                  <span>\u63D0\u9192\u6301\u7EED</span>
+                  <input class="gam-sound-number gam-sound-duration" type="number" min="1" max="60" step="1" inputmode="numeric">
+                  <span>\u79D2</span>
+                </label>
                 <button class="gam-button gam-test-sound" type="button">\u6D4B\u8BD5\u58F0\u97F3</button>
               </div>
               <div class="gam-sound-note">\u5168\u5C40\u914D\u7F6E\u3002\u5DF2\u9009\u62E9 Workspace \u6536\u5230\u7B2C\u4E00\u6761\u65E5\u5FD7\u540E\u81EA\u52A8\u76D1\u6D4B\uFF1B\u6709\u65B0\u65E5\u5FD7\u4F1A\u81EA\u52A8\u91CD\u65B0\u8BA1\u65F6\u3002</div>
@@ -2917,9 +2964,13 @@ ${result}`;
       const currentValue = overlay.querySelector(".gam-current-value");
       const editingValue = overlay.querySelector(".gam-editing-value");
       const soundEnabledInput = overlay.querySelector(".gam-sound-enabled");
+      const soundDelayInput = overlay.querySelector(".gam-sound-delay");
+      const soundDurationInput = overlay.querySelector(".gam-sound-duration");
       const testSoundButton = overlay.querySelector(".gam-test-sound");
       const soundNote = overlay.querySelector(".gam-sound-note");
       soundEnabledInput.checked = Boolean(initialState.soundAlertEnabled);
+      soundDelayInput.value = String(initialState.soundAlertDelayMinutes);
+      soundDurationInput.value = String(initialState.soundAlertDurationSeconds);
       function currentDraftEndpoint() {
         return draftEndpoints.find((endpoint) => endpoint.id === editingEndpointId) || null;
       }
@@ -3128,6 +3179,16 @@ ${result}`;
         const enabled = soundEnabledInput.checked;
         onSetSoundAlertEnabled(enabled);
         soundNote.textContent = enabled ? "\u5DF2\u5168\u5C40\u5F00\u542F\u3002\u5DF2\u9009\u62E9 Workspace \u6536\u5230\u7B2C\u4E00\u6761\u65E5\u5FD7\u540E\u81EA\u52A8\u76D1\u6D4B\uFF1B\u6709\u65B0\u65E5\u5FD7\u4F1A\u81EA\u52A8\u91CD\u65B0\u8BA1\u65F6\u3002" : "\u5DF2\u5168\u5C40\u5173\u95ED\u3002\u5173\u95ED\u65F6\u540E\u53F0\u7EE7\u7EED\u4F7F\u7528\u539F\u6765\u7684\u7701\u7535\u7B56\u7565\u3002";
+      });
+      soundDelayInput.addEventListener("change", () => {
+        const value = onSetSoundAlertDelayMinutes(soundDelayInput.value);
+        soundDelayInput.value = String(value);
+        soundNote.textContent = `\u65E0\u65E5\u5FD7\u63D0\u9192\u5DF2\u8BBE\u4E3A ${value} \u5206\u949F\u3002`;
+      });
+      soundDurationInput.addEventListener("change", () => {
+        const value = onSetSoundAlertDurationSeconds(soundDurationInput.value);
+        soundDurationInput.value = String(value);
+        soundNote.textContent = `\u63D0\u793A\u97F3\u6301\u7EED\u65F6\u95F4\u5DF2\u8BBE\u4E3A ${value} \u79D2\u3002`;
       });
       testSoundButton.addEventListener("click", async () => {
         testSoundButton.disabled = true;
@@ -3419,6 +3480,23 @@ ${result}`;
     let activitySessionKey = null;
     let activitySessionCursor = null;
     let soundAlertEnabled = Boolean(GM_getValue(SOUND_ALERT_ENABLED_KEY, false));
+    function boundedInteger(value, fallback, min, max) {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) return fallback;
+      return Math.min(max, Math.max(min, parsed));
+    }
+    let soundAlertDelayMinutes = boundedInteger(
+      GM_getValue(SOUND_ALERT_DELAY_MINUTES_KEY, DEFAULT_SOUND_ALERT_DELAY_MINUTES),
+      DEFAULT_SOUND_ALERT_DELAY_MINUTES,
+      MIN_SOUND_ALERT_DELAY_MINUTES,
+      MAX_SOUND_ALERT_DELAY_MINUTES
+    );
+    let soundAlertDurationSeconds = boundedInteger(
+      GM_getValue(SOUND_ALERT_DURATION_SECONDS_KEY, DEFAULT_SOUND_ALERT_DURATION_SECONDS),
+      DEFAULT_SOUND_ALERT_DURATION_SECONDS,
+      MIN_SOUND_ALERT_DURATION_SECONDS,
+      MAX_SOUND_ALERT_DURATION_SECONDS
+    );
     function pageUrl() {
       const pathname = window.location.pathname.length > 1 ? window.location.pathname.replace(/\/+$/, "") : window.location.pathname;
       return `${window.location.origin}${pathname}`;
@@ -3459,7 +3537,9 @@ ${result}`;
     let monitorUi = null;
     const soundAlert = createSoundAlert({
       isEnabled: () => soundAlertEnabled,
-      canArm: () => Boolean(activeWorkspaceId && monitorUi?.hasLastActivityTime())
+      canArm: () => Boolean(activeWorkspaceId && monitorUi?.hasLastActivityTime()),
+      getDelayMs: () => soundAlertDelayMinutes * 60 * 1e3,
+      getDurationMs: () => soundAlertDurationSeconds * 1e3
     });
     const skillsMenu = createSkillsMenu({
       loadSkills: (options) => skillCatalogClient.list(options),
@@ -3603,6 +3683,27 @@ ${result}`;
       soundAlert.settingsChanged();
       if (soundAlertEnabled) soundAlert.unlock();
     }
+    function setSoundAlertDelayMinutes(value) {
+      soundAlertDelayMinutes = boundedInteger(
+        value,
+        soundAlertDelayMinutes,
+        MIN_SOUND_ALERT_DELAY_MINUTES,
+        MAX_SOUND_ALERT_DELAY_MINUTES
+      );
+      GM_setValue(SOUND_ALERT_DELAY_MINUTES_KEY, soundAlertDelayMinutes);
+      soundAlert.settingsChanged();
+      return soundAlertDelayMinutes;
+    }
+    function setSoundAlertDurationSeconds(value) {
+      soundAlertDurationSeconds = boundedInteger(
+        value,
+        soundAlertDurationSeconds,
+        MIN_SOUND_ALERT_DURATION_SECONDS,
+        MAX_SOUND_ALERT_DURATION_SECONDS
+      );
+      GM_setValue(SOUND_ALERT_DURATION_SECONDS_KEY, soundAlertDurationSeconds);
+      return soundAlertDurationSeconds;
+    }
     const settingsPanel = createSettingsPanel({
       getState: () => ({
         endpoints,
@@ -3610,13 +3711,17 @@ ${result}`;
         pageActiveEndpointId,
         effectiveEndpointId: getEffectiveEndpointId(),
         pageUrl: currentPageUrl,
-        soundAlertEnabled
+        soundAlertEnabled,
+        soundAlertDelayMinutes,
+        soundAlertDurationSeconds
       }),
       onSaveEndpoints: saveEndpointLibrary,
       onSetGlobalEndpoint: setGlobalActiveEndpoint,
       onUsePageEndpoint: usePageEndpoint,
       onRestoreGlobalEndpoint: restoreGlobalEndpoint,
       onSetSoundAlertEnabled: setSoundAlertEnabled,
+      onSetSoundAlertDelayMinutes: setSoundAlertDelayMinutes,
+      onSetSoundAlertDurationSeconds: setSoundAlertDurationSeconds,
       onTestSound: () => soundAlert.test()
     });
     function handlePageNavigation() {

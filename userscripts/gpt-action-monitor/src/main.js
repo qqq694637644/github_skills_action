@@ -5,7 +5,17 @@ import { createSkillCatalogClient } from './api/skill-catalog-client.js';
 import { createWorkspaceClient } from './api/workspace-client.js';
 import { createComposerAdapter, loadSkillsCall } from './adapters/composer.js';
 import { createSoundAlert } from './alert/sound-alert.js';
-import { SOUND_ALERT_ENABLED_KEY } from './constants.js';
+import {
+  DEFAULT_SOUND_ALERT_DELAY_MINUTES,
+  DEFAULT_SOUND_ALERT_DURATION_SECONDS,
+  MAX_SOUND_ALERT_DELAY_MINUTES,
+  MAX_SOUND_ALERT_DURATION_SECONDS,
+  MIN_SOUND_ALERT_DELAY_MINUTES,
+  MIN_SOUND_ALERT_DURATION_SECONDS,
+  SOUND_ALERT_DELAY_MINUTES_KEY,
+  SOUND_ALERT_DURATION_SECONDS_KEY,
+  SOUND_ALERT_ENABLED_KEY,
+} from './constants.js';
 import {
   getEndpoint,
   loadEndpoints,
@@ -34,6 +44,25 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   let activitySessionKey = null;
   let activitySessionCursor = null;
   let soundAlertEnabled = Boolean(GM_getValue(SOUND_ALERT_ENABLED_KEY, false));
+
+  function boundedInteger(value, fallback, min, max) {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(max, Math.max(min, parsed));
+  }
+
+  let soundAlertDelayMinutes = boundedInteger(
+    GM_getValue(SOUND_ALERT_DELAY_MINUTES_KEY, DEFAULT_SOUND_ALERT_DELAY_MINUTES),
+    DEFAULT_SOUND_ALERT_DELAY_MINUTES,
+    MIN_SOUND_ALERT_DELAY_MINUTES,
+    MAX_SOUND_ALERT_DELAY_MINUTES,
+  );
+  let soundAlertDurationSeconds = boundedInteger(
+    GM_getValue(SOUND_ALERT_DURATION_SECONDS_KEY, DEFAULT_SOUND_ALERT_DURATION_SECONDS),
+    DEFAULT_SOUND_ALERT_DURATION_SECONDS,
+    MIN_SOUND_ALERT_DURATION_SECONDS,
+    MAX_SOUND_ALERT_DURATION_SECONDS,
+  );
 
   function pageUrl() {
     const pathname = window.location.pathname.length > 1
@@ -91,6 +120,8 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   const soundAlert = createSoundAlert({
     isEnabled: () => soundAlertEnabled,
     canArm: () => Boolean(activeWorkspaceId && monitorUi?.hasLastActivityTime()),
+    getDelayMs: () => soundAlertDelayMinutes * 60 * 1000,
+    getDurationMs: () => soundAlertDurationSeconds * 1000,
   });
   const skillsMenu = createSkillsMenu({
     loadSkills: (options) => skillCatalogClient.list(options),
@@ -258,6 +289,29 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     if (soundAlertEnabled) soundAlert.unlock();
   }
 
+  function setSoundAlertDelayMinutes(value) {
+    soundAlertDelayMinutes = boundedInteger(
+      value,
+      soundAlertDelayMinutes,
+      MIN_SOUND_ALERT_DELAY_MINUTES,
+      MAX_SOUND_ALERT_DELAY_MINUTES,
+    );
+    GM_setValue(SOUND_ALERT_DELAY_MINUTES_KEY, soundAlertDelayMinutes);
+    soundAlert.settingsChanged();
+    return soundAlertDelayMinutes;
+  }
+
+  function setSoundAlertDurationSeconds(value) {
+    soundAlertDurationSeconds = boundedInteger(
+      value,
+      soundAlertDurationSeconds,
+      MIN_SOUND_ALERT_DURATION_SECONDS,
+      MAX_SOUND_ALERT_DURATION_SECONDS,
+    );
+    GM_setValue(SOUND_ALERT_DURATION_SECONDS_KEY, soundAlertDurationSeconds);
+    return soundAlertDurationSeconds;
+  }
+
   const settingsPanel = createSettingsPanel({
     getState: () => ({
       endpoints,
@@ -266,12 +320,16 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       effectiveEndpointId: getEffectiveEndpointId(),
       pageUrl: currentPageUrl,
       soundAlertEnabled,
+      soundAlertDelayMinutes,
+      soundAlertDurationSeconds,
     }),
     onSaveEndpoints: saveEndpointLibrary,
     onSetGlobalEndpoint: setGlobalActiveEndpoint,
     onUsePageEndpoint: usePageEndpoint,
     onRestoreGlobalEndpoint: restoreGlobalEndpoint,
     onSetSoundAlertEnabled: setSoundAlertEnabled,
+    onSetSoundAlertDelayMinutes: setSoundAlertDelayMinutes,
+    onSetSoundAlertDurationSeconds: setSoundAlertDurationSeconds,
     onTestSound: () => soundAlert.test(),
   });
 

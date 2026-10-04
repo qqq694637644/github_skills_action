@@ -1258,6 +1258,7 @@ ${result}`;
   }
   function createSoundAlert({
     isEnabled,
+    canArm = () => true,
     delayMs = SOUND_ALERT_DELAY_MS,
     now = () => Date.now(),
     player = createWebAudioPlayer()
@@ -1273,7 +1274,7 @@ ${result}`;
     }
     function fireIfDue() {
       clearTimer();
-      if (!isEnabled() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
+      if (!isEnabled() || !canArm() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
       const remaining = lastActivityAt + delayMs - now();
       if (remaining > 0) {
         timer = window.setTimeout(fireIfDue, remaining);
@@ -1284,11 +1285,12 @@ ${result}`;
     }
     function schedule() {
       clearTimer();
-      if (!isEnabled() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
+      if (!isEnabled() || !canArm() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
       const remaining = Math.max(0, lastActivityAt + delayMs - now());
       timer = window.setTimeout(fireIfDue, remaining);
     }
     function observe(timestamp) {
+      if (!canArm()) return false;
       const parsed = Date.parse(timestamp);
       if (!Number.isFinite(parsed)) return false;
       if (lastActivityAt !== null && parsed < lastActivityAt) return false;
@@ -1298,7 +1300,7 @@ ${result}`;
       return true;
     }
     function check() {
-      if (!isEnabled()) {
+      if (!isEnabled() || !canArm()) {
         clearTimer();
         return;
       }
@@ -1312,7 +1314,7 @@ ${result}`;
       alertedActivityAt = null;
     }
     function settingsChanged() {
-      if (isEnabled()) schedule();
+      if (isEnabled() && canArm()) schedule();
       else clearTimer();
     }
     return {
@@ -2375,6 +2377,9 @@ ${result}`;
       lastActivityTime.textContent = "";
       lastActivityTime.removeAttribute("title");
     }
+    function hasLastActivityTime() {
+      return Boolean(lastActivityTime.textContent);
+    }
     function updateChipSide() {
       if (panel.classList.contains("gam-open")) return;
       const rect = panel.getBoundingClientRect();
@@ -2682,6 +2687,7 @@ ${result}`;
       getStatus,
       setLastActivityTimestamp,
       clearLastActivityTime,
+      hasLastActivityTime,
       recordHint,
       clearHint,
       queueActivity,
@@ -3409,10 +3415,11 @@ ${result}`;
       getProfile: getEffectiveEndpoint
     });
     const activityStore = createActivityStore();
-    const soundAlert = createSoundAlert({
-      isEnabled: () => soundAlertEnabled
-    });
     let monitorUi = null;
+    const soundAlert = createSoundAlert({
+      isEnabled: () => soundAlertEnabled,
+      canArm: () => Boolean(activeWorkspaceId && monitorUi?.hasLastActivityTime())
+    });
     const skillsMenu = createSkillsMenu({
       loadSkills: (options) => skillCatalogClient.list(options),
       onBeforeOpen: () => composerAdapter.captureSelection(),

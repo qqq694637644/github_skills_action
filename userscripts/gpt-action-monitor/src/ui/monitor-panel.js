@@ -92,6 +92,10 @@ export function createMonitorPanel({
     lastActivityTime.removeAttribute('title');
   }
 
+  function hasLastActivityTime() {
+    return Boolean(lastActivityTime.textContent);
+  }
+
   function updateChipSide() {
     if (panel.classList.contains('gam-open')) return;
     const rect = panel.getBoundingClientRect();
@@ -434,6 +438,7 @@ export function createMonitorPanel({
     getStatus,
     setLastActivityTimestamp,
     clearLastActivityTime,
+    hasLastActivityTime,
     recordHint,
     clearHint,
     queueActivity,

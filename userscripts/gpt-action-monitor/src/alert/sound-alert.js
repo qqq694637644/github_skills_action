@@ -66,6 +66,7 @@ function createWebAudioPlayer() {
 
 export function createSoundAlert({
   isEnabled,
+  canArm = () => true,
   delayMs = SOUND_ALERT_DELAY_MS,
   now = () => Date.now(),
   player = createWebAudioPlayer(),
@@ -83,7 +84,12 @@ export function createSoundAlert({
 
   function fireIfDue() {
     clearTimer();
-    if (!isEnabled() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
+    if (
+      !isEnabled()
+      || !canArm()
+      || lastActivityAt === null
+      || alertedActivityAt === lastActivityAt
+    ) return;
     const remaining = lastActivityAt + delayMs - now();
     if (remaining > 0) {
       timer = window.setTimeout(fireIfDue, remaining);
@@ -95,12 +101,18 @@ export function createSoundAlert({
 
   function schedule() {
     clearTimer();
-    if (!isEnabled() || lastActivityAt === null || alertedActivityAt === lastActivityAt) return;
+    if (
+      !isEnabled()
+      || !canArm()
+      || lastActivityAt === null
+      || alertedActivityAt === lastActivityAt
+    ) return;
     const remaining = Math.max(0, lastActivityAt + delayMs - now());
     timer = window.setTimeout(fireIfDue, remaining);
   }
 
   function observe(timestamp) {
+    if (!canArm()) return false;
     const parsed = Date.parse(timestamp);
     if (!Number.isFinite(parsed)) return false;
     if (lastActivityAt !== null && parsed < lastActivityAt) return false;
@@ -111,7 +123,7 @@ export function createSoundAlert({
   }
 
   function check() {
-    if (!isEnabled()) {
+    if (!isEnabled() || !canArm()) {
       clearTimer();
       return;
     }
@@ -127,7 +139,7 @@ export function createSoundAlert({
   }
 
   function settingsChanged() {
-    if (isEnabled()) schedule();
+    if (isEnabled() && canArm()) schedule();
     else clearTimer();
   }
 

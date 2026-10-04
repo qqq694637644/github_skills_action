@@ -40,16 +40,18 @@ assert.deepEqual(validateBackend('https://skills.example.com/'), {
 assert.equal(validateBackend('ftp://skills.example.com').ok, false);
 assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintenance"])');
 
-// Sound alerts are armed by server activity timestamps, fire once per quiet
-// period, and re-arm only after a newer activity arrives.
+// Sound alerts only arm once the UI has a visible server-activity time, then
+// fire once per quiet period and re-arm after a newer activity arrives.
 {
   const { timers } = installDomFixture();
   const base = Date.parse('2026-10-04T10:00:00Z');
   let currentTime = base;
   let enabled = true;
+  let armed = false;
   let plays = 0;
   const alert = createSoundAlert({
     isEnabled: () => enabled,
+    canArm: () => armed,
     delayMs: 3 * 60 * 1000,
     now: () => currentTime,
     player: {
@@ -59,6 +61,9 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
     },
   });
 
+  assert.equal(alert.observe('2026-10-04T10:00:00Z'), false);
+  assert.equal(timers.size, 0);
+  armed = true;
   assert.equal(alert.observe('2026-10-04T10:00:00Z'), true);
   currentTime = base + 3 * 60 * 1000;
   const [firstTimerId, firstTimer] = timers.entries().next().value;

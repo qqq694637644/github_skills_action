@@ -87,10 +87,11 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   });
 
   const activityStore = createActivityStore();
+  let monitorUi = null;
   const soundAlert = createSoundAlert({
     isEnabled: () => soundAlertEnabled,
+    canArm: () => Boolean(activeWorkspaceId && monitorUi?.hasLastActivityTime()),
   });
-  let monitorUi = null;
   const skillsMenu = createSkillsMenu({
     loadSkills: (options) => skillCatalogClient.list(options),
     onBeforeOpen: () => composerAdapter.captureSelection(),

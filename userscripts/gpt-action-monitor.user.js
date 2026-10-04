@@ -1758,16 +1758,14 @@ ${result}`;
     }
     #gpt-action-monitor .gam-monitor-hint[hidden],
     #gpt-action-monitor .gam-activity-section[hidden] { display: none; }
-    #gpt-action-monitor .gam-activity-section + .gam-activity-section {
+    #gpt-action-monitor .gam-now-section:not([hidden]) + .gam-recent-section {
       margin-top: 9px;
       padding-top: 8px;
       border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
     }
     #gpt-action-monitor .gam-now-section {
-      flex: 0 1 auto;
-      max-height: 45%;
-      overflow-y: auto;
-      scrollbar-width: thin;
+      flex: 0 0 auto;
+      overflow: visible;
     }
     #gpt-action-monitor .gam-recent-section {
       min-height: 0;
@@ -1781,6 +1779,12 @@ ${result}`;
       font: 600 10px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       letter-spacing: .08em;
     }
+    #gpt-action-monitor .gam-now-overflow {
+      padding: 2px 8px 4px 23px;
+      color: color-mix(in srgb, CanvasText 44%, transparent);
+      font: 500 10px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #gpt-action-monitor .gam-now-overflow[hidden] { display: none; }
     #gpt-action-monitor .gam-activity-cell {
       padding: 7px 8px 8px;
       border-radius: 8px;
@@ -2210,6 +2214,14 @@ ${result}`;
 
   // src/ui/activity-panel.js
   var LATEST_SCROLL_THRESHOLD_PX = 2;
+  var MAX_NOW_CELLS = 3;
+  function selectNowCells(cells, limit = MAX_NOW_CELLS) {
+    return [...cells || []].sort((left, right) => {
+      const leftTime = Date.parse(left?.updatedAt || "") || 0;
+      const rightTime = Date.parse(right?.updatedAt || "") || 0;
+      return rightTime - leftTime;
+    }).slice(0, limit);
+  }
   function createCellNode() {
     const node = document.createElement("div");
     node.className = "gam-activity-cell";
@@ -2290,6 +2302,7 @@ ${result}`;
     <section class="gam-activity-section gam-now-section">
       <div class="gam-activity-section-label">NOW</div>
       <div class="gam-now-list"></div>
+      <div class="gam-now-overflow" hidden></div>
     </section>
     <section class="gam-activity-section gam-recent-section">
       <div class="gam-activity-section-label">RECENT</div>
@@ -2300,6 +2313,7 @@ ${result}`;
     const nowSection = root.querySelector(".gam-now-section");
     const recentSection = root.querySelector(".gam-recent-section");
     const nowList = root.querySelector(".gam-now-list");
+    const nowOverflow = root.querySelector(".gam-now-overflow");
     const recentList = root.querySelector(".gam-recent-list");
     const nowNodes = /* @__PURE__ */ new Map();
     const recentNodes = /* @__PURE__ */ new Map();
@@ -2347,9 +2361,14 @@ ${result}`;
     }
     function render(snapshot) {
       const recentViewport = captureRecentViewport();
-      syncList(nowList, snapshot.active || [], nowNodes);
+      const active = snapshot.active || [];
+      const visibleActive = selectNowCells(active);
+      const hiddenActiveCount = Math.max(0, active.length - visibleActive.length);
+      syncList(nowList, visibleActive, nowNodes);
       syncList(recentList, snapshot.recent || [], recentNodes);
-      nowSection.hidden = !(snapshot.active || []).length;
+      nowOverflow.textContent = hiddenActiveCount ? `+${hiddenActiveCount} running` : "";
+      nowOverflow.hidden = !hiddenActiveCount;
+      nowSection.hidden = !active.length;
       recentSection.hidden = !(snapshot.recent || []).length;
       restoreRecentViewport(recentViewport);
     }
@@ -2362,6 +2381,8 @@ ${result}`;
       recentNodes.clear();
       nowList.replaceChildren();
       recentList.replaceChildren();
+      nowOverflow.textContent = "";
+      nowOverflow.hidden = true;
       nowSection.hidden = true;
       recentSection.hidden = true;
     }

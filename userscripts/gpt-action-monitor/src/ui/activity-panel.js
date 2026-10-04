@@ -5,6 +5,17 @@ import {
 } from '../activity/presentation.js';
 
 const LATEST_SCROLL_THRESHOLD_PX = 2;
+const MAX_NOW_CELLS = 3;
+
+export function selectNowCells(cells, limit = MAX_NOW_CELLS) {
+  return [...(cells || [])]
+    .sort((left, right) => {
+      const leftTime = Date.parse(left?.updatedAt || '') || 0;
+      const rightTime = Date.parse(right?.updatedAt || '') || 0;
+      return rightTime - leftTime;
+    })
+    .slice(0, limit);
+}
 
 function createCellNode() {
   const node = document.createElement('div');
@@ -97,6 +108,7 @@ export function createActivityPanel({ root, onSelectWorkspace = null }) {
     <section class="gam-activity-section gam-now-section">
       <div class="gam-activity-section-label">NOW</div>
       <div class="gam-now-list"></div>
+      <div class="gam-now-overflow" hidden></div>
     </section>
     <section class="gam-activity-section gam-recent-section">
       <div class="gam-activity-section-label">RECENT</div>
@@ -108,6 +120,7 @@ export function createActivityPanel({ root, onSelectWorkspace = null }) {
   const nowSection = root.querySelector('.gam-now-section');
   const recentSection = root.querySelector('.gam-recent-section');
   const nowList = root.querySelector('.gam-now-list');
+  const nowOverflow = root.querySelector('.gam-now-overflow');
   const recentList = root.querySelector('.gam-recent-list');
   const nowNodes = new Map();
   const recentNodes = new Map();
@@ -161,9 +174,14 @@ export function createActivityPanel({ root, onSelectWorkspace = null }) {
 
   function render(snapshot) {
     const recentViewport = captureRecentViewport();
-    syncList(nowList, snapshot.active || [], nowNodes);
+    const active = snapshot.active || [];
+    const visibleActive = selectNowCells(active);
+    const hiddenActiveCount = Math.max(0, active.length - visibleActive.length);
+    syncList(nowList, visibleActive, nowNodes);
     syncList(recentList, snapshot.recent || [], recentNodes);
-    nowSection.hidden = !(snapshot.active || []).length;
+    nowOverflow.textContent = hiddenActiveCount ? `+${hiddenActiveCount} running` : '';
+    nowOverflow.hidden = !hiddenActiveCount;
+    nowSection.hidden = !active.length;
     recentSection.hidden = !(snapshot.recent || []).length;
     restoreRecentViewport(recentViewport);
   }
@@ -178,6 +196,8 @@ export function createActivityPanel({ root, onSelectWorkspace = null }) {
     recentNodes.clear();
     nowList.replaceChildren();
     recentList.replaceChildren();
+    nowOverflow.textContent = '';
+    nowOverflow.hidden = true;
     nowSection.hidden = true;
     recentSection.hidden = true;
   }

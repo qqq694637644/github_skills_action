@@ -9,6 +9,7 @@ import { createActionLogClient } from './src/api/action-log-client.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
 import { loadSkillsCall } from './src/adapters/composer.js';
 import { createSoundAlert } from './src/alert/sound-alert.js';
+import { selectNowCells } from './src/ui/activity-panel.js';
 import {
   loadEndpoints,
   loadGlobalActiveEndpointId,
@@ -636,6 +637,19 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
     'command:newer',
     'command:older',
   ]);
+}
+
+// NOW is a small live area, not a second scrollable history. Keep only the
+// three most recently updated active cells and summarize the rest in the UI.
+{
+  const active = [
+    { id: 'a', updatedAt: '2026-10-04T10:00:01Z' },
+    { id: 'b', updatedAt: '2026-10-04T10:00:05Z' },
+    { id: 'c', updatedAt: '2026-10-04T10:00:03Z' },
+    { id: 'd', updatedAt: '2026-10-04T10:00:04Z' },
+    { id: 'e', updatedAt: '2026-10-04T10:00:02Z' },
+  ];
+  assert.deepEqual(selectNowCells(active).map((cell) => cell.id), ['b', 'd', 'c']);
 }
 
 // Command JSON is presentation data, not an Action protocol failure. Render

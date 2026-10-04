@@ -271,16 +271,14 @@ export const MONITOR_CSS = `
     }
     #gpt-action-monitor .gam-monitor-hint[hidden],
     #gpt-action-monitor .gam-activity-section[hidden] { display: none; }
-    #gpt-action-monitor .gam-activity-section + .gam-activity-section {
+    #gpt-action-monitor .gam-now-section:not([hidden]) + .gam-recent-section {
       margin-top: 9px;
       padding-top: 8px;
       border-top: 1px solid color-mix(in srgb, CanvasText 8%, transparent);
     }
     #gpt-action-monitor .gam-now-section {
-      flex: 0 1 auto;
-      max-height: 45%;
-      overflow-y: auto;
-      scrollbar-width: thin;
+      flex: 0 0 auto;
+      overflow: visible;
     }
     #gpt-action-monitor .gam-recent-section {
       min-height: 0;
@@ -294,6 +292,12 @@ export const MONITOR_CSS = `
       font: 600 10px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       letter-spacing: .08em;
     }
+    #gpt-action-monitor .gam-now-overflow {
+      padding: 2px 8px 4px 23px;
+      color: color-mix(in srgb, CanvasText 44%, transparent);
+      font: 500 10px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #gpt-action-monitor .gam-now-overflow[hidden] { display: none; }
     #gpt-action-monitor .gam-activity-cell {
       padding: 7px 8px 8px;
       border-radius: 8px;

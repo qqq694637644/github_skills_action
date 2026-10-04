@@ -161,12 +161,15 @@ export function createSettingsPanel({
             </section>
 
             <section class="gam-settings-section gam-sound-section">
-              <div class="gam-section-heading">声音提醒</div>
-              <div class="gam-sound-row">
-                <label class="gam-sound-toggle">
-                  <input class="gam-sound-enabled" type="checkbox">
-                  <span>3 分钟无日志时播放提示音</span>
+              <div class="gam-sound-heading-row">
+                <div class="gam-section-heading">声音提醒</div>
+                <label class="gam-sound-switch" title="全局开启或关闭声音提醒">
+                  <input class="gam-sound-enabled" type="checkbox" aria-label="全局开启声音提醒">
+                  <span class="gam-sound-switch-track" aria-hidden="true"></span>
                 </label>
+              </div>
+              <div class="gam-sound-row">
+                <span>3 分钟无日志时播放提示音</span>
                 <button class="gam-button gam-test-sound" type="button">测试声音</button>
               </div>
               <div class="gam-sound-note">全局配置。已选择 Workspace 收到第一条日志后自动监测；有新日志会自动重新计时。</div>

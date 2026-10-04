@@ -2083,18 +2083,56 @@ ${result}`;
         align-items: center;
         justify-content: space-between;
       }
-      #gam-settings-overlay .gam-sound-toggle {
-        display: inline-flex;
+      #gam-settings-overlay .gam-sound-heading-row {
+        display: flex;
         align-items: center;
-        gap: 8px;
-        min-width: 0;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #gam-settings-overlay .gam-sound-switch {
+        position: relative;
+        display: inline-block;
+        width: 38px;
+        height: 22px;
+        flex: 0 0 auto;
         cursor: pointer;
       }
       #gam-settings-overlay .gam-sound-enabled {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+      #gam-settings-overlay .gam-sound-switch-track {
+        position: absolute;
+        inset: 0;
+        border: 1px solid color-mix(in srgb, CanvasText 24%, transparent);
+        border-radius: 999px;
+        background: color-mix(in srgb, CanvasText 10%, Canvas 90%);
+        transition: background .12s ease, border-color .12s ease;
+      }
+      #gam-settings-overlay .gam-sound-switch-track::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
         width: 16px;
         height: 16px;
-        margin: 0;
-        flex: 0 0 auto;
+        border-radius: 50%;
+        background: Canvas;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, .24);
+        transition: transform .12s ease;
+      }
+      #gam-settings-overlay .gam-sound-enabled:checked + .gam-sound-switch-track {
+        border-color: #4f8e68;
+        background: #4f8e68;
+      }
+      #gam-settings-overlay .gam-sound-enabled:checked + .gam-sound-switch-track::after {
+        transform: translateX(16px);
+      }
+      #gam-settings-overlay .gam-sound-enabled:focus-visible + .gam-sound-switch-track {
+        box-shadow: 0 0 0 2px rgba(35, 122, 66, .18);
       }
       #gam-settings-overlay .gam-sound-note {
         color: color-mix(in srgb, CanvasText 58%, transparent);
@@ -2842,12 +2880,15 @@ ${result}`;
             </section>
 
             <section class="gam-settings-section gam-sound-section">
-              <div class="gam-section-heading">\u58F0\u97F3\u63D0\u9192</div>
-              <div class="gam-sound-row">
-                <label class="gam-sound-toggle">
-                  <input class="gam-sound-enabled" type="checkbox">
-                  <span>3 \u5206\u949F\u65E0\u65E5\u5FD7\u65F6\u64AD\u653E\u63D0\u793A\u97F3</span>
+              <div class="gam-sound-heading-row">
+                <div class="gam-section-heading">\u58F0\u97F3\u63D0\u9192</div>
+                <label class="gam-sound-switch" title="\u5168\u5C40\u5F00\u542F\u6216\u5173\u95ED\u58F0\u97F3\u63D0\u9192">
+                  <input class="gam-sound-enabled" type="checkbox" aria-label="\u5168\u5C40\u5F00\u542F\u58F0\u97F3\u63D0\u9192">
+                  <span class="gam-sound-switch-track" aria-hidden="true"></span>
                 </label>
+              </div>
+              <div class="gam-sound-row">
+                <span>3 \u5206\u949F\u65E0\u65E5\u5FD7\u65F6\u64AD\u653E\u63D0\u793A\u97F3</span>
                 <button class="gam-button gam-test-sound" type="button">\u6D4B\u8BD5\u58F0\u97F3</button>
               </div>
               <div class="gam-sound-note">\u5168\u5C40\u914D\u7F6E\u3002\u5DF2\u9009\u62E9 Workspace \u6536\u5230\u7B2C\u4E00\u6761\u65E5\u5FD7\u540E\u81EA\u52A8\u76D1\u6D4B\uFF1B\u6709\u65B0\u65E5\u5FD7\u4F1A\u81EA\u52A8\u91CD\u65B0\u8BA1\u65F6\u3002</div>

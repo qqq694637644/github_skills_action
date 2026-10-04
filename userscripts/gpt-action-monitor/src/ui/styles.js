@@ -611,18 +611,56 @@ export const SETTINGS_CSS = `
         align-items: center;
         justify-content: space-between;
       }
-      #gam-settings-overlay .gam-sound-toggle {
-        display: inline-flex;
+      #gam-settings-overlay .gam-sound-heading-row {
+        display: flex;
         align-items: center;
-        gap: 8px;
-        min-width: 0;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #gam-settings-overlay .gam-sound-switch {
+        position: relative;
+        display: inline-block;
+        width: 38px;
+        height: 22px;
+        flex: 0 0 auto;
         cursor: pointer;
       }
       #gam-settings-overlay .gam-sound-enabled {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+      #gam-settings-overlay .gam-sound-switch-track {
+        position: absolute;
+        inset: 0;
+        border: 1px solid color-mix(in srgb, CanvasText 24%, transparent);
+        border-radius: 999px;
+        background: color-mix(in srgb, CanvasText 10%, Canvas 90%);
+        transition: background .12s ease, border-color .12s ease;
+      }
+      #gam-settings-overlay .gam-sound-switch-track::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
         width: 16px;
         height: 16px;
-        margin: 0;
-        flex: 0 0 auto;
+        border-radius: 50%;
+        background: Canvas;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, .24);
+        transition: transform .12s ease;
+      }
+      #gam-settings-overlay .gam-sound-enabled:checked + .gam-sound-switch-track {
+        border-color: #4f8e68;
+        background: #4f8e68;
+      }
+      #gam-settings-overlay .gam-sound-enabled:checked + .gam-sound-switch-track::after {
+        transform: translateX(16px);
+      }
+      #gam-settings-overlay .gam-sound-enabled:focus-visible + .gam-sound-switch-track {
+        box-shadow: 0 0 0 2px rgba(35, 122, 66, .18);
       }
       #gam-settings-overlay .gam-sound-note {
         color: color-mix(in srgb, CanvasText 58%, transparent);

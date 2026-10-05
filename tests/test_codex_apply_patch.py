@@ -48,6 +48,107 @@ def test_codex_patch_accepts_update_without_explicit_context_marker() -> None:
         assert changes[0].after == b"alpha\ngamma\n"
 
 
+def test_codex_patch_allows_empty_add_file() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+
+        operations, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Add File: empty.txt\n"
+            "*** End Patch",
+        )
+
+        assert operations[0].add_lines == []
+        assert changes[0].path == "empty.txt"
+        assert changes[0].after == b""
+
+
+def test_codex_patch_allows_empty_patch() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+
+        operations, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** End Patch",
+        )
+
+        assert operations == []
+        assert changes == []
+
+
+def test_codex_add_state_accepts_indented_next_header() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "delete.txt").write_bytes(b"delete me\n")
+
+        operations, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Add File: add.txt\n"
+            "+added\n"
+            "   *** Delete File: delete.txt\n"
+            "*** End Patch",
+            allow_delete=True,
+        )
+
+        assert [operation.kind for operation in operations] == ["add", "delete"]
+        by_path = {change.path: change for change in changes}
+        assert by_path["add.txt"].after == b"added\n"
+        assert by_path["delete.txt"].after is None
+
+
+def test_codex_delete_state_accepts_indented_next_header() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "delete.txt").write_bytes(b"delete me\n")
+
+        operations, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Delete File: delete.txt\n"
+            "   *** Add File: add.txt\n"
+            "+added\n"
+            "*** End Patch",
+            allow_delete=True,
+        )
+
+        assert [operation.kind for operation in operations] == ["delete", "add"]
+        by_path = {change.path: change for change in changes}
+        assert by_path["delete.txt"].after is None
+        assert by_path["add.txt"].after == b"added\n"
+
+
+def test_codex_update_state_does_not_trim_leading_header_like_context() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "sample.txt").write_bytes(
+            b"before\n"
+            b"*** Add File: not-an-operation.txt\n"
+            b"after\n"
+        )
+
+        operations, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Update File: sample.txt\n"
+            "@@\n"
+            " *** Add File: not-an-operation.txt\n"
+            "-after\n"
+            "+updated\n"
+            "*** End Patch",
+        )
+
+        assert len(operations) == 1
+        assert operations[0].kind == "update"
+        assert changes[0].after == (
+            b"before\n"
+            b"*** Add File: not-an-operation.txt\n"
+            b"updated\n"
+        )
+
+
 def test_codex_patch_uses_change_context_and_fuzzy_whitespace_matching() -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)

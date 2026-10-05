@@ -856,11 +856,13 @@ def create_server(
             "grammar, enclosed by '*** Begin Patch' and '*** End Patch'. Operations are evaluated "
             "sequentially within one patch, so later operations see files created, updated, moved, "
             "or deleted by earlier operations. Supports contextual updates, Move to, End of File, "
-            "Add File, Delete File, and dry-run. Add may replace an existing UTF-8 text file; Move "
-            "may replace an existing UTF-8 text destination. Delete may remove binary files when "
-            "allow_delete=true. Updates preserve unchanged source line endings. Paths use host "
-            "filesystem identity within the workspace, and changes are committed atomically with "
-            "rollback on failure. Do not send git/unified diff syntax or Markdown fences."
+            "contextual updates, Move to, End of File, Add File, Delete File, and dry-run. Add may "
+            "create an empty file or replace an existing UTF-8 text file; Move may replace an "
+            "existing UTF-8 text destination. Delete may remove "
+            "binary files when allow_delete=true. Updates preserve unchanged source line endings. "
+            "Paths use host filesystem identity within the workspace, and changes are committed "
+            "atomically with rollback on failure. Do not send git/unified diff syntax or Markdown "
+            "fences."
         ),
         annotations=_WRITE,
     )

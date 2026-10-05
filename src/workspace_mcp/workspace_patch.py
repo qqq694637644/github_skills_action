@@ -84,6 +84,13 @@ def target_path(root: Path, path: str) -> Path:
     return resolved
 
 
+def canonical_workspace_path(root: Path, path: str) -> tuple[str, Path]:
+    resolved_root = root.resolve()
+    resolved = target_path(root, path)
+    canonical = resolved.relative_to(resolved_root).as_posix()
+    return canonical, resolved
+
+
 def path_is_within_workspace(root: Path, path: Path) -> bool:
     resolved_root = root.resolve()
     try:
@@ -119,21 +126,21 @@ def assert_text_bytes(data: bytes, *, path: str | None = None) -> None:
 
 def snapshot_files(root: Path, paths: list[str]) -> list[FileSnapshot]:
     snapshots: list[FileSnapshot] = []
-    seen: set[str] = set()
+    seen: set[Path] = set()
     for path in paths:
-        if path in seen:
+        canonical, resolved = canonical_workspace_path(root, path)
+        if resolved in seen:
             continue
-        seen.add(path)
-        resolved = target_path(root, path)
+        seen.add(resolved)
         if resolved.exists():
             if not resolved.is_file():
                 raise WorkspaceToolError(
                     "WORKSPACE_INVALID_PATH",
-                    f"Workspace text operations only support files: {path}",
+                    f"Workspace text operations only support files: {canonical}",
                 )
-            snapshots.append(FileSnapshot(path, resolved, True, resolved.read_bytes()))
+            snapshots.append(FileSnapshot(canonical, resolved, True, resolved.read_bytes()))
         else:
-            snapshots.append(FileSnapshot(path, resolved, False, None))
+            snapshots.append(FileSnapshot(canonical, resolved, False, None))
     return snapshots
 
 
@@ -158,13 +165,9 @@ def parse_codex_patch(
             continue
         marker = line.strip()
         if marker.startswith(_UPDATE_FILE_MARKER):
-            path = marker.removeprefix(_UPDATE_FILE_MARKER).strip()
-            resolved = target_path(root, path)
-            if not resolved.exists() or not resolved.is_file():
-                raise WorkspaceToolError(
-                    "WORKSPACE_PATCH_INVALID",
-                    f"Update File target does not exist as a file: {path}",
-                )
+            path, _ = canonical_workspace_path(
+                root, marker.removeprefix(_UPDATE_FILE_MARKER).strip()
+            )
             body, idx = _collect_operation_body(lines, idx + 1)
             hunks, move_path = _parse_update_hunks(body, path, root)
             operations.append(
@@ -176,12 +179,9 @@ def parse_codex_patch(
                 )
             )
         elif marker.startswith(_ADD_FILE_MARKER):
-            path = marker.removeprefix(_ADD_FILE_MARKER).strip()
-            if target_path(root, path).exists():
-                raise WorkspaceToolError(
-                    "WORKSPACE_PATCH_INVALID",
-                    f"Add File target already exists: {path}",
-                )
+            path, _ = canonical_workspace_path(
+                root, marker.removeprefix(_ADD_FILE_MARKER).strip()
+            )
             body, idx = _collect_operation_body(lines, idx + 1)
             operations.append(
                 TextPatchOperation(
@@ -191,17 +191,13 @@ def parse_codex_patch(
                 )
             )
         elif marker.startswith(_DELETE_FILE_MARKER):
-            path = marker.removeprefix(_DELETE_FILE_MARKER).strip()
+            path, _ = canonical_workspace_path(
+                root, marker.removeprefix(_DELETE_FILE_MARKER).strip()
+            )
             if not allow_delete:
                 raise WorkspaceToolError(
                     "WORKSPACE_DELETE_NOT_ALLOWED",
                     f"Delete File is disabled for this request: {path}",
-                )
-            resolved = target_path(root, path)
-            if not resolved.exists() or not resolved.is_file():
-                raise WorkspaceToolError(
-                    "WORKSPACE_PATCH_INVALID",
-                    f"Delete File target does not exist as a file: {path}",
                 )
             body, idx = _collect_operation_body(lines, idx + 1)
             if any(item.strip() for item in body):
@@ -239,14 +235,24 @@ def prepare_text_patch(
     current = {snapshot.path: snapshot.data for snapshot in snapshots}
     for operation in operations:
         if operation.kind == "add":
+            existing = current.get(operation.path)
+            if existing is not None:
+                assert_text_bytes(existing, path=operation.path)
             current[operation.path] = _join_lines(
                 operation.add_lines,
                 trailing_newline=bool(operation.add_lines),
             ).encode("utf-8")
         elif operation.kind == "delete":
+            original = current.get(operation.path)
+            if original is None:
+                raise WorkspaceToolError(
+                    "WORKSPACE_PATCH_INVALID",
+                    f"Delete File target does not exist as a file: {operation.path}",
+                )
+            assert_text_bytes(original, path=operation.path)
             current[operation.path] = None
         else:
-            original = current[operation.path]
+            original = current.get(operation.path)
             if original is None:
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_CONTEXT_MISMATCH",
@@ -266,7 +272,10 @@ def prepare_text_patch(
                 previous_bytes=original,
             )
             updated = rendered.encode("utf-8")
-            if operation.move_path is not None and operation.move_path != operation.path:
+            if operation.move_path is not None:
+                destination = current.get(operation.move_path)
+                if destination is not None:
+                    assert_text_bytes(destination, path=operation.move_path)
                 current[operation.move_path] = updated
                 current[operation.path] = None
             else:
@@ -577,13 +586,13 @@ def _parse_update_hunks(
             and move_path is None
             and update_line.startswith(_MOVE_TO_MARKER)
         ):
-            candidate = update_line.removeprefix(_MOVE_TO_MARKER).strip()
-            if not candidate:
+            raw_candidate = update_line.removeprefix(_MOVE_TO_MARKER).strip()
+            if not raw_candidate:
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_INVALID",
                     f"Move destination cannot be empty: {path}",
                 )
-            target_path(root, candidate)
+            candidate, _ = canonical_workspace_path(root, raw_candidate)
             if candidate == path:
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_INVALID",

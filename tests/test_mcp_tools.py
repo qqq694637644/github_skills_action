@@ -109,9 +109,14 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         patch_tool = by_name["workspaceApplyPatch"]
         assert patch_tool.description is not None
         assert "*** Begin Patch" in patch_tool.description
+        assert "Codex-compatible core apply_patch grammar" in patch_tool.description
+        assert "evaluated sequentially" in patch_tool.description
         patch_description = patch_tool.input_schema["properties"]["patch"]["description"]
         assert "Raw workspace patch text" in patch_description
         assert "*** End Patch" in patch_description
+        assert "File operations are evaluated in order" in patch_description
+        assert "may replace an existing UTF-8 text file" in patch_description
+        assert "canonicalized" in patch_description
 
         assert by_name["prepareWorkspace"].annotations is not None
         assert by_name["prepareWorkspace"].annotations.read_only_hint is False

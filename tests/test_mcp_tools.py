@@ -106,7 +106,8 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         patch_description = patch_tool.input_schema["properties"]["patch"]["description"]
         assert "File operations are evaluated in order" in patch_description
         assert "may replace an existing UTF-8 text file" in patch_description
-        assert "canonicalized" in patch_description
+        assert "including binary files" in patch_description
+        assert "host filesystem semantics" in patch_description
         assert command.annotations is not None
         assert command.annotations.destructive_hint is True
         assert command.annotations.open_world_hint is True

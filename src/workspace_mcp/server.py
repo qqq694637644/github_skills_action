@@ -844,14 +844,16 @@ def create_server(
         name="workspaceApplyPatch",
         title="Apply workspace patch",
         description=(
-            "Apply bounded multi-file UTF-8 edits using the Codex-compatible core apply_patch "
+            "Apply bounded multi-file edits using the Codex-compatible core apply_patch "
             "grammar. Operations are evaluated sequentially within one patch, so later operations "
             "see files created, updated, moved, or deleted by earlier operations. Supports "
             "contextual updates, Move to, End of File, Add File, Delete File, and dry-run. Add may "
             "replace an existing UTF-8 text file; Move may replace an existing UTF-8 text "
-            "destination and preserves the source file mode when available. Paths are "
-            "canonicalized within the workspace, and changes are committed atomically with "
-            "rollback on failure. Do not send git/unified diff syntax or Markdown fences."
+            "destination and preserves the source file mode when available. Delete may remove "
+            "binary files when allow_delete=true. Updates preserve unchanged source line endings. "
+            "Paths use host filesystem identity within the workspace, and changes are committed "
+            "atomically with rollback on failure. Do not send git/unified diff syntax or Markdown "
+            "fences."
         ),
         annotations=_WRITE,
     )

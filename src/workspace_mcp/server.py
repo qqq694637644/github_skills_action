@@ -23,6 +23,7 @@ from .logging import (
     log_action,
     log_action_error,
     log_activity,
+    log_unexpected_activity_failure,
     new_activity_id,
     wait_for_action_events,
 )
@@ -486,6 +487,20 @@ def create_server(
                 },
             )
             raise _tool_error(exc) from exc
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceInspect",
+                activity_id=activity_id,
+                kind="exploration",
+                payload={
+                    "operation": "inspect",
+                    "workspace_id": request.workspace_id,
+                    "paths": request.paths,
+                    "queries": request.queries,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise
 
     @server.tool(
         name="workspaceSearch",
@@ -586,6 +601,20 @@ def create_server(
                 },
             )
             raise _tool_error(exc) from exc
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceSearch",
+                activity_id=activity_id,
+                kind="exploration",
+                payload={
+                    "operation": "search",
+                    "workspace_id": request.workspace_id,
+                    "query": request.query,
+                    "paths": request.paths,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise
 
     @server.tool(
         name="workspaceReadFiles",
@@ -683,6 +712,21 @@ def create_server(
                 },
             )
             raise _tool_error(exc) from exc
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceReadFiles",
+                activity_id=activity_id,
+                kind="exploration",
+                payload={
+                    "operation": "read",
+                    "workspace_id": request.workspace_id,
+                    "paths": request.paths,
+                    "start_line": request.start_line,
+                    "max_lines": request.max_lines,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise
 
     @server.tool(
         name="workspaceWriteFile",
@@ -788,6 +832,20 @@ def create_server(
                 },
             )
             raise _tool_error(exc) from exc
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceWriteFile",
+                activity_id=activity_id,
+                kind="write",
+                payload={
+                    "operation": "write",
+                    "workspace_id": request.workspace_id,
+                    "path": request.path,
+                    "mode": request.mode,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise
 
     @server.tool(
         name="workspaceApplyPatch",
@@ -886,6 +944,19 @@ def create_server(
                 },
             )
             raise _tool_error(exc) from exc
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceApplyPatch",
+                activity_id=activity_id,
+                kind="patch",
+                payload={
+                    "operation": "patch",
+                    "workspace_id": request.workspace_id,
+                    "dry_run": request.dry_run,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise
 
     @server.tool(
         name="workspaceCommand",

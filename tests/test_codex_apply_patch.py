@@ -158,3 +158,20 @@ def test_codex_patch_accepts_lenient_heredoc_wrapper_and_unicode_matching() -> N
         )
 
         assert changes[0].after == b'title = "world"\n'
+
+def test_codex_patch_allows_binary_diff_marker_as_plain_text() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "sample.txt").write_bytes(b"before\n")
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Update File: sample.txt\n"
+            "@@\n"
+            "-before\n"
+            "+GIT binary patch\n"
+            "*** End Patch",
+        )
+
+        assert changes[0].after == b"GIT binary patch\n"

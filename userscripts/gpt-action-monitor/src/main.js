@@ -43,6 +43,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   let actionLogClient = null;
   let activitySessionKey = null;
   let activitySessionCursor = null;
+  let activitySessionStreamId = null;
   let soundAlertEnabled = Boolean(GM_getValue(SOUND_ALERT_ENABLED_KEY, false));
 
   function boundedInteger(value, fallback, min, max) {
@@ -161,7 +162,10 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     activityStore.clear();
     soundAlert.reset();
     activitySessionKey = null;
-    if (!preserveCursor) activitySessionCursor = null;
+    if (!preserveCursor) {
+      activitySessionCursor = null;
+      activitySessionStreamId = null;
+    }
     monitorUi.resetSession();
     monitorUi.clearLastActivityTime();
     monitorUi.clearAttention();
@@ -369,7 +373,14 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       getProfile: getEffectiveEndpoint,
       getWorkspaceId: () => activeWorkspaceId,
       initialCursor: activitySessionCursor,
+      initialStreamId: activitySessionStreamId,
       onCursor: (cursor) => { activitySessionCursor = cursor; },
+      onStreamId: (streamId) => { activitySessionStreamId = streamId; },
+      onStreamReset() {
+        activityStore.clearActive();
+        soundAlert.reset();
+        monitorUi.clearLastActivityTime();
+      },
       shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
       onItems(items) {
         const latestTimestamp = latestEventTimestamp(items);

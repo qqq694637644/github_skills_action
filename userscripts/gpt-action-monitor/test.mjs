@@ -421,6 +421,39 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   assert.equal(preparingWorkspace.title, 'Preparing workspace');
 }
 
+// A server stream restart invalidates only in-flight activity. Completed
+// history stays visible while orphaned NOW cells are removed.
+{
+  const activityStore = createActivityStore();
+  activityStore.ingest([
+    {
+      id: 1,
+      event: {
+        activity_id: 'write:done',
+        kind: 'write',
+        phase: 'completed',
+        timestamp: '2026-10-05T01:00:00Z',
+        payload: { path: 'done.txt' },
+      },
+    },
+    {
+      id: 2,
+      event: {
+        activity_id: 'patch:orphan',
+        kind: 'patch',
+        phase: 'started',
+        timestamp: '2026-10-05T01:00:01Z',
+        payload: {},
+      },
+    },
+  ]);
+  assert.equal(activityStore.snapshot().active.length, 1);
+  assert.equal(activityStore.snapshot().recent.length, 1);
+  activityStore.clearActive();
+  assert.equal(activityStore.snapshot().active.length, 0);
+  assert.equal(activityStore.snapshot().recent.length, 1);
+}
+
 // Exploration remains compact, but a rendered Explored group is capped at the
 // three visible rows. New exploration spills into a new history cell instead
 // of replacing information that was already shown to the user.
@@ -781,6 +814,48 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   assert.equal(requestedUrls[0].includes('after=40'), true);
   assert.equal(requestedUrls[0].includes('wait=55'), true);
   assert.equal(client.getCursor(), 41);
+  client.stop();
+}
+
+// A changed server stream id means the old cursor belongs to a dead process.
+// Reset in-flight UI state, rewind the cursor, then read the new stream from 0.
+{
+  const { timers } = installDomFixture();
+  const requests = [];
+  let resets = 0;
+  let streamId = 'old-stream';
+  globalThis.GM_xmlhttpRequest = (request) => {
+    requests.push(request);
+    return { abort() {} };
+  };
+  const client = createActionLogClient({
+    getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
+    getWorkspaceId: () => 'ws_0123456789abcdef',
+    onItems: () => {},
+    onHint: () => {},
+    initialCursor: 40,
+    initialStreamId: streamId,
+    onCursor: () => {},
+    onStreamId: (value) => { streamId = value; },
+    onStreamReset: () => { resets += 1; },
+  });
+  client.start();
+  let [timerId, runPoll] = timers.entries().next().value;
+  timers.delete(timerId);
+  runPoll();
+  assert.equal(requests[0].url.includes('after=40'), true);
+  requests[0].onload({
+    status: 200,
+    responseText: JSON.stringify({ stream_id: 'new-stream', items: [], last_id: 3 }),
+  });
+  assert.equal(resets, 1);
+  assert.equal(streamId, 'new-stream');
+  assert.equal(client.getCursor(), 0);
+
+  [timerId, runPoll] = timers.entries().next().value;
+  timers.delete(timerId);
+  runPoll();
+  assert.equal(requests[1].url.includes('after=0'), true);
   client.stop();
 }
 

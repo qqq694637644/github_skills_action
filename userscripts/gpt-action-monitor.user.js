@@ -415,11 +415,20 @@
       seenOrder.length = 0;
       notify();
     }
+    function clearActive() {
+      if (!state.active.size) return;
+      state = {
+        ...state,
+        active: /* @__PURE__ */ new Map(),
+        explorationGroupId: null
+      };
+      notify();
+    }
     function subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     }
-    return { ingest, snapshot, clear, subscribe };
+    return { ingest, snapshot, clear, clearActive, subscribe };
   }
 
   // src/activity/presentation.js
@@ -858,11 +867,15 @@ ${result}`;
     onStatus,
     onAttention,
     initialCursor = null,
+    initialStreamId = null,
     onCursor,
+    onStreamId,
+    onStreamReset,
     shouldPollWhenHidden = () => false
   }) {
     let lastId = Number.isInteger(initialCursor) ? initialCursor : 0;
     let needsCursorPrime = !Number.isInteger(initialCursor);
+    let streamId = typeof initialStreamId === "string" && initialStreamId ? initialStreamId : null;
     let stopped = false;
     let requestHandle = null;
     let requestGeneration = 0;
@@ -946,6 +959,22 @@ ${result}`;
           }
           try {
             const body = JSON.parse(response.responseText);
+            const nextStreamId = typeof body.stream_id === "string" && body.stream_id ? body.stream_id : null;
+            if (nextStreamId && streamId && nextStreamId !== streamId) {
+              streamId = nextStreamId;
+              onStreamId?.(streamId);
+              needsCursorPrime = false;
+              lastId = 0;
+              onCursor?.(lastId);
+              onStreamReset?.(streamId);
+              onStatus?.("idle");
+              schedulePoll(0);
+              return;
+            }
+            if (nextStreamId && nextStreamId !== streamId) {
+              streamId = nextStreamId;
+              onStreamId?.(streamId);
+            }
             if (Number.isInteger(body.last_id)) {
               lastId = body.last_id;
               onCursor?.(lastId);
@@ -3500,6 +3529,7 @@ ${result}`;
     let actionLogClient = null;
     let activitySessionKey = null;
     let activitySessionCursor = null;
+    let activitySessionStreamId = null;
     let soundAlertEnabled = Boolean(GM_getValue(SOUND_ALERT_ENABLED_KEY, false));
     function boundedInteger(value, fallback, min, max) {
       const parsed = Number.parseInt(value, 10);
@@ -3598,7 +3628,10 @@ ${result}`;
       activityStore.clear();
       soundAlert.reset();
       activitySessionKey = null;
-      if (!preserveCursor) activitySessionCursor = null;
+      if (!preserveCursor) {
+        activitySessionCursor = null;
+        activitySessionStreamId = null;
+      }
       monitorUi.resetSession();
       monitorUi.clearLastActivityTime();
       monitorUi.clearAttention();
@@ -3775,8 +3808,17 @@ ${result}`;
         getProfile: getEffectiveEndpoint,
         getWorkspaceId: () => activeWorkspaceId,
         initialCursor: activitySessionCursor,
+        initialStreamId: activitySessionStreamId,
         onCursor: (cursor) => {
           activitySessionCursor = cursor;
+        },
+        onStreamId: (streamId) => {
+          activitySessionStreamId = streamId;
+        },
+        onStreamReset() {
+          activityStore.clearActive();
+          soundAlert.reset();
+          monitorUi.clearLastActivityTime();
         },
         shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
         onItems(items) {

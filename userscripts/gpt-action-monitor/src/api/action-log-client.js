@@ -8,11 +8,15 @@ export function createActionLogClient({
   onStatus,
   onAttention,
   initialCursor = null,
+  initialStreamId = null,
   onCursor,
+  onStreamId,
+  onStreamReset,
   shouldPollWhenHidden = () => false,
 }) {
   let lastId = Number.isInteger(initialCursor) ? initialCursor : 0;
   let needsCursorPrime = !Number.isInteger(initialCursor);
+  let streamId = typeof initialStreamId === 'string' && initialStreamId ? initialStreamId : null;
   let stopped = false;
   let requestHandle = null;
   let requestGeneration = 0;
@@ -110,6 +114,24 @@ export function createActionLogClient({
         }
         try {
           const body = JSON.parse(response.responseText);
+          const nextStreamId = typeof body.stream_id === 'string' && body.stream_id
+            ? body.stream_id
+            : null;
+          if (nextStreamId && streamId && nextStreamId !== streamId) {
+            streamId = nextStreamId;
+            onStreamId?.(streamId);
+            needsCursorPrime = false;
+            lastId = 0;
+            onCursor?.(lastId);
+            onStreamReset?.(streamId);
+            onStatus?.('idle');
+            schedulePoll(0);
+            return;
+          }
+          if (nextStreamId && nextStreamId !== streamId) {
+            streamId = nextStreamId;
+            onStreamId?.(streamId);
+          }
           if (Number.isInteger(body.last_id)) {
             lastId = body.last_id;
             onCursor?.(lastId);

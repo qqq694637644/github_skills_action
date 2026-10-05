@@ -68,10 +68,20 @@ export function createActivityStore() {
     notify();
   }
 
+  function clearActive() {
+    if (!state.active.size) return;
+    state = {
+      ...state,
+      active: new Map(),
+      explorationGroupId: null,
+    };
+    notify();
+  }
+
   function subscribe(listener) {
     listeners.add(listener);
     return () => listeners.delete(listener);
   }
 
-  return { ingest, snapshot, clear, subscribe };
+  return { ingest, snapshot, clear, clearActive, subscribe };
 }

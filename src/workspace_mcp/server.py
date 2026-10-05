@@ -860,9 +860,9 @@ def create_server(
             "create an empty file or replace an existing UTF-8 text file; Move may replace an "
             "existing UTF-8 text destination. Delete may remove "
             "binary files when allow_delete=true. Updates preserve unchanged source line endings. "
-            "Paths use host filesystem identity within the workspace, and changes are committed "
-            "atomically with rollback on failure. Do not send git/unified diff syntax or Markdown "
-            "fences."
+            "Paths are confined to the workspace; ambiguous Windows path forms that could alias a "
+            "different Win32 target are rejected. Changes are committed atomically with rollback "
+            "on failure. Do not send git/unified diff syntax or Markdown fences."
         ),
         annotations=_WRITE,
     )

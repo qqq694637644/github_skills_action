@@ -303,6 +303,20 @@ def test_workspace_rejects_ambiguous_windows_paths_before_disk_aliasing() -> Non
             assert captured.value.code == "WORKSPACE_INVALID_PATH"
             assert not (workspace_root / "space.txt").exists()
 
+            for invalid_path in ("C:alias.txt", r"\rooted.txt"):
+                with pytest.raises(WorkspaceToolError) as captured:
+                    await service.write_file(
+                        workspace_id=workspace_id,
+                        path=invalid_path,
+                        content="blocked\n",
+                        mode="create_only",
+                        line_ending="lf",
+                        expected_sha256=None,
+                        dry_run=False,
+                        max_bytes=None,
+                    )
+                assert captured.value.code == "WORKSPACE_INVALID_PATH"
+
             with pytest.raises(WorkspaceToolError) as captured:
                 await service.apply_patch(
                     workspace_id=workspace_id,

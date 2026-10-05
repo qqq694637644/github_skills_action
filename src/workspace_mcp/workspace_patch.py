@@ -138,6 +138,11 @@ def target_path(root: Path, path: str) -> Path:
             "WORKSPACE_PATH_OUTSIDE_ROOT",
             f"Workspace paths must be relative to the workspace root: {path}",
         )
+    if os.name == "nt" and (candidate.drive or candidate.root):
+        raise WorkspaceToolError(
+            "WORKSPACE_INVALID_PATH",
+            f"Workspace paths cannot include a Windows drive or rooted path prefix: {path}",
+        )
     if os.name == "nt" and _windows_path_is_reserved(candidate):
         raise WorkspaceToolError(
             "WORKSPACE_INVALID_PATH",
@@ -174,7 +179,7 @@ def _windows_path_is_reserved(path: Path) -> bool:
             return True
         if any(ord(char) < 32 or char in invalid_chars for char in component):
             return True
-        device_stem = component.split(".", 1)[0].upper()
+        device_stem = component.split(".", 1)[0].rstrip(" ").upper()
         if device_stem in device_names:
             return True
     return False

@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from workspace_mcp.workspace_patch import (
     WorkspaceToolError,
+    _windows_path_is_reserved,
     commit_prepared_changes,
     parse_codex_patch,
     prepare_text_patch,
@@ -479,6 +481,24 @@ def test_codex_patch_rejects_ambiguous_windows_paths(path: str) -> None:
             )
 
         assert captured.value.code == "WORKSPACE_INVALID_PATH"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "CON .txt",
+        "PRN .txt",
+        "AUX .txt",
+        "NUL .txt",
+        "COM1 .txt",
+        "LPT9 .txt",
+    ],
+)
+def test_windows_reserved_path_fallback_handles_device_aliases_with_spaces(
+    path: str,
+) -> None:
+    with patch.object(os.path, "isreserved", None, create=True):
+        assert _windows_path_is_reserved(Path(path)) is True
 
 
 def test_codex_delete_file_allows_binary_content() -> None:

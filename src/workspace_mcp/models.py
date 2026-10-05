@@ -15,8 +15,9 @@ WorkspacePath = Annotated[
         max_length=500,
         description=(
             "Workspace-relative path. On Windows, reserved or ambiguous Win32 path forms such as "
-            "components with trailing dots/spaces, NTFS alternate-data-stream syntax, and DOS "
-            "device names are rejected rather than normalized."
+            "drive-relative/rooted prefixes, components with trailing dots/spaces, NTFS "
+            "alternate-data-stream syntax, and DOS device names are rejected rather than "
+            "normalized."
         ),
     ),
 ]
@@ -48,7 +49,8 @@ PatchText = Annotated[
             "when allow_delete=true. Updates preserve unchanged source line endings and use the "
             "file's first existing line ending for inserted lines. Paths are workspace-relative; "
             "canonical aliases resolve to one target. On Windows, reserved or ambiguous Win32 "
-            "path forms are rejected rather than silently normalized to another filesystem target."
+            "path forms, including drive-relative/rooted prefixes, are rejected rather than "
+            "silently normalized to another filesystem target."
         ),
     ),
 ]

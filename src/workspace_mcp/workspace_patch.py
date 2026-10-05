@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 PatchKind = Literal["update", "add", "delete"]
+Replacement = tuple[int, int, list[str]]
 
 
 _BEGIN_PATCH_MARKER = "*** Begin Patch"
@@ -60,6 +61,66 @@ class PreparedFileChange:
     resolved_path: Path
     before: bytes | None
     after: bytes | None
+
+
+@dataclass
+class _SourceLine:
+    text: str
+    ending: str | None
+
+
+@dataclass
+class _SourceFile:
+    lines: list[_SourceLine]
+    preferred_ending: str
+
+    @classmethod
+    def parse(cls, contents: str) -> _SourceFile:
+        lines: list[_SourceLine] = []
+        preferred_ending: str | None = None
+        line_start = 0
+        cursor = 0
+        while cursor < len(contents):
+            if contents.startswith("\r\n", cursor):
+                ending = "\r\n"
+                ending_len = 2
+            elif contents[cursor] == "\r":
+                ending = "\r"
+                ending_len = 1
+            elif contents[cursor] == "\n":
+                ending = "\n"
+                ending_len = 1
+            else:
+                cursor += 1
+                continue
+            preferred_ending = preferred_ending or ending
+            lines.append(_SourceLine(contents[line_start:cursor], ending))
+            cursor += ending_len
+            line_start = cursor
+        if line_start < len(contents):
+            lines.append(_SourceLine(contents[line_start:], None))
+        return cls(lines, preferred_ending or "\n")
+
+    def line_texts(self) -> list[str]:
+        return [line.text for line in self.lines]
+
+    def apply_replacements(self, replacements: list[Replacement]) -> None:
+        source_index = 0
+        new_lines: list[_SourceLine] = []
+        for start_idx, old_len, new_segment in replacements:
+            new_lines.extend(self.lines[source_index:start_idx])
+            new_lines.extend(
+                _SourceLine(text, self.preferred_ending) for text in new_segment
+            )
+            source_index = start_idx + old_len
+        new_lines.extend(self.lines[source_index:])
+        for line in new_lines:
+            if line.ending is None:
+                line.ending = self.preferred_ending
+        self.lines = new_lines
+
+    def into_contents(self) -> str:
+        return "".join(line.text + (line.ending or "") for line in self.lines)
 
 
 def sha256_hex(data: bytes) -> str:
@@ -156,7 +217,7 @@ def parse_codex_patch(
     lines = _patch_lines(patch)
 
     operations: list[TextPatchOperation] = []
-    paths_seen: set[str] = set()
+    paths_seen: set[Path] = set()
     idx = 1
     while idx < len(lines) - 1:
         line = lines[idx]
@@ -211,9 +272,9 @@ def parse_codex_patch(
                 "WORKSPACE_PATCH_INVALID", f"Unsupported patch operation: {line}"
             )
         operation = operations[-1]
-        paths_seen.add(operation.path)
+        paths_seen.add(target_path(root, operation.path))
         if operation.move_path is not None:
-            paths_seen.add(operation.move_path)
+            paths_seen.add(target_path(root, operation.move_path))
         if len(paths_seen) > max_changed_files:
             raise WorkspaceToolError(
                 "WORKSPACE_TOO_MANY_CHANGED_FILES",
@@ -232,63 +293,57 @@ def prepare_text_patch(
     operations: list[TextPatchOperation],
     snapshots: list[FileSnapshot],
 ) -> list[PreparedFileChange]:
-    current = {snapshot.path: snapshot.data for snapshot in snapshots}
+    current = {snapshot.resolved_path: snapshot.data for snapshot in snapshots}
     for operation in operations:
+        identity = target_path(root, operation.path)
         if operation.kind == "add":
-            existing = current.get(operation.path)
+            existing = current.get(identity)
             if existing is not None:
                 assert_text_bytes(existing, path=operation.path)
-            current[operation.path] = _join_lines(
+            current[identity] = _join_lines(
                 operation.add_lines,
                 trailing_newline=bool(operation.add_lines),
             ).encode("utf-8")
         elif operation.kind == "delete":
-            original = current.get(operation.path)
+            original = current.get(identity)
             if original is None:
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_INVALID",
                     f"Delete File target does not exist as a file: {operation.path}",
                 )
-            assert_text_bytes(original, path=operation.path)
-            current[operation.path] = None
+            current[identity] = None
         else:
-            original = current.get(operation.path)
+            original = current.get(identity)
             if original is None:
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_CONTEXT_MISMATCH",
                     f"Patch update target no longer exists: {operation.path}",
                 )
             assert_text_bytes(original, path=operation.path)
-            original_text = original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-            lines, trailing = _split_text_lines(original_text)
-            new_lines = _apply_hunks(lines, operation.hunks, operation.path)
-            rendered = _join_lines(
-                new_lines,
-                trailing_newline=trailing,
+            source_file = _SourceFile.parse(original.decode("utf-8"))
+            replacements = _compute_replacements(
+                source_file.line_texts(), operation.hunks, operation.path
             )
-            rendered = normalize_line_endings(
-                rendered,
-                line_ending="preserve",
-                previous_bytes=original,
-            )
-            updated = rendered.encode("utf-8")
+            source_file.apply_replacements(replacements)
+            updated = source_file.into_contents().encode("utf-8")
             if operation.move_path is not None:
-                destination = current.get(operation.move_path)
+                destination_identity = target_path(root, operation.move_path)
+                destination = current.get(destination_identity)
                 if destination is not None:
                     assert_text_bytes(destination, path=operation.move_path)
-                current[operation.move_path] = updated
-                current[operation.path] = None
+                current[destination_identity] = updated
+                current[identity] = None
             else:
-                current[operation.path] = updated
+                current[identity] = updated
     return [
         PreparedFileChange(
             path=snapshot.path,
             resolved_path=snapshot.resolved_path,
             before=snapshot.data,
-            after=current[snapshot.path],
+            after=current[snapshot.resolved_path],
         )
         for snapshot in snapshots
-        if snapshot.data != current[snapshot.path]
+        if snapshot.data != current[snapshot.resolved_path]
     ]
 
 
@@ -592,8 +647,8 @@ def _parse_update_hunks(
                     "WORKSPACE_PATCH_INVALID",
                     f"Move destination cannot be empty: {path}",
                 )
-            candidate, _ = canonical_workspace_path(root, raw_candidate)
-            if candidate == path:
+            candidate, candidate_resolved = canonical_workspace_path(root, raw_candidate)
+            if candidate_resolved == target_path(root, path):
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_INVALID",
                     f"Move destination must differ from the source path: {path}",
@@ -663,9 +718,11 @@ def _parse_update_hunks(
     return hunks, move_path
 
 
-def _apply_hunks(lines: list[str], hunks: list[TextPatchHunk], path: str) -> list[str]:
-    """Compute replacements using Codex's ordered context seeking, then apply them in reverse."""
-    replacements: list[tuple[int, int, list[str]]] = []
+def _compute_replacements(
+    lines: list[str], hunks: list[TextPatchHunk], path: str
+) -> list[Replacement]:
+    """Compute Codex PreserveLineEndings replacements while leaving context lines untouched."""
+    replacements: list[Replacement] = []
     cursor = 0
     for hunk in hunks:
         if hunk.change_context is not None:
@@ -711,16 +768,33 @@ def _apply_hunks(lines: list[str], hunks: list[TextPatchHunk], path: str) -> lis
                 f"Failed to find expected lines in {path}:\n{expected}",
             )
 
-        for old_index, new_index in hunk.context_line_indices:
-            if old_index < len(pattern) and new_index < len(replacement):
-                replacement[new_index] = lines[idx + old_index]
-        replacements.append((idx, len(pattern), replacement))
+        old_start = 0
+        new_start = 0
+        for old_context, new_context in hunk.context_line_indices:
+            if old_context >= len(pattern) or new_context >= len(replacement):
+                break
+            if old_start != old_context or new_start != new_context:
+                replacements.append(
+                    (
+                        idx + old_start,
+                        old_context - old_start,
+                        replacement[new_start:new_context],
+                    )
+                )
+            old_start = old_context + 1
+            new_start = new_context + 1
+        if old_start != len(pattern) or new_start != len(replacement):
+            replacements.append(
+                (
+                    idx + old_start,
+                    len(pattern) - old_start,
+                    replacement[new_start:],
+                )
+            )
         cursor = idx + len(pattern)
 
-    current = list(lines)
-    for start, old_len, replacement in sorted(replacements, key=lambda item: item[0], reverse=True):
-        current[start : start + old_len] = replacement
-    return current
+    replacements.sort(key=lambda item: item[0])
+    return replacements
 
 
 def _seek_sequence(

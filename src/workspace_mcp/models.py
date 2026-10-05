@@ -61,8 +61,10 @@ PatchText = Annotated[
             "'@@ <context>' anchors, '*** Move to: <relative-path>', and '*** End of File'; "
             "update body lines start with space, '+', or '-'. Add File content lines start with "
             "'+' and may replace an existing UTF-8 text file. Move may replace an existing UTF-8 "
-            "text destination. Paths are workspace-relative and canonicalized so aliases such as "
-            "'./file' and 'dir/../file' identify the same target."
+            "text destination. Delete File may remove any regular file, including binary files, "
+            "when allow_delete=true. Updates preserve unchanged source line endings and use the "
+            "file's first existing line ending for inserted lines. Paths are workspace-relative; "
+            "path identity follows the host filesystem semantics, so aliases resolve to one target."
         ),
     ),
 ]

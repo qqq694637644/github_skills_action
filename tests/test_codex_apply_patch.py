@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -14,11 +15,11 @@ from workspace_mcp.workspace_patch import (
 )
 
 
-def _prepare(root: Path, patch: str):
+def _prepare(root: Path, patch: str, *, allow_delete: bool = False):
     operations = parse_codex_patch(
         patch,
         root,
-        allow_delete=False,
+        allow_delete=allow_delete,
         max_changed_files=20,
     )
     paths: list[str] = []
@@ -310,3 +311,79 @@ def test_codex_move_rejects_existing_binary_destination() -> None:
             )
 
         assert captured.value.code == "WORKSPACE_BINARY_NOT_ALLOWED"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows paths are case-insensitive")
+def test_codex_patch_uses_path_identity_for_missing_windows_case_aliases() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Add File: New.txt\n"
+            "+one\n"
+            "*** Update File: new.txt\n"
+            "@@\n"
+            "-one\n"
+            "+two\n"
+            "*** End Patch",
+        )
+
+        assert len(changes) == 1
+        assert changes[0].after == b"two\n"
+
+
+def test_codex_delete_file_allows_binary_content() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "binary.bin").write_bytes(b"\x00\xff")
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Delete File: binary.bin\n"
+            "*** End Patch",
+            allow_delete=True,
+        )
+
+        assert len(changes) == 1
+        assert changes[0].before == b"\x00\xff"
+        assert changes[0].after is None
+
+
+def test_codex_preserve_line_endings_keeps_unchanged_context_terminator() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "mixed.txt").write_bytes(b"alpha\r\nkeep\nbeta\r\n")
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Update File: mixed.txt\n"
+            "@@\n"
+            " keep\n"
+            "-beta\n"
+            "+gamma\n"
+            "*** End Patch",
+        )
+
+        assert changes[0].after == b"alpha\r\nkeep\ngamma\r\n"
+
+
+def test_codex_preserve_line_endings_adds_trailing_newline_on_update() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "unterminated.txt").write_bytes(b"before")
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Update File: unterminated.txt\n"
+            "@@\n"
+            "-before\n"
+            "+after\n"
+            "*** End Patch",
+        )
+
+        assert changes[0].after == b"after\n"

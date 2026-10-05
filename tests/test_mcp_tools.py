@@ -116,7 +116,8 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         assert "*** End Patch" in patch_description
         assert "File operations are evaluated in order" in patch_description
         assert "may replace an existing UTF-8 text file" in patch_description
-        assert "canonicalized" in patch_description
+        assert "including binary files" in patch_description
+        assert "host filesystem semantics" in patch_description
 
         assert by_name["prepareWorkspace"].annotations is not None
         assert by_name["prepareWorkspace"].annotations.read_only_hint is False

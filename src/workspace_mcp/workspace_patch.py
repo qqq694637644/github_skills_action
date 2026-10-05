@@ -138,6 +138,14 @@ def target_path(root: Path, path: str) -> Path:
             "WORKSPACE_PATH_OUTSIDE_ROOT",
             f"Workspace paths must be relative to the workspace root: {path}",
         )
+    if os.name == "nt" and _windows_path_is_reserved(candidate):
+        raise WorkspaceToolError(
+            "WORKSPACE_INVALID_PATH",
+            (
+                "Workspace paths cannot use Windows-reserved or ambiguous path syntax "
+                f"(for example trailing dots/spaces, NTFS ADS, or device names): {path}"
+            ),
+        )
 
     resolved_root = root.resolve()
     resolved = (resolved_root / candidate).resolve(strict=False)
@@ -147,6 +155,29 @@ def target_path(root: Path, path: str) -> Path:
             f"Workspace path resolves outside the workspace root: {path}",
         )
     return resolved
+
+
+def _windows_path_is_reserved(path: Path) -> bool:
+    """Reject Win32 aliases/special names before they can diverge from reported path identity."""
+    isreserved = getattr(os.path, "isreserved", None)
+    if isreserved is not None:
+        return bool(isreserved(str(path)))
+
+    device_names = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    device_names.update(f"COM{suffix}" for suffix in "123456789¹²³")
+    device_names.update(f"LPT{suffix}" for suffix in "123456789¹²³")
+    invalid_chars = '<>:"|?*'
+    for component in path.parts:
+        if component in {".", ".."}:
+            continue
+        if component.endswith((" ", ".")):
+            return True
+        if any(ord(char) < 32 or char in invalid_chars for char in component):
+            return True
+        device_stem = component.split(".", 1)[0].upper()
+        if device_stem in device_names:
+            return True
+    return False
 
 
 def canonical_workspace_path(root: Path, path: str) -> tuple[str, Path]:
@@ -561,8 +592,16 @@ class _PatchParser:
             return
 
         marker = line.strip()
-        # Preserve the existing model-friendly tolerance for harmless blank lines.
         if not marker:
+            if self.mode == "add":
+                raise WorkspaceToolError(
+                    "WORKSPACE_PATCH_INVALID",
+                    (
+                        f"Invalid blank Add File line {line_number}; "
+                        "use '+' to add an empty content line."
+                    ),
+                )
+            # Preserve separator leniency in Started/Delete states.
             return
         if self._handle_header(marker, line_number):
             return
@@ -677,6 +716,11 @@ class _PatchParser:
         if self._handle_header(update_line, line_number):
             return
 
+        # Keep this common git-style marker as a lenient no-op at every Update position,
+        # including immediately after "*** End of File".
+        if line.startswith("\\ No newline at end of file"):
+            return
+
         operation = self._update_operation()
         last = self._update_hunk()
         if last is not None and last.is_end_of_file:
@@ -750,10 +794,6 @@ class _PatchParser:
                     context_line_indices=last.context_line_indices,
                     is_end_of_file=True,
                 )
-            return
-
-        # Keep this common git-style marker as a lenient no-op for model reliability.
-        if line.startswith("\\ No newline at end of file"):
             return
 
         hunk = self._update_hunk(create=True)

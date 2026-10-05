@@ -120,6 +120,25 @@ def test_codex_delete_state_accepts_indented_next_header() -> None:
         assert by_path["add.txt"].after == b"added\n"
 
 
+def test_codex_add_state_rejects_bare_blank_content_line() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+
+        with pytest.raises(WorkspaceToolError) as captured:
+            _prepare(
+                root,
+                "*** Begin Patch\n"
+                "*** Add File: a.txt\n"
+                "+first\n"
+                "\n"
+                "+second\n"
+                "*** End Patch",
+            )
+
+        assert captured.value.code == "WORKSPACE_PATCH_INVALID"
+        assert "use '+' to add an empty content line" in captured.value.message
+
+
 def test_codex_update_state_does_not_trim_leading_header_like_context() -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -435,6 +454,33 @@ def test_codex_patch_uses_path_identity_for_missing_windows_case_aliases() -> No
         assert changes[0].after == b"two\n"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows path alias rules are Win32-specific")
+@pytest.mark.parametrize(
+    "path",
+    [
+        "trailing-dot.txt.",
+        "file.txt:stream",
+        "CON",
+        "con.txt",
+        "nested/AUX.log",
+    ],
+)
+def test_codex_patch_rejects_ambiguous_windows_paths(path: str) -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+
+        with pytest.raises(WorkspaceToolError) as captured:
+            _prepare(
+                root,
+                "*** Begin Patch\n"
+                f"*** Add File: {path}\n"
+                "+content\n"
+                "*** End Patch",
+            )
+
+        assert captured.value.code == "WORKSPACE_INVALID_PATH"
+
+
 def test_codex_delete_file_allows_binary_content() -> None:
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -484,6 +530,26 @@ def test_codex_preserve_line_endings_adds_trailing_newline_on_update() -> None:
             "@@\n"
             "-before\n"
             "+after\n"
+            "*** End Patch",
+        )
+
+        assert changes[0].after == b"after\n"
+
+
+def test_codex_no_newline_marker_is_noop_after_end_of_file() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "sample.txt").write_bytes(b"before\n")
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Update File: sample.txt\n"
+            "@@\n"
+            "-before\n"
+            "+after\n"
+            "*** End of File\n"
+            "\\ No newline at end of file\n"
             "*** End Patch",
         )
 

@@ -8,7 +8,18 @@ OperationState = Literal["running", "succeeded", "failed", "timed_out", "cancele
 WorkspaceId = Annotated[str, Field(pattern=r"^ws_[0-9a-f]{16}$")]
 OperationId = Annotated[str, Field(pattern=r"^op_[0-9a-f]{16}$")]
 IdempotencyKey = Annotated[str, Field(min_length=8, max_length=200)]
-WorkspacePath = Annotated[str, Field(min_length=1, max_length=500)]
+WorkspacePath = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=500,
+        description=(
+            "Workspace-relative path. On Windows, reserved or ambiguous Win32 path forms such as "
+            "components with trailing dots/spaces, NTFS alternate-data-stream syntax, and DOS "
+            "device names are rejected rather than normalized."
+        ),
+    ),
+]
 QueryText = Annotated[str, Field(min_length=1, max_length=500)]
 ScriptText = Annotated[
     str,
@@ -36,7 +47,8 @@ PatchText = Annotated[
             "text destination. Delete File may remove any regular file, including binary files, "
             "when allow_delete=true. Updates preserve unchanged source line endings and use the "
             "file's first existing line ending for inserted lines. Paths are workspace-relative; "
-            "path identity follows the host filesystem semantics, so aliases resolve to one target."
+            "canonical aliases resolve to one target. On Windows, reserved or ambiguous Win32 "
+            "path forms are rejected rather than silently normalized to another filesystem target."
         ),
     ),
 ]

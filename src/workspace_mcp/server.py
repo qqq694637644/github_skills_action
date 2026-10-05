@@ -852,9 +852,9 @@ def create_server(
             "existing UTF-8 text "
             "destination and preserves the source file mode when available. Delete may remove "
             "binary files when allow_delete=true. Updates preserve unchanged source line endings. "
-            "Paths use host filesystem identity within the workspace, and changes are committed "
-            "atomically with rollback on failure. Do not send git/unified diff syntax or Markdown "
-            "fences."
+            "Paths are confined to the workspace; ambiguous Windows path forms that could alias a "
+            "different Win32 target are rejected. Changes are committed atomically with rollback "
+            "on failure. Do not send git/unified diff syntax or Markdown fences."
         ),
         annotations=_WRITE,
     )

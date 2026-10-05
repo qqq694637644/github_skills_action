@@ -236,6 +236,56 @@ def test_workspace_file_tools_reject_paths_outside_root() -> None:
         _run(scenario(Path(temp)))
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows path alias rules are Win32-specific")
+def test_workspace_rejects_ambiguous_windows_paths_before_disk_aliasing() -> None:
+    async def scenario(root: Path) -> None:
+        service = LocalWorkspaceService()
+        try:
+            prepared = await service.prepare_workspace(
+                idempotency_key="workspace-windows-alias-001", workspace_id=None
+            )
+            workspace_id = str(prepared["workspace_id"])
+            workspace_root = Path(os.environ["WORKSPACE_ROOT"]) / workspace_id
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.write_file(
+                    workspace_id=workspace_id,
+                    path="space.txt ",
+                    content="blocked\n",
+                    mode="create_only",
+                    line_ending="lf",
+                    expected_sha256=None,
+                    dry_run=False,
+                    max_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_INVALID_PATH"
+            assert not (workspace_root / "space.txt").exists()
+
+            with pytest.raises(WorkspaceToolError) as captured:
+                await service.apply_patch(
+                    workspace_id=workspace_id,
+                    patch=(
+                        "*** Begin Patch\n"
+                        "*** Add File: dup.txt\n"
+                        "+first\n"
+                        "*** Add File: dup.txt.\n"
+                        "+second\n"
+                        "*** End Patch"
+                    ),
+                    dry_run=False,
+                    allow_delete=False,
+                    max_changed_files=1,
+                    max_patch_bytes=None,
+                )
+            assert captured.value.code == "WORKSPACE_INVALID_PATH"
+            assert not (workspace_root / "dup.txt").exists()
+        finally:
+            await service.shutdown()
+
+    with tempfile.TemporaryDirectory() as temp, _environment(Path(temp)):
+        _run(scenario(Path(temp)))
+
+
 def test_utf8_log_pagination_never_splits_code_points() -> None:
     with tempfile.TemporaryDirectory() as temp:
         path = Path(temp) / "stdout.log"

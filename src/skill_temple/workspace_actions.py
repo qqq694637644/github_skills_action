@@ -12,6 +12,7 @@ from .action_logging import (
     log_action,
     log_action_error,
     log_activity,
+    log_unexpected_activity_failure,
     new_activity_id,
 )
 from .workspace_files import LocalWorkspaceService
@@ -714,6 +715,20 @@ def register_workspace_actions(app: FastAPI) -> None:
                 },
             )
             _raise_http(exc)
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceInspect",
+                activity_id=activity_id,
+                kind="exploration",
+                payload={
+                    "operation": "inspect",
+                    "workspace_id": request.workspace_id,
+                    "paths": request.paths,
+                    "queries": request.queries,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise
 
     @app.post(
         "/v1/workspace/search",
@@ -791,6 +806,20 @@ def register_workspace_actions(app: FastAPI) -> None:
                 },
             )
             _raise_http(exc)
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceSearch",
+                activity_id=activity_id,
+                kind="exploration",
+                payload={
+                    "operation": "search",
+                    "workspace_id": request.workspace_id,
+                    "query": request.query,
+                    "paths": request.paths,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise
 
     @app.post(
         "/v1/workspace/read-files",
@@ -873,6 +902,21 @@ def register_workspace_actions(app: FastAPI) -> None:
                 },
             )
             _raise_http(exc)
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceReadFiles",
+                activity_id=activity_id,
+                kind="exploration",
+                payload={
+                    "operation": "read",
+                    "workspace_id": request.workspace_id,
+                    "paths": request.paths,
+                    "start_line": request.start_line,
+                    "max_lines": request.max_lines,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise
 
     @app.post(
         "/v1/workspace/write-file",
@@ -956,6 +1000,20 @@ def register_workspace_actions(app: FastAPI) -> None:
                 },
             )
             _raise_http(exc)
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceWriteFile",
+                activity_id=activity_id,
+                kind="write",
+                payload={
+                    "operation": "write",
+                    "workspace_id": request.workspace_id,
+                    "path": request.path,
+                    "mode": request.mode,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise
 
     @app.post(
         "/v1/workspace/apply-patch",
@@ -1035,3 +1093,16 @@ def register_workspace_actions(app: FastAPI) -> None:
                 },
             )
             _raise_http(exc)
+        except Exception:
+            log_unexpected_activity_failure(
+                "workspaceApplyPatch",
+                activity_id=activity_id,
+                kind="patch",
+                payload={
+                    "operation": "patch",
+                    "workspace_id": request.workspace_id,
+                    "dry_run": request.dry_run,
+                },
+                legacy_fields={"workspace_id": request.workspace_id},
+            )
+            raise

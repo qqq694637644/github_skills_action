@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from skill_temple.action_logging import clear_action_events
+from skill_temple.action_logging import clear_action_events, wait_for_action_events
 from skill_temple.app import create_app
 
 
@@ -600,6 +600,39 @@ class WorkspaceActionsTests(unittest.TestCase):
             )
             self.assertEqual(linked_write.status_code, 403, linked_write.text)
             self.assertFalse((root / "symlink-escape.txt").exists())
+
+    def test_unexpected_patch_failure_closes_started_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            client = self._client(root)
+            workspace_id = self._prepare_workspace(client, "unexpected-patch-failure")
+            clear_action_events()
+
+            service = client.app.state.local_workspace_service
+            with patch.object(service, "apply_patch", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    client.post(
+                        "/v1/workspace/apply-patch",
+                        json={
+                            "workspace_id": workspace_id,
+                            "patch": "*** Begin Patch\n*** End Patch",
+                        },
+                    )
+
+            result = wait_for_action_events(
+                after=0,
+                timeout=0,
+                limit=10,
+                workspace_id=workspace_id,
+            )
+            structured = [item["event"] for item in result["items"] if "event" in item]
+            self.assertEqual([event["phase"] for event in structured], ["started", "failed"])
+            self.assertEqual(structured[0]["activity_id"], structured[1]["activity_id"])
+            self.assertEqual(structured[1]["payload"]["error_code"], "internal_error")
+            self.assertEqual(
+                structured[1]["payload"]["diagnostic"],
+                "Action failed unexpectedly.",
+            )
 
     def test_apply_patch_add_update_delete_dry_run_and_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -403,6 +403,7 @@ class RuntimeTests(unittest.TestCase):
             first_body["items"][1]["event"]["payload"]["skill_ids"],
             ["github-maintenance"],
         )
+        self.assertRegex(first_body["stream_id"], r"^[0-9a-f]{32}$")
         self.assertGreater(first_body["last_id"], 0)
 
         second = client.get(
@@ -412,6 +413,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.json()["items"], [])
         self.assertEqual(second.json()["last_id"], first_body["last_id"])
+        self.assertEqual(second.json()["stream_id"], first_body["stream_id"])
 
         too_long = client.get("/v1/action-logs", params={"wait": 61})
         self.assertEqual(too_long.status_code, 422)

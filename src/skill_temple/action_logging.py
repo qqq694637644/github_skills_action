@@ -39,6 +39,7 @@ class ActionEventItem(TypedDict, total=False):
 _ACTION_EVENTS: deque[ActionEventItem] = deque(maxlen=ACTION_EVENT_LIMIT)
 _ACTION_EVENTS_CONDITION = threading.Condition()
 _ACTION_EVENT_ID = 0
+_ACTION_STREAM_ID = secrets.token_hex(16)
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(\bauthorization\s*[:=]\s*bearer\s+)([^\s;]+)"),
@@ -261,7 +262,7 @@ def wait_for_action_events(
             )
             items, last_id = collect(wait_after)
 
-    return {"items": items, "last_id": last_id}
+    return {"stream_id": _ACTION_STREAM_ID, "items": items, "last_id": last_id}
 
 
 def clear_action_events() -> None:
@@ -291,4 +292,33 @@ def log_action_error(
         **fields,
         result="error",
         error_code=error_code,
+    )
+
+
+def log_unexpected_activity_failure(
+    action: str,
+    /,
+    *,
+    activity_id: str,
+    kind: ActivityKind,
+    payload: dict[str, Any],
+    legacy_fields: dict[str, Any] | None = None,
+) -> None:
+    """Close an already-started activity without exposing unexpected exception details."""
+
+    failed_payload = {
+        **payload,
+        "error_code": "internal_error",
+        "diagnostic": "Action failed unexpectedly.",
+    }
+    log_action_error(
+        action,
+        activity={
+            "activity_id": activity_id,
+            "kind": kind,
+            "phase": "failed",
+            "payload": failed_payload,
+        },
+        error_code="internal_error",
+        **(legacy_fields or {}),
     )

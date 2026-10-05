@@ -17,6 +17,7 @@ from .action_logging import (
     log_action,
     log_action_error,
     log_activity,
+    log_unexpected_activity_failure,
     new_activity_id,
     wait_for_action_events,
 )
@@ -336,6 +337,15 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
                 status_code=404,
                 detail=_error("skill_not_found", str(exc), "check_skill_id"),
             ) from exc
+        except Exception:
+            log_unexpected_activity_failure(
+                "loadSkills",
+                activity_id=activity_id,
+                kind="skill",
+                payload={"operation": "load", "skill_ids": request.skill_ids},
+                legacy_fields={"skill_ids": request.skill_ids},
+            )
+            raise
 
     @app.post(
         "/v1/skills/read",
@@ -438,6 +448,19 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
                 status_code=404,
                 detail=_error("unsafe_or_missing_path", str(exc), "check_path"),
             ) from exc
+        except Exception:
+            log_unexpected_activity_failure(
+                "readSkillContent",
+                activity_id=activity_id,
+                kind="skill",
+                payload={
+                    "operation": "read",
+                    "skill_id": request.skill_id,
+                    "path": request.path,
+                },
+                legacy_fields={"skill_id": request.skill_id, "path": request.path},
+            )
+            raise
 
     register_workspace_actions(app)
     return app

@@ -10,8 +10,29 @@ OperationId = Annotated[str, Field(pattern=r"^op_[0-9a-f]{16}$")]
 IdempotencyKey = Annotated[str, Field(min_length=8, max_length=200)]
 WorkspacePath = Annotated[str, Field(min_length=1, max_length=500)]
 QueryText = Annotated[str, Field(min_length=1, max_length=500)]
-ScriptText = Annotated[str, Field(min_length=1, max_length=20000)]
-PatchText = Annotated[str, Field(min_length=1)]
+ScriptText = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=20000,
+        description="Linux shell script. Only valid with workspaceCommand(action=start).",
+    ),
+]
+PatchText = Annotated[
+    str,
+    Field(
+        min_length=1,
+        description=(
+            "Raw workspace patch text using the Codex-compatible grammar; do not wrap it in "
+            "Markdown fences or send a git/unified diff. The first line must be "
+            "'*** Begin Patch' and the last line "
+            "'*** End Patch'. Update sections may use '@@' or '@@ <context>' anchors, "
+            "'*** Move to: <relative-path>', and '*** End of File'; update body lines start with "
+            "space, '+', or '-'. Add File content lines start with '+'. Delete File requires "
+            "allow_delete=true."
+        ),
+    ),
+]
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
 Paths = Annotated[list[WorkspacePath], Field(min_length=1, max_length=50)]
 Queries = Annotated[list[QueryText], Field(max_length=10)]

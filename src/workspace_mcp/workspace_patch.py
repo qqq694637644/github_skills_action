@@ -15,6 +15,15 @@ PatchKind = Literal["update", "add", "delete"]
 _BINARY_PATCH_MARKERS = ("GIT binary patch", "Binary files ", "Binary file ")
 
 
+_BEGIN_PATCH_MARKER = "*** Begin Patch"
+_END_PATCH_MARKER = "*** End Patch"
+_ADD_FILE_MARKER = "*** Add File: "
+_DELETE_FILE_MARKER = "*** Delete File: "
+_UPDATE_FILE_MARKER = "*** Update File: "
+_MOVE_TO_MARKER = "*** Move to: "
+_END_OF_FILE_MARKER = "*** End of File"
+
+
 class WorkspaceToolError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -24,8 +33,11 @@ class WorkspaceToolError(Exception):
 
 @dataclass(frozen=True)
 class TextPatchHunk:
-    old_lines: list[str]
-    new_lines: list[str]
+    change_context: str | None = None
+    old_lines: list[str] = field(default_factory=list)
+    new_lines: list[str] = field(default_factory=list)
+    context_line_indices: list[tuple[int, int]] = field(default_factory=list)
+    is_end_of_file: bool = False
 
 
 @dataclass(frozen=True)
@@ -34,6 +46,7 @@ class TextPatchOperation:
     path: str
     hunks: list[TextPatchHunk] = field(default_factory=list)
     add_lines: list[str] = field(default_factory=list)
+    move_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -148,12 +161,7 @@ def parse_codex_patch(
     assert_text_bytes(payload)
     if any(marker in patch for marker in _BINARY_PATCH_MARKERS):
         raise WorkspaceToolError("WORKSPACE_BINARY_NOT_ALLOWED", "Binary patches are not allowed.")
-    lines = patch.splitlines()
-    if not lines or lines[0].strip() != "*** Begin Patch" or lines[-1].strip() != "*** End Patch":
-        raise WorkspaceToolError(
-            "WORKSPACE_PATCH_INVALID",
-            "Patch must start with '*** Begin Patch' and end with '*** End Patch'.",
-        )
+    lines = _patch_lines(patch)
 
     operations: list[TextPatchOperation] = []
     paths_seen: set[str] = set()
@@ -163,8 +171,9 @@ def parse_codex_patch(
         if not line.strip():
             idx += 1
             continue
-        if line.startswith("*** Update File: "):
-            path = line.removeprefix("*** Update File: ").strip()
+        marker = line.strip()
+        if marker.startswith(_UPDATE_FILE_MARKER):
+            path = marker.removeprefix(_UPDATE_FILE_MARKER).strip()
             resolved = target_path(root, path)
             if not resolved.exists() or not resolved.is_file():
                 raise WorkspaceToolError(
@@ -172,11 +181,17 @@ def parse_codex_patch(
                     f"Update File target does not exist as a file: {path}",
                 )
             body, idx = _collect_operation_body(lines, idx + 1)
+            hunks, move_path = _parse_update_hunks(body, path, root)
             operations.append(
-                TextPatchOperation(kind="update", path=path, hunks=_parse_update_hunks(body, path))
+                TextPatchOperation(
+                    kind="update",
+                    path=path,
+                    hunks=hunks,
+                    move_path=move_path,
+                )
             )
-        elif line.startswith("*** Add File: "):
-            path = line.removeprefix("*** Add File: ").strip()
+        elif marker.startswith(_ADD_FILE_MARKER):
+            path = marker.removeprefix(_ADD_FILE_MARKER).strip()
             if target_path(root, path).exists():
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_INVALID",
@@ -190,8 +205,8 @@ def parse_codex_patch(
                     add_lines=_parse_add_file_lines(body, path),
                 )
             )
-        elif line.startswith("*** Delete File: "):
-            path = line.removeprefix("*** Delete File: ").strip()
+        elif marker.startswith(_DELETE_FILE_MARKER):
+            path = marker.removeprefix(_DELETE_FILE_MARKER).strip()
             if not allow_delete:
                 raise WorkspaceToolError(
                     "WORKSPACE_DELETE_NOT_ALLOWED",
@@ -214,7 +229,10 @@ def parse_codex_patch(
             raise WorkspaceToolError(
                 "WORKSPACE_PATCH_INVALID", f"Unsupported patch operation: {line}"
             )
-        paths_seen.add(operations[-1].path)
+        operation = operations[-1]
+        paths_seen.add(operation.path)
+        if operation.move_path is not None:
+            paths_seen.add(operation.move_path)
         if len(paths_seen) > max_changed_files:
             raise WorkspaceToolError(
                 "WORKSPACE_TOO_MANY_CHANGED_FILES",
@@ -259,11 +277,17 @@ def prepare_text_patch(
                 new_lines,
                 trailing_newline=trailing,
             )
-            current[operation.path] = normalize_line_endings(
+            rendered = normalize_line_endings(
                 rendered,
                 line_ending=line_ending,
                 previous_bytes=None,
-            ).encode("utf-8")
+            )
+            updated = rendered.encode("utf-8")
+            if operation.move_path is not None and operation.move_path != operation.path:
+                current[operation.move_path] = updated
+                current[operation.path] = None
+            else:
+                current[operation.path] = updated
     return [
         PreparedFileChange(
             path=snapshot.path,
@@ -474,9 +498,33 @@ def _detect_line_ending(data: bytes) -> Literal["lf", "crlf"]:
     return "lf"
 
 
+# Parser and matching semantics below are adapted from OpenAI Codex's
+# codex-rs/apply-patch implementation (Apache-2.0).
+def _patch_lines(patch: str) -> list[str]:
+    """Normalize the Codex apply_patch envelope, including its lenient heredoc form."""
+    lines = patch.strip().splitlines()
+    if (
+        len(lines) >= 4
+        and lines[0].strip() in {"<<EOF", "<<'EOF'", '<<"EOF"'}
+        and lines[-1].strip().endswith("EOF")
+    ):
+        lines = lines[1:-1]
+    if not lines or lines[0].strip() != _BEGIN_PATCH_MARKER:
+        raise WorkspaceToolError(
+            "WORKSPACE_PATCH_INVALID",
+            f"The first line of the patch must be '{_BEGIN_PATCH_MARKER}'.",
+        )
+    if lines[-1].strip() != _END_PATCH_MARKER:
+        raise WorkspaceToolError(
+            "WORKSPACE_PATCH_INVALID",
+            f"The last line of the patch must be '{_END_PATCH_MARKER}'.",
+        )
+    return lines
+
+
 def _collect_operation_body(lines: list[str], start: int) -> tuple[list[str], int]:
     end = start
-    prefixes = ("*** Update File: ", "*** Add File: ", "*** Delete File: ")
+    prefixes = (_UPDATE_FILE_MARKER, _ADD_FILE_MARKER, _DELETE_FILE_MARKER)
     while end < len(lines) - 1 and not lines[end].startswith(prefixes):
         end += 1
     return lines[start:end], end
@@ -485,95 +533,289 @@ def _collect_operation_body(lines: list[str], start: int) -> tuple[list[str], in
 def _parse_add_file_lines(body: list[str], path: str) -> list[str]:
     output: list[str] = []
     for line in body:
-        if line == "":
-            continue
         if not line.startswith("+"):
             raise WorkspaceToolError(
                 "WORKSPACE_PATCH_INVALID",
                 f"Add File content lines must start with '+': {path}: {line}",
             )
         output.append(line[1:])
+    if not output:
+        raise WorkspaceToolError(
+            "WORKSPACE_PATCH_INVALID",
+            f"Add File operation must contain at least one '+' line: {path}",
+        )
     return output
 
 
-def _parse_update_hunks(body: list[str], path: str) -> list[TextPatchHunk]:
+def _parse_update_hunks(
+    body: list[str],
+    path: str,
+    root: Path,
+) -> tuple[list[TextPatchHunk], str | None]:
+    """Parse the update grammar used by Codex's apply-patch streaming parser."""
     hunks: list[TextPatchHunk] = []
-    current: list[str] | None = None
+    move_path: str | None = None
+    change_context: str | None = None
+    old_lines: list[str] | None = None
+    new_lines: list[str] | None = None
+    context_line_indices: list[tuple[int, int]] | None = None
+    is_end_of_file = False
+
+    def start_hunk(context: str | None = None) -> None:
+        nonlocal change_context, old_lines, new_lines, context_line_indices, is_end_of_file
+        change_context = context
+        old_lines = []
+        new_lines = []
+        context_line_indices = []
+        is_end_of_file = False
+
+    def finish_hunk() -> None:
+        nonlocal change_context, old_lines, new_lines, context_line_indices, is_end_of_file
+        if old_lines is None or new_lines is None or context_line_indices is None:
+            return
+        if not old_lines and not new_lines:
+            raise WorkspaceToolError(
+                "WORKSPACE_PATCH_INVALID",
+                f"Update hunk does not contain any lines: {path}",
+            )
+        hunks.append(
+            TextPatchHunk(
+                change_context=change_context,
+                old_lines=old_lines,
+                new_lines=new_lines,
+                context_line_indices=context_line_indices,
+                is_end_of_file=is_end_of_file,
+            )
+        )
+        change_context = None
+        old_lines = None
+        new_lines = None
+        context_line_indices = None
+        is_end_of_file = False
+
     for line in body:
-        if line.startswith("@@"):
-            if current is not None:
-                hunks.append(_build_hunk(current, path))
-            current = []
+        update_line = line.rstrip()
+        if (
+            not hunks
+            and old_lines is None
+            and move_path is None
+            and update_line.startswith(_MOVE_TO_MARKER)
+        ):
+            candidate = update_line.removeprefix(_MOVE_TO_MARKER).strip()
+            if not candidate:
+                raise WorkspaceToolError(
+                    "WORKSPACE_PATCH_INVALID",
+                    f"Move destination cannot be empty: {path}",
+                )
+            target_path(root, candidate)
+            if candidate == path:
+                raise WorkspaceToolError(
+                    "WORKSPACE_PATCH_INVALID",
+                    f"Move destination must differ from the source path: {path}",
+                )
+            move_path = candidate
             continue
-        if current is None:
-            if not line.strip():
+
+        if update_line == "@@" or update_line.startswith("@@ "):
+            finish_hunk()
+            context = None if update_line == "@@" else update_line[3:]
+            start_hunk(context)
+            continue
+
+        if is_end_of_file:
+            if update_line == "":
                 continue
             raise WorkspaceToolError(
                 "WORKSPACE_PATCH_INVALID",
-                f"Update File sections must contain '@@' hunks: {path}",
+                f"Expected a new '@@' hunk after '{_END_OF_FILE_MARKER}': {path}",
             )
+
+        if update_line == _END_OF_FILE_MARKER:
+            if old_lines is None or (not old_lines and not new_lines):
+                raise WorkspaceToolError(
+                    "WORKSPACE_PATCH_INVALID",
+                    f"'{_END_OF_FILE_MARKER}' requires a non-empty update hunk: {path}",
+                )
+            is_end_of_file = True
+            continue
+
         if line.startswith("\\ No newline at end of file"):
             continue
-        if line == "" or line[0] not in {" ", "+", "-"}:
+
+        if old_lines is None:
+            start_hunk()
+        assert old_lines is not None
+        assert new_lines is not None
+        assert context_line_indices is not None
+
+        if line == "":
+            context_line_indices.append((len(old_lines), len(new_lines)))
+            old_lines.append("")
+            new_lines.append("")
+        elif line.startswith(" "):
+            value = line[1:]
+            context_line_indices.append((len(old_lines), len(new_lines)))
+            old_lines.append(value)
+            new_lines.append(value)
+        elif line.startswith("+"):
+            new_lines.append(line[1:])
+        elif line.startswith("-"):
+            old_lines.append(line[1:])
+        else:
             raise WorkspaceToolError(
                 "WORKSPACE_PATCH_INVALID",
-                f"Patch hunk lines must start with ' ', '+', or '-': {path}",
+                (
+                    f"Unexpected line in update hunk for {path}: {line!r}. "
+                    "Every line must start with space, '+', or '-'."
+                ),
             )
-        current.append(line)
-    if current is not None:
-        hunks.append(_build_hunk(current, path))
+
+    finish_hunk()
     if not hunks:
         raise WorkspaceToolError(
             "WORKSPACE_PATCH_INVALID", f"Update File operation has no hunks: {path}"
         )
-    return hunks
-
-
-def _build_hunk(lines: list[str], path: str) -> TextPatchHunk:
-    old_lines: list[str] = []
-    new_lines: list[str] = []
-    for line in lines:
-        marker, value = line[0], line[1:]
-        if marker == " ":
-            old_lines.append(value)
-            new_lines.append(value)
-        elif marker == "-":
-            old_lines.append(value)
-        elif marker == "+":
-            new_lines.append(value)
-    if not old_lines and not new_lines:
-        raise WorkspaceToolError("WORKSPACE_PATCH_INVALID", f"Empty patch hunk: {path}")
-    return TextPatchHunk(old_lines=old_lines, new_lines=new_lines)
+    return hunks, move_path
 
 
 def _apply_hunks(lines: list[str], hunks: list[TextPatchHunk], path: str) -> list[str]:
-    current = list(lines)
+    """Compute replacements using Codex's ordered context seeking, then apply them in reverse."""
+    replacements: list[tuple[int, int, list[str]]] = []
     cursor = 0
     for hunk in hunks:
-        if hunk.old_lines:
-            idx = _find_subsequence(current, hunk.old_lines, cursor)
-            if idx < 0 and cursor > 0:
-                idx = _find_subsequence(current, hunk.old_lines, 0)
-            if idx < 0:
+        if hunk.change_context is not None:
+            context_idx = _seek_sequence(
+                lines,
+                [hunk.change_context],
+                cursor,
+                eof=False,
+            )
+            if context_idx is None:
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_CONTEXT_MISMATCH",
-                    f"Patch context did not match the current file content: {path}",
+                    f"Failed to find context {hunk.change_context!r} in {path}",
                 )
-            current = current[:idx] + hunk.new_lines + current[idx + len(hunk.old_lines) :]
-            cursor = idx + len(hunk.new_lines)
-        else:
-            current = current[:cursor] + hunk.new_lines + current[cursor:]
-            cursor += len(hunk.new_lines)
+            cursor = context_idx + 1
+
+        if not hunk.old_lines:
+            replacements.append((len(lines), 0, list(hunk.new_lines)))
+            continue
+
+        pattern = list(hunk.old_lines)
+        replacement = list(hunk.new_lines)
+        idx = _seek_sequence(
+            lines,
+            pattern,
+            cursor,
+            eof=hunk.is_end_of_file,
+        )
+        if idx is None and pattern and pattern[-1] == "":
+            pattern = pattern[:-1]
+            if replacement and replacement[-1] == "":
+                replacement = replacement[:-1]
+            idx = _seek_sequence(
+                lines,
+                pattern,
+                cursor,
+                eof=hunk.is_end_of_file,
+            )
+        if idx is None:
+            expected = "\n".join(hunk.old_lines)
+            raise WorkspaceToolError(
+                "WORKSPACE_PATCH_CONTEXT_MISMATCH",
+                f"Failed to find expected lines in {path}:\n{expected}",
+            )
+
+        for old_index, new_index in hunk.context_line_indices:
+            if old_index < len(pattern) and new_index < len(replacement):
+                replacement[new_index] = lines[idx + old_index]
+        replacements.append((idx, len(pattern), replacement))
+        cursor = idx + len(pattern)
+
+    current = list(lines)
+    for start, old_len, replacement in sorted(replacements, key=lambda item: item[0], reverse=True):
+        current[start : start + old_len] = replacement
     return current
 
 
-def _find_subsequence(lines: list[str], needle: list[str], start: int) -> int:
-    if not needle:
-        return start
-    for idx in range(max(start, 0), len(lines) - len(needle) + 1):
-        if lines[idx : idx + len(needle)] == needle:
-            return idx
-    return -1
+def _seek_sequence(
+    lines: list[str],
+    pattern: list[str],
+    start: int,
+    *,
+    eof: bool,
+) -> int | None:
+    """Match like Codex: exact, rstrip, strip, then common Unicode normalization."""
+    if not pattern:
+        return max(start, 0)
+    if len(pattern) > len(lines):
+        return None
+    last_start = len(lines) - len(pattern)
+    first_start = max(start, 0)
+    if first_start > last_start:
+        return None
+    positions = range(last_start, last_start + 1) if eof else range(first_start, last_start + 1)
+
+    def find_with(normalize: object) -> int | None:
+        for idx in positions:
+            if normalize is None:
+                if lines[idx : idx + len(pattern)] == pattern:
+                    return idx
+                continue
+            normalizer = normalize
+            if all(
+                normalizer(lines[idx + offset]) == normalizer(expected)
+                for offset, expected in enumerate(pattern)
+            ):
+                return idx
+        return None
+
+    exact = find_with(None)
+    if exact is not None:
+        return exact
+    rstrip = find_with(str.rstrip)
+    if rstrip is not None:
+        return rstrip
+    stripped = find_with(str.strip)
+    if stripped is not None:
+        return stripped
+    return find_with(_normalize_patch_match_text)
+
+
+def _normalize_patch_match_text(value: str) -> str:
+    translations = str.maketrans(
+        {
+            "\u2010": "-",
+            "\u2011": "-",
+            "\u2012": "-",
+            "\u2013": "-",
+            "\u2014": "-",
+            "\u2015": "-",
+            "\u2212": "-",
+            "\u2018": "'",
+            "\u2019": "'",
+            "\u201a": "'",
+            "\u201b": "'",
+            "\u201c": '"',
+            "\u201d": '"',
+            "\u201e": '"',
+            "\u201f": '"',
+            "\u00a0": " ",
+            "\u2002": " ",
+            "\u2003": " ",
+            "\u2004": " ",
+            "\u2005": " ",
+            "\u2006": " ",
+            "\u2007": " ",
+            "\u2008": " ",
+            "\u2009": " ",
+            "\u200a": " ",
+            "\u202f": " ",
+            "\u205f": " ",
+            "\u3000": " ",
+        }
+    )
+    return value.strip().translate(translations)
 
 
 def _split_text_lines(text: str) -> tuple[list[str], bool]:

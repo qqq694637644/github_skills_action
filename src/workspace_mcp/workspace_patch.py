@@ -11,8 +11,6 @@ from typing import Literal
 
 PatchKind = Literal["update", "add", "delete"]
 
-_BINARY_PATCH_MARKERS = ("GIT binary patch", "Binary files ", "Binary file ")
-
 
 _BEGIN_PATCH_MARKER = "*** Begin Patch"
 _END_PATCH_MARKER = "*** End Patch"
@@ -148,8 +146,6 @@ def parse_codex_patch(
 ) -> list[TextPatchOperation]:
     payload = patch.encode("utf-8")
     assert_text_bytes(payload)
-    if any(marker in patch for marker in _BINARY_PATCH_MARKERS):
-        raise WorkspaceToolError("WORKSPACE_BINARY_NOT_ALLOWED", "Binary patches are not allowed.")
     lines = _patch_lines(patch)
 
     operations: list[TextPatchOperation] = []

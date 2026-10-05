@@ -52,12 +52,13 @@ PatchText = Annotated[
     Field(
         min_length=1,
         description=(
-            "Raw workspace patch text; do not wrap it in Markdown fences or send a git/unified "
-            "diff. "
-            "The first line must be '*** Begin Patch' and the last line '*** End Patch'. Use "
-            "'*** Update File: <relative-path>' followed by one or more '@@' hunks whose lines "
-            "start with space, '+', or '-'; use '*** Add File: <relative-path>' with every content "
-            "line starting '+'; use '*** Delete File: <relative-path>' only when allow_delete=true."
+            "Raw workspace patch text using the Codex-compatible grammar; do not wrap it in "
+            "Markdown fences or send a git/unified diff. The first line must be "
+            "'*** Begin Patch' and the last line "
+            "'*** End Patch'. Update sections may use '@@' or '@@ <context>' anchors, "
+            "'*** Move to: <relative-path>', and '*** End of File'; update body lines start with "
+            "space, '+', or '-'. Add File content lines start with '+'. Delete File requires "
+            "allow_delete=true."
         ),
     ),
 ]

@@ -276,7 +276,12 @@ class LocalWorkspaceService:
         operations = parse_codex_patch(
             patch, root, allow_delete=allow_delete, max_changed_files=changed_limit
         )
-        paths = list(dict.fromkeys(operation.path for operation in operations))
+        paths: list[str] = []
+        for operation in operations:
+            paths.append(operation.path)
+            if operation.move_path is not None:
+                paths.append(operation.move_path)
+        paths = list(dict.fromkeys(paths))
         snapshots = snapshot_files(root, paths)
         prepared = prepare_text_patch(root, operations, snapshots)
         changed, diff_stat = describe_changes(prepared)

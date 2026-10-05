@@ -74,9 +74,11 @@ from .workspace_registry import WorkspaceRegistry
 SERVER_INSTRUCTIONS = (
     "Use workspaceInspect/workspaceSearch before guessing paths and workspaceReadFiles before "
     "editing exact targets. Use workspaceWriteFile for one complete known file and "
-    "workspaceApplyPatch for bounded multi-file edits; workspaceApplyPatch.patch must be raw patch "
-    "text enclosed by '*** Begin Patch' and '*** End Patch', not a git/unified diff or Markdown "
-    "fence. workspaceCommand requires action on every call: start also requires idempotency_key, "
+    "workspaceApplyPatch for bounded multi-file edits; workspaceApplyPatch.patch uses the "
+    "Codex-compatible raw patch grammar enclosed by '*** Begin Patch' and '*** End Patch', not a "
+    "git/unified diff or Markdown fence. Update sections can use '@@ <context>', "
+    "'*** Move to:', and '*** End of File'. workspaceCommand requires action on every call: start "
+    "also requires idempotency_key, "
     "workspace_id, and script; get/logs/cancel require operation_id. Carry next_stdout_offset and "
     "next_stderr_offset into subsequent get calls; use logs only to reread/page historical output."
 )
@@ -251,19 +253,19 @@ _READ_ONLY = ToolAnnotations(
     open_world_hint=False,
 )
 _WRITE = ToolAnnotations(
-    read_only_hint=True,
+    read_only_hint=False,
     destructive_hint=True,
     idempotent_hint=False,
     open_world_hint=False,
 )
 _COMMAND = ToolAnnotations(
-    read_only_hint=True,
+    read_only_hint=False,
     destructive_hint=True,
     idempotent_hint=False,
-    open_world_hint=False,
+    open_world_hint=True,
 )
 _PREPARE = ToolAnnotations(
-    read_only_hint=True,
+    read_only_hint=False,
     destructive_hint=False,
     idempotent_hint=True,
     open_world_hint=False,
@@ -852,11 +854,13 @@ def create_server(
         title="Apply workspace patch",
         description=(
             "Use after inspecting/reading exact targets for bounded multi-file UTF-8 edits. patch "
-            "uses the raw workspace patch grammar, not a standard git/unified diff: begin with "
-            "'*** Begin Patch', end with '*** End Patch', and use Update/Add/Delete File sections. "
-            "Update sections require '@@' hunks; Add content lines start with '+'; Delete requires "
-            "allow_delete=true. Do not wrap patch text in Markdown fences. Changes are committed "
-            "atomically with rollback on failure, and every path is confined to the workspace root."
+            "uses the Codex-compatible raw patch grammar, not a standard git/unified diff: begin "
+            "with '*** Begin Patch', end with '*** End Patch', and use Update/Add/Delete File "
+            "sections. Update chunks may start directly with context/change lines or use '@@' / "
+            "'@@ <context>' anchors; updates also support '*** Move to:' and '*** End of File'. "
+            "Add content lines start with '+'; Delete requires allow_delete=true. Do not wrap "
+            "patch text in Markdown fences. Changes are committed atomically with rollback on "
+            "failure, and every path is confined to the workspace root."
         ),
         annotations=_WRITE,
     )

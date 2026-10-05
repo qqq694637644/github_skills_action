@@ -99,6 +99,14 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         assert inspect_properties["paths"]["anyOf"][0]["items"]["maxLength"] == 500
         assert inspect_properties["queries"]["anyOf"][0]["items"]["minLength"] == 1
         assert inspect_properties["queries"]["anyOf"][0]["items"]["maxLength"] == 500
+        patch_tool = by_name["workspaceApplyPatch"]
+        assert patch_tool.description is not None
+        assert "Codex-compatible core apply_patch grammar" in patch_tool.description
+        assert "evaluated sequentially" in patch_tool.description
+        patch_description = patch_tool.input_schema["properties"]["patch"]["description"]
+        assert "File operations are evaluated in order" in patch_description
+        assert "may replace an existing UTF-8 text file" in patch_description
+        assert "canonicalized" in patch_description
         assert command.annotations is not None
         assert command.annotations.destructive_hint is True
         assert command.annotations.open_world_hint is True

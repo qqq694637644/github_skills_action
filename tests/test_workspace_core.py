@@ -679,6 +679,27 @@ def test_write_and_patch_preserve_posix_mode() -> None:
             )
             assert stat.S_IMODE(target.stat().st_mode) == 0o755
 
+            await service.apply_patch(
+                workspace_id=workspace_id,
+                patch=(
+                    "*** Begin Patch\n"
+                    "*** Update File: script.sh\n"
+                    "*** Move to: bin/script.sh\n"
+                    "@@\n"
+                    "-echo patched\n"
+                    "+echo moved\n"
+                    "*** End Patch"
+                ),
+                dry_run=False,
+                allow_delete=False,
+                max_changed_files=None,
+                max_patch_bytes=None,
+            )
+            moved = workspace_root / "bin/script.sh"
+            assert not target.exists()
+            assert moved.read_bytes() == b"#!/bin/bash\necho moved\n"
+            assert stat.S_IMODE(moved.stat().st_mode) == 0o755
+
             plain = workspace_root / "plain.txt"
             plain.write_bytes(b"before\n")
             plain.chmod(0o644)

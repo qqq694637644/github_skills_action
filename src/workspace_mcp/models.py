@@ -23,13 +23,17 @@ PatchText = Annotated[
     Field(
         min_length=1,
         description=(
-            "Raw workspace patch text using the Codex-compatible grammar; do not wrap it in "
-            "Markdown fences or send a git/unified diff. The first line must be "
-            "'*** Begin Patch' and the last line "
-            "'*** End Patch'. Update sections may use '@@' or '@@ <context>' anchors, "
-            "'*** Move to: <relative-path>', and '*** End of File'; update body lines start with "
-            "space, '+', or '-'. Add File content lines start with '+'. Delete File requires "
-            "allow_delete=true."
+            "Raw workspace patch text using the Codex-compatible core apply_patch grammar; do not "
+            "wrap it in Markdown fences or send a git/unified diff. The first line must be "
+            "'*** Begin Patch' and the last line '*** End Patch'. File operations are evaluated "
+            "in order, so a later operation may update a file created or moved earlier in the "
+            "same patch. Supported operations are Update File, Add File, and Delete File "
+            "(Delete requires allow_delete=true). Update sections may use '@@' or "
+            "'@@ <context>' anchors, '*** Move to: <relative-path>', and '*** End of File'; "
+            "update body lines start with space, '+', or '-'. Add File content lines start with "
+            "'+' and may replace an existing UTF-8 text file. Move may replace an existing UTF-8 "
+            "text destination. Paths are workspace-relative and canonicalized so aliases such as "
+            "'./file' and 'dir/../file' identify the same target."
         ),
     ),
 ]

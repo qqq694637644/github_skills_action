@@ -3,7 +3,11 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from workspace_mcp.workspace_patch import (
+    WorkspaceToolError,
+    commit_prepared_changes,
     parse_codex_patch,
     prepare_text_patch,
     snapshot_files,
@@ -175,3 +179,134 @@ def test_codex_patch_allows_binary_diff_marker_as_plain_text() -> None:
         )
 
         assert changes[0].after == b"GIT binary patch\n"
+
+def test_codex_patch_evaluates_add_then_update_against_evolving_state() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Add File: a.txt\n"
+            "+one\n"
+            "*** Update File: a.txt\n"
+            "@@\n"
+            "-one\n"
+            "+two\n"
+            "*** End Patch",
+        )
+
+        assert len(changes) == 1
+        assert changes[0].path == "a.txt"
+        assert changes[0].before is None
+        assert changes[0].after == b"two\n"
+
+
+def test_codex_patch_evaluates_move_then_update_against_evolving_state() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "old.txt").write_bytes(b"one\n")
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Update File: old.txt\n"
+            "*** Move to: moved.txt\n"
+            "@@\n"
+            "-one\n"
+            "+two\n"
+            "*** Update File: moved.txt\n"
+            "@@\n"
+            "-two\n"
+            "+three\n"
+            "*** End Patch",
+        )
+
+        by_path = {change.path: change for change in changes}
+        assert by_path["old.txt"].after is None
+        assert by_path["moved.txt"].after == b"three\n"
+
+
+def test_codex_add_file_may_replace_existing_utf8_text() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "a.txt").write_bytes(b"old\n")
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Add File: a.txt\n"
+            "+new\n"
+            "*** End Patch",
+        )
+
+        assert len(changes) == 1
+        assert changes[0].before == b"old\n"
+        assert changes[0].after == b"new\n"
+
+
+def test_codex_patch_rejects_move_to_same_canonical_path() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "same.txt").write_bytes(b"one\n")
+
+        with pytest.raises(WorkspaceToolError) as captured:
+            _prepare(
+                root,
+                "*** Begin Patch\n"
+                "*** Update File: same.txt\n"
+                "*** Move to: ./same.txt\n"
+                "@@\n"
+                "-one\n"
+                "+two\n"
+                "*** End Patch",
+            )
+
+        assert captured.value.code == "WORKSPACE_PATCH_INVALID"
+        assert "must differ" in captured.value.message
+
+
+def test_codex_patch_canonicalizes_path_aliases_to_one_transaction_target() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "a.txt").write_bytes(b"one\n")
+
+        _, changes = _prepare(
+            root,
+            "*** Begin Patch\n"
+            "*** Update File: ./a.txt\n"
+            "@@\n"
+            "-one\n"
+            "+two\n"
+            "*** Update File: dir/../a.txt\n"
+            "@@\n"
+            "-two\n"
+            "+three\n"
+            "*** End Patch",
+        )
+
+        assert len(changes) == 1
+        assert changes[0].path == "a.txt"
+        commit_prepared_changes(root, changes)
+        assert (root / "a.txt").read_bytes() == b"three\n"
+
+
+def test_codex_move_rejects_existing_binary_destination() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "old.txt").write_bytes(b"one\n")
+        (root / "dest.bin").write_bytes(b"\x00\xff")
+
+        with pytest.raises(WorkspaceToolError) as captured:
+            _prepare(
+                root,
+                "*** Begin Patch\n"
+                "*** Update File: old.txt\n"
+                "*** Move to: dest.bin\n"
+                "@@\n"
+                "-one\n"
+                "+two\n"
+                "*** End Patch",
+            )
+
+        assert captured.value.code == "WORKSPACE_BINARY_NOT_ALLOWED"

@@ -105,6 +105,7 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         assert "evaluated sequentially" in patch_tool.description
         patch_description = patch_tool.input_schema["properties"]["patch"]["description"]
         assert "File operations are evaluated in order" in patch_description
+        assert "Add File may create an empty file" in patch_description
         assert "may replace an existing UTF-8 text file" in patch_description
         assert "including binary files" in patch_description
         assert "host filesystem semantics" in patch_description

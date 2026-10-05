@@ -227,77 +227,12 @@ def parse_codex_patch(
     payload = patch.encode("utf-8")
     assert_text_bytes(payload)
     lines = _patch_lines(patch)
-
-    operations: list[TextPatchOperation] = []
-    paths_seen: set[Path] = set()
-    idx = 1
-    while idx < len(lines) - 1:
-        line = lines[idx]
-        if not line.strip():
-            idx += 1
-            continue
-        marker = line.strip()
-        if marker.startswith(_UPDATE_FILE_MARKER):
-            path, _ = canonical_workspace_path(
-                root, marker.removeprefix(_UPDATE_FILE_MARKER).strip()
-            )
-            body, idx = _collect_operation_body(lines, idx + 1)
-            hunks, move_path = _parse_update_hunks(body, path, root)
-            operations.append(
-                TextPatchOperation(
-                    kind="update",
-                    path=path,
-                    hunks=hunks,
-                    move_path=move_path,
-                )
-            )
-        elif marker.startswith(_ADD_FILE_MARKER):
-            path, _ = canonical_workspace_path(
-                root, marker.removeprefix(_ADD_FILE_MARKER).strip()
-            )
-            body, idx = _collect_operation_body(lines, idx + 1)
-            operations.append(
-                TextPatchOperation(
-                    kind="add",
-                    path=path,
-                    add_lines=_parse_add_file_lines(body, path),
-                )
-            )
-        elif marker.startswith(_DELETE_FILE_MARKER):
-            path, _ = canonical_workspace_path(
-                root, marker.removeprefix(_DELETE_FILE_MARKER).strip()
-            )
-            if not allow_delete:
-                raise WorkspaceToolError(
-                    "WORKSPACE_DELETE_NOT_ALLOWED",
-                    f"Delete File is disabled for this request: {path}",
-                )
-            body, idx = _collect_operation_body(lines, idx + 1)
-            if any(item.strip() for item in body):
-                raise WorkspaceToolError(
-                    "WORKSPACE_PATCH_INVALID",
-                    f"Delete File sections cannot contain file content: {path}",
-                )
-            operations.append(TextPatchOperation(kind="delete", path=path))
-        else:
-            raise WorkspaceToolError(
-                "WORKSPACE_PATCH_INVALID", f"Unsupported patch operation: {line}"
-            )
-        operation = operations[-1]
-        paths_seen.add(target_path(root, operation.path))
-        if operation.move_path is not None:
-            paths_seen.add(target_path(root, operation.move_path))
-        if len(paths_seen) > max_changed_files:
-            raise WorkspaceToolError(
-                "WORKSPACE_TOO_MANY_CHANGED_FILES",
-                f"Patch changes too many files: {len(paths_seen)} > {max_changed_files}.",
-            )
-
-    if not operations:
-        raise WorkspaceToolError(
-            "WORKSPACE_PATCH_INVALID", "Patch does not contain any file operations."
-        )
-    return operations
+    parser = _PatchParser(
+        root=root,
+        allow_delete=allow_delete,
+        max_changed_files=max_changed_files,
+    )
+    return parser.parse(lines)
 
 
 def prepare_text_patch(
@@ -591,160 +526,267 @@ def _patch_lines(patch: str) -> list[str]:
     return lines
 
 
-def _collect_operation_body(lines: list[str], start: int) -> tuple[list[str], int]:
-    end = start
-    prefixes = (_UPDATE_FILE_MARKER, _ADD_FILE_MARKER, _DELETE_FILE_MARKER)
-    while end < len(lines) - 1 and not lines[end].startswith(prefixes):
-        end += 1
-    return lines[start:end], end
+class _PatchParser:
+    """Line-oriented parser modeled on Codex StreamingPatchParser."""
 
+    def __init__(self, *, root: Path, allow_delete: bool, max_changed_files: int) -> None:
+        self.root = root
+        self.allow_delete = allow_delete
+        self.max_changed_files = max_changed_files
+        self.mode: Literal["started", "add", "delete", "update", "ended"] = "started"
+        self.operations: list[TextPatchOperation] = []
+        self.paths_seen: set[Path] = set()
 
-def _parse_add_file_lines(body: list[str], path: str) -> list[str]:
-    output: list[str] = []
-    for line in body:
-        if not line.startswith("+"):
+    def parse(self, lines: list[str]) -> list[TextPatchOperation]:
+        for line_number, line in enumerate(lines[1:], start=2):
+            self._process_line(line, line_number)
+        if self.mode != "ended":
             raise WorkspaceToolError(
                 "WORKSPACE_PATCH_INVALID",
-                f"Add File content lines must start with '+': {path}: {line}",
+                f"The last line of the patch must be '{_END_PATCH_MARKER}'.",
             )
-        output.append(line[1:])
-    if not output:
+        return self.operations
+
+    def _process_line(self, line: str, line_number: int) -> None:
+        if self.mode == "ended":
+            if not line.strip():
+                return
+            raise WorkspaceToolError(
+                "WORKSPACE_PATCH_INVALID",
+                f"The last line of the patch must be '{_END_PATCH_MARKER}'.",
+            )
+
+        if self.mode == "update":
+            self._process_update_line(line, line_number)
+            return
+
+        marker = line.strip()
+        # Preserve the existing model-friendly tolerance for harmless blank lines.
+        if not marker:
+            return
+        if self._handle_header(marker, line_number):
+            return
+
+        if self.mode == "add" and line.startswith("+"):
+            self.operations[-1].add_lines.append(line[1:])
+            return
         raise WorkspaceToolError(
             "WORKSPACE_PATCH_INVALID",
-            f"Add File operation must contain at least one '+' line: {path}",
+            (
+                f"Invalid patch line {line_number}: {line!r}. "
+                "Expected an Add/Delete/Update File header"
+                + (" or an Add File line starting with '+'." if self.mode == "add" else ".")
+            ),
         )
-    return output
 
+    def _handle_header(self, marker: str, line_number: int) -> bool:
+        if marker == _END_PATCH_MARKER:
+            self._ensure_update_not_empty(marker, line_number)
+            self.mode = "ended"
+            return True
 
-def _parse_update_hunks(
-    body: list[str],
-    path: str,
-    root: Path,
-) -> tuple[list[TextPatchHunk], str | None]:
-    """Parse the update grammar used by Codex's apply-patch streaming parser."""
-    hunks: list[TextPatchHunk] = []
-    move_path: str | None = None
-    change_context: str | None = None
-    old_lines: list[str] | None = None
-    new_lines: list[str] | None = None
-    context_line_indices: list[tuple[int, int]] | None = None
-    is_end_of_file = False
+        for prefix, kind in (
+            (_ADD_FILE_MARKER, "add"),
+            (_DELETE_FILE_MARKER, "delete"),
+            (_UPDATE_FILE_MARKER, "update"),
+        ):
+            if not marker.startswith(prefix):
+                continue
+            self._ensure_update_not_empty(marker, line_number)
+            raw_path = marker.removeprefix(prefix).strip()
+            if not raw_path:
+                raise WorkspaceToolError(
+                    "WORKSPACE_PATCH_INVALID",
+                    f"Patch file path cannot be empty at line {line_number}.",
+                )
+            path, _ = canonical_workspace_path(self.root, raw_path)
+            if kind == "delete" and not self.allow_delete:
+                raise WorkspaceToolError(
+                    "WORKSPACE_DELETE_NOT_ALLOWED",
+                    f"Delete File is disabled for this request: {path}",
+                )
+            if kind == "add":
+                operation = TextPatchOperation(kind="add", path=path)
+            elif kind == "delete":
+                operation = TextPatchOperation(kind="delete", path=path)
+            else:
+                operation = TextPatchOperation(kind="update", path=path)
+            self.operations.append(operation)
+            self.mode = kind
+            self._record_path(path)
+            return True
+        return False
 
-    def start_hunk(context: str | None = None) -> None:
-        nonlocal change_context, old_lines, new_lines, context_line_indices, is_end_of_file
-        change_context = context
-        old_lines = []
-        new_lines = []
-        context_line_indices = []
-        is_end_of_file = False
+    def _record_path(self, path: str) -> None:
+        self.paths_seen.add(target_path(self.root, path))
+        if len(self.paths_seen) > self.max_changed_files:
+            raise WorkspaceToolError(
+                "WORKSPACE_TOO_MANY_CHANGED_FILES",
+                (
+                    f"Patch changes too many files: {len(self.paths_seen)} "
+                    f"> {self.max_changed_files}."
+                ),
+            )
 
-    def finish_hunk() -> None:
-        nonlocal change_context, old_lines, new_lines, context_line_indices, is_end_of_file
-        if old_lines is None or new_lines is None or context_line_indices is None:
+    def _ensure_update_not_empty(self, line: str, line_number: int) -> None:
+        if self.mode != "update":
             return
-        if not old_lines and not new_lines:
+        operation = self._update_operation()
+        if not operation.hunks:
             raise WorkspaceToolError(
                 "WORKSPACE_PATCH_INVALID",
-                f"Update hunk does not contain any lines: {path}",
+                f"Update File operation has no hunks: {operation.path}",
             )
-        hunks.append(
-            TextPatchHunk(
-                change_context=change_context,
-                old_lines=old_lines,
-                new_lines=new_lines,
-                context_line_indices=context_line_indices,
-                is_end_of_file=is_end_of_file,
+        last = operation.hunks[-1]
+        if not last.old_lines and not last.new_lines:
+            message = (
+                "Update hunk does not contain any lines"
+                if line == _END_PATCH_MARKER
+                else (
+                    f"Unexpected line found in update hunk: {line!r}. "
+                    "Every line should start with space, '+', or '-'."
+                )
             )
-        )
-        change_context = None
-        old_lines = None
-        new_lines = None
-        context_line_indices = None
-        is_end_of_file = False
+            raise WorkspaceToolError(
+                "WORKSPACE_PATCH_INVALID",
+                f"{message} at line {line_number}: {operation.path}",
+            )
 
-    for line in body:
+    def _update_operation(self) -> TextPatchOperation:
+        if not self.operations or self.operations[-1].kind != "update":
+            raise WorkspaceToolError(
+                "WORKSPACE_PATCH_INVALID",
+                "Internal patch parser state is not an Update File operation.",
+            )
+        return self.operations[-1]
+
+    def _update_hunk(self, *, create: bool = False) -> TextPatchHunk | None:
+        operation = self._update_operation()
+        if operation.hunks:
+            return operation.hunks[-1]
+        if not create:
+            return None
+        hunk = TextPatchHunk()
+        operation.hunks.append(hunk)
+        return hunk
+
+    def _process_update_line(self, line: str, line_number: int) -> None:
         update_line = line.rstrip()
-        if (
-            not hunks
-            and old_lines is None
-            and move_path is None
-            and update_line.startswith(_MOVE_TO_MARKER)
+        # Match Codex: Update state trims only the end, so a leading-space marker
+        # remains a context line instead of becoming a new operation.
+        if self._handle_header(update_line, line_number):
+            return
+
+        operation = self._update_operation()
+        last = self._update_hunk()
+        if last is not None and last.is_end_of_file:
+            if not update_line:
+                return
+            if update_line != "@@" and not update_line.startswith("@@ "):
+                raise WorkspaceToolError(
+                    "WORKSPACE_PATCH_INVALID",
+                    (
+                        "Expected update hunk to start with a @@ context marker, got: "
+                        f"{line!r}"
+                    ),
+                )
+
+        if not operation.hunks and operation.move_path is None and update_line.startswith(
+            _MOVE_TO_MARKER
         ):
             raw_candidate = update_line.removeprefix(_MOVE_TO_MARKER).strip()
             if not raw_candidate:
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_INVALID",
-                    f"Move destination cannot be empty: {path}",
+                    f"Move destination cannot be empty: {operation.path}",
                 )
-            candidate, candidate_resolved = canonical_workspace_path(root, raw_candidate)
-            if candidate_resolved == target_path(root, path):
+            candidate, candidate_resolved = canonical_workspace_path(self.root, raw_candidate)
+            if candidate_resolved == target_path(self.root, operation.path):
                 raise WorkspaceToolError(
                     "WORKSPACE_PATCH_INVALID",
-                    f"Move destination must differ from the source path: {path}",
+                    f"Move destination must differ from the source path: {operation.path}",
                 )
-            move_path = candidate
-            continue
-
-        if update_line == "@@" or update_line.startswith("@@ "):
-            finish_hunk()
-            context = None if update_line == "@@" else update_line[3:]
-            start_hunk(context)
-            continue
-
-        if is_end_of_file:
-            if update_line == "":
-                continue
-            raise WorkspaceToolError(
-                "WORKSPACE_PATCH_INVALID",
-                f"Expected a new '@@' hunk after '{_END_OF_FILE_MARKER}': {path}",
+            self.operations[-1] = TextPatchOperation(
+                kind="update",
+                path=operation.path,
+                hunks=operation.hunks,
+                move_path=candidate,
             )
+            self._record_path(candidate)
+            return
 
-        if update_line == _END_OF_FILE_MARKER:
-            if old_lines is None or (not old_lines and not new_lines):
-                raise WorkspaceToolError(
-                    "WORKSPACE_PATCH_INVALID",
-                    f"'{_END_OF_FILE_MARKER}' requires a non-empty update hunk: {path}",
-                )
-            is_end_of_file = True
-            continue
-
-        if line.startswith("\\ No newline at end of file"):
-            continue
-
-        if old_lines is None:
-            start_hunk()
-        assert old_lines is not None
-        assert new_lines is not None
-        assert context_line_indices is not None
-
-        if line == "":
-            context_line_indices.append((len(old_lines), len(new_lines)))
-            old_lines.append("")
-            new_lines.append("")
-        elif line.startswith(" "):
-            value = line[1:]
-            context_line_indices.append((len(old_lines), len(new_lines)))
-            old_lines.append(value)
-            new_lines.append(value)
-        elif line.startswith("+"):
-            new_lines.append(line[1:])
-        elif line.startswith("-"):
-            old_lines.append(line[1:])
-        else:
+        last = self._update_hunk()
+        if (
+            (update_line == "@@" or update_line.startswith("@@ "))
+            and last is not None
+            and not last.old_lines
+            and not last.new_lines
+        ):
             raise WorkspaceToolError(
                 "WORKSPACE_PATCH_INVALID",
                 (
-                    f"Unexpected line in update hunk for {path}: {line!r}. "
-                    "Every line must start with space, '+', or '-'."
+                    f"Unexpected line found in update hunk: {line!r}. "
+                    "Every line should start with space, '+', or '-'."
                 ),
             )
 
-    finish_hunk()
-    if not hunks:
+        if update_line == "@@" or update_line.startswith("@@ "):
+            context = None if update_line == "@@" else update_line[3:]
+            self._update_operation().hunks.append(TextPatchHunk(change_context=context))
+            return
+
+        if update_line == _END_OF_FILE_MARKER:
+            last = self._update_hunk()
+            if last is not None and not last.old_lines and not last.new_lines:
+                raise WorkspaceToolError(
+                    "WORKSPACE_PATCH_INVALID",
+                    f"Update hunk does not contain any lines: {operation.path}",
+                )
+            if last is not None:
+                self._update_operation().hunks[-1] = TextPatchHunk(
+                    change_context=last.change_context,
+                    old_lines=last.old_lines,
+                    new_lines=last.new_lines,
+                    context_line_indices=last.context_line_indices,
+                    is_end_of_file=True,
+                )
+            return
+
+        # Keep this common git-style marker as a lenient no-op for model reliability.
+        if line.startswith("\\ No newline at end of file"):
+            return
+
+        hunk = self._update_hunk(create=True)
+        assert hunk is not None
+        if line == "":
+            hunk.context_line_indices.append((len(hunk.old_lines), len(hunk.new_lines)))
+            hunk.old_lines.append("")
+            hunk.new_lines.append("")
+            return
+        if line.startswith(" "):
+            value = line[1:]
+            hunk.context_line_indices.append((len(hunk.old_lines), len(hunk.new_lines)))
+            hunk.old_lines.append(value)
+            hunk.new_lines.append(value)
+            return
+        if line.startswith("+"):
+            hunk.new_lines.append(line[1:])
+            return
+        if line.startswith("-"):
+            hunk.old_lines.append(line[1:])
+            return
+        if hunk.old_lines or hunk.new_lines:
+            raise WorkspaceToolError(
+                "WORKSPACE_PATCH_INVALID",
+                f"Expected update hunk to start with a @@ context marker, got: {line!r}",
+            )
         raise WorkspaceToolError(
-            "WORKSPACE_PATCH_INVALID", f"Update File operation has no hunks: {path}"
+            "WORKSPACE_PATCH_INVALID",
+            (
+                f"Unexpected line found in update hunk: {line!r}. "
+                "Every line should start with space, '+', or '-'."
+            ),
         )
-    return hunks, move_path
 
 
 def _compute_replacements(

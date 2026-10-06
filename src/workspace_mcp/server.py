@@ -73,9 +73,10 @@ from .workspace_registry import WorkspaceRegistry
 SERVER_INSTRUCTIONS = (
     "Use workspaceInspect/workspaceSearch before guessing paths and workspaceReadFiles before "
     "editing exact targets. Use workspaceWriteFile for one complete known file and "
-    "workspaceApplyPatch for bounded multi-file edits; its patch argument uses the "
-    "Codex-compatible core apply_patch grammar, not git/unified diff syntax. Operations inside "
-    "one patch are sequential, so later operations see earlier adds, updates, moves, and deletes. "
+    "workspaceApplyPatch for bounded multi-file edits. Its patch argument is a stripped-down, "
+    "file-oriented diff enclosed by '*** Begin Patch' and '*** End Patch'; it is not git/unified "
+    "diff syntax. Operations inside one patch are sequential, so later operations see earlier "
+    "adds, updates, moves, and deletes. "
     "workspaceCommand separates Linux shell command lifetime from one MCP call: start and get "
     "return incremental logs directly; use logs only to reread or page historical output."
 )
@@ -844,17 +845,22 @@ def create_server(
         name="workspaceApplyPatch",
         title="Apply workspace patch",
         description=(
-            "Apply bounded multi-file edits using the Codex-compatible core apply_patch "
-            "grammar. Operations are evaluated sequentially within one patch, so later operations "
-            "see files created, updated, moved, or deleted by earlier operations. Supports "
-            "contextual updates, Move to, End of File, Add File, Delete File, and dry-run. Add may "
-            "create an empty file or replace an existing UTF-8 text file; Move may replace an "
-            "existing UTF-8 text "
-            "destination and preserves the source file mode when available. Delete may remove "
-            "binary files when allow_delete=true. Updates preserve unchanged source line endings. "
-            "Paths are confined to the workspace; ambiguous Windows path forms that could alias a "
-            "different Win32 target are rejected. Changes are committed atomically with rollback "
-            "on failure. Do not send git/unified diff syntax or Markdown fences."
+            "Use workspaceApplyPatch to edit files. The patch language is a stripped-down, "
+            "file-oriented diff format designed to be easy to parse and safe to apply. Pass the "
+            "patch as the patch argument without Markdown fences or git/unified diff headers. "
+            "Enclose one or more file operations between '*** Begin Patch' and '*** End Patch'. "
+            "Each operation starts with exactly one action header: '*** Add File: <path>' creates "
+            "or replaces a UTF-8 text file and every content line starts with '+'; '*** Delete "
+            "File: <path>' removes a file and has no body, and requires allow_delete=true; '*** "
+            "Update File: <path>' patches an existing text file and may be followed by '*** Move "
+            "to: <path>'. Update hunks use '@@' or '@@ <context>'; body lines start with space, "
+            "'+' or '-', and '*** End of File' may anchor the final hunk. Operations are evaluated "
+            "sequentially, so later operations see files created, updated, moved, or deleted by "
+            "earlier operations. Paths are relative to the workspace and confined to it. Moves may "
+            "replace an existing UTF-8 text destination and preserve the source file mode when "
+            "available; deletes may remove binary files when allow_delete=true. Updates preserve "
+            "unchanged source line endings. dry_run validates and previews the patch without "
+            "committing it. Successful changes are committed atomically with rollback on failure."
         ),
         annotations=_WRITE,
     )

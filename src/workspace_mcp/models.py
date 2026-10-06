@@ -35,22 +35,19 @@ PatchText = Annotated[
     Field(
         min_length=1,
         description=(
-            "Raw workspace patch text using the Codex-compatible core apply_patch grammar; do not "
-            "wrap it in Markdown fences or send a git/unified diff. The first line must be "
-            "'*** Begin Patch' and the last line '*** End Patch'. File operations are evaluated "
-            "in order, so a later operation may update a file created or moved earlier in the "
-            "same patch. Supported operations are Update File, Add File, and Delete File "
-            "(Delete requires allow_delete=true). Update sections may use '@@' or "
-            "'@@ <context>' anchors, '*** Move to: <relative-path>', and '*** End of File'; "
-            "update body lines start with space, '+', or '-'. Add File may create an empty file; "
-            "when content is present each line starts with '+', and Add may replace an existing "
-            "UTF-8 text file. Move may replace an existing UTF-8 "
-            "text destination. Delete File may remove any regular file, including binary files, "
-            "when allow_delete=true. Updates preserve unchanged source line endings and use the "
-            "file's first existing line ending for inserted lines. Paths are workspace-relative; "
-            "canonical aliases resolve to one target. On Windows, reserved or ambiguous Win32 "
-            "path forms, including drive-relative/rooted prefixes, are rejected rather than "
-            "silently normalized to another filesystem target."
+            "A stripped-down, file-oriented patch enclosed by '*** Begin Patch' and '*** End "
+            "Patch'. Do not wrap it in Markdown fences or send git/unified diff syntax. Inside the "
+            "envelope, use '*** Add File: <path>', '*** Delete File: <path>', or '*** Update File: "
+            "<path>'. Add content lines start with '+'. Delete has no body and requires "
+            "allow_delete=true. Update hunks use '@@' or '@@ <context>'; hunk lines start with "
+            "space, '+', or '-', updates may include '*** Move to: <relative-path>', and '*** End "
+            "of File' may anchor the final hunk. Operations are applied in order. Paths are "
+            "workspace-relative and confined to the workspace. Add may replace an existing UTF-8 "
+            "text file; Move may replace an existing UTF-8 text destination; Delete may remove any "
+            "regular file, including binary files, when allow_delete=true. Updates preserve "
+            "unchanged source line endings and use the file's first existing line ending for "
+            "inserted lines. Canonical path aliases resolve to one target, and ambiguous Windows "
+            "path forms that could resolve to another Win32 target are rejected."
         ),
     ),
 ]

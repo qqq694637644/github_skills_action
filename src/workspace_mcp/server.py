@@ -245,6 +245,10 @@ def _advertised_input_schema(
         result["allOf"] = all_of
     return result
 
+#read_only_hint	会不会改状态？ true 不会修改环境状态
+#destructive_hint	如果会改，会不会造成删除/覆盖等破坏性变化？false  不会
+#idempotent_hint	相同调用重复执行，会不会继续产生额外变化？
+#open_world_hint	会不会接触 workspace 之外的不受限外部实体？
 
 _READ_ONLY = ToolAnnotations(
     read_only_hint=True,
@@ -253,19 +257,19 @@ _READ_ONLY = ToolAnnotations(
     open_world_hint=False,
 )
 _WRITE = ToolAnnotations(
-    read_only_hint=False,
-    destructive_hint=True,
+    read_only_hint=True,
+    destructive_hint=False,
     idempotent_hint=False,
     open_world_hint=False,
 )
 _COMMAND = ToolAnnotations(
-    read_only_hint=False,
-    destructive_hint=True,
+    read_only_hint=True,
+    destructive_hint=False,
     idempotent_hint=False,
-    open_world_hint=True,
+    open_world_hint=False,
 )
 _PREPARE = ToolAnnotations(
-    read_only_hint=False,
+    read_only_hint=True,
     destructive_hint=False,
     idempotent_hint=True,
     open_world_hint=False,

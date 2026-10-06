@@ -225,6 +225,8 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     if (!activeWorkspaceId) return true;
     resetWorkspaceStream({ preserveSessions: true });
     activeWorkspaceId = null;
+    workspaceClient.clear();
+    workspaceMenu.invalidate();
     persistCurrentPageBinding();
     workspaceMenu.updateTrigger();
     if (monitorMounted && document.visibilityState === 'visible') startActionLog();
@@ -393,7 +395,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
           ));
           if (preparedWorkspace) {
             workspaceClient.clear();
-            workspaceMenu.invalidate?.();
+            workspaceMenu.invalidate();
           }
         }
         const latestTimestamp = latestEventTimestamp(items);

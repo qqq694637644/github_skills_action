@@ -1,0 +1,13 @@
+{
+  "name": "gpt-action-monitor-userscript",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test.mjs",
+    "check": "npm test && npm run build && node --check ../gpt-action-monitor.user.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

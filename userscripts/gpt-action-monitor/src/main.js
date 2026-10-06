@@ -1,6 +1,7 @@
 import { createActivityStore } from './activity/activity-store.js';
 import { compactActivity } from './activity/presentation.js';
 import { createActionLogClient } from './api/action-log-client.js';
+import { createActionLogSessionState } from './api/action-log-session.js';
 import { createSkillCatalogClient } from './api/skill-catalog-client.js';
 import { createWorkspaceClient } from './api/workspace-client.js';
 import { createComposerAdapter, loadSkillsCall } from './adapters/composer.js';
@@ -42,8 +43,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   let monitorMounted = false;
   let actionLogClient = null;
   let activitySessionKey = null;
-  let activitySessionCursor = null;
-  let activitySessionStreamId = null;
+  const activitySessions = createActionLogSessionState();
   let soundAlertEnabled = Boolean(GM_getValue(SOUND_ALERT_ENABLED_KEY, false));
 
   function boundedInteger(value, fallback, min, max) {
@@ -152,20 +152,19 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   function stopActionLog() {
     if (!actionLogClient) return;
     const cursor = actionLogClient.getCursor?.();
-    if (Number.isInteger(cursor)) activitySessionCursor = cursor;
+    if (Number.isInteger(cursor) && activitySessionKey) {
+      activitySessions.setCursor(activitySessionKey, cursor);
+    }
     actionLogClient.stop();
     actionLogClient = null;
   }
 
-  function resetWorkspaceStream({ preserveCursor = false } = {}) {
+  function resetWorkspaceStream({ preserveSessions = false } = {}) {
     stopActionLog();
     activityStore.clear();
     soundAlert.reset();
     activitySessionKey = null;
-    if (!preserveCursor) {
-      activitySessionCursor = null;
-      activitySessionStreamId = null;
-    }
+    if (!preserveSessions) activitySessions.clearAll();
     monitorUi.resetSession();
     monitorUi.clearLastActivityTime();
     monitorUi.clearAttention();
@@ -214,8 +213,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       return true;
     }
 
-    const fromDiscovery = !activeWorkspaceId;
-    resetWorkspaceStream({ preserveCursor: fromDiscovery });
+    resetWorkspaceStream({ preserveSessions: true });
     activeWorkspaceId = workspaceId;
     persistCurrentPageBinding();
     workspaceMenu.updateTrigger();
@@ -225,7 +223,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
 
   function resetWorkspaceSelection() {
     if (!activeWorkspaceId) return true;
-    resetWorkspaceStream({ preserveCursor: true });
+    resetWorkspaceStream({ preserveSessions: true });
     activeWorkspaceId = null;
     persistCurrentPageBinding();
     workspaceMenu.updateTrigger();
@@ -369,20 +367,35 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       activitySessionKey = nextSessionKey;
     }
 
+    const sessionKey = nextSessionKey;
+
     actionLogClient = createActionLogClient({
       getProfile: getEffectiveEndpoint,
       getWorkspaceId: () => activeWorkspaceId,
-      initialCursor: activitySessionCursor,
-      initialStreamId: activitySessionStreamId,
-      onCursor: (cursor) => { activitySessionCursor = cursor; },
-      onStreamId: (streamId) => { activitySessionStreamId = streamId; },
+      initialCursor: activitySessions.getCursor(sessionKey),
+      initialStreamId: activitySessions.getStreamId(),
+      onCursor: (cursor) => { activitySessions.setCursor(sessionKey, cursor); },
+      onStreamId: (streamId) => { activitySessions.setStreamId(streamId); },
       onStreamReset() {
+        activitySessions.clearCursors();
+        activitySessions.setCursor(sessionKey, 0);
         activityStore.clearActive();
         soundAlert.reset();
         monitorUi.clearLastActivityTime();
       },
       shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
       onItems(items) {
+        if (!activeWorkspaceId) {
+          const preparedWorkspace = (items || []).some((item) => (
+            item?.event?.phase === 'completed'
+            && item?.event?.payload?.operation === 'prepare_workspace'
+            && /^ws_[0-9a-f]{16}$/.test(item?.event?.payload?.workspace_id || '')
+          ));
+          if (preparedWorkspace) {
+            workspaceClient.clear();
+            workspaceMenu.invalidate?.();
+          }
+        }
         const latestTimestamp = latestEventTimestamp(items);
         if (latestTimestamp) monitorUi.setLastActivityTimestamp(latestTimestamp);
         if (latestTimestamp && activeWorkspaceId) soundAlert.observe(latestTimestamp);

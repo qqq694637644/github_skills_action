@@ -1020,6 +1020,41 @@ ${result}`;
     return { start, stop, suspend, resume, poll, getCursor };
   }
 
+  // src/api/action-log-session.js
+  function createActionLogSessionState() {
+    const cursors = /* @__PURE__ */ new Map();
+    let streamId = null;
+    function getCursor(sessionKey) {
+      const cursor = cursors.get(sessionKey);
+      return Number.isInteger(cursor) ? cursor : null;
+    }
+    function setCursor(sessionKey, cursor) {
+      if (!sessionKey || !Number.isInteger(cursor)) return;
+      cursors.set(sessionKey, cursor);
+    }
+    function getStreamId() {
+      return streamId;
+    }
+    function setStreamId(value) {
+      streamId = typeof value === "string" && value ? value : null;
+    }
+    function clearCursors() {
+      cursors.clear();
+    }
+    function clearAll() {
+      clearCursors();
+      streamId = null;
+    }
+    return {
+      getCursor,
+      setCursor,
+      getStreamId,
+      setStreamId,
+      clearCursors,
+      clearAll
+    };
+  }
+
   // src/api/skill-catalog-client.js
   function createSkillCatalogClient({ getProfile }) {
     const cache = /* @__PURE__ */ new Map();
@@ -3498,6 +3533,13 @@ ${result}`;
       clearState();
       updateTrigger();
     }
+    function invalidate() {
+      hasRendered = false;
+      requestGeneration += 1;
+      list.replaceChildren();
+      clearState();
+      if (open) refresh({ force: true });
+    }
     refreshButton.addEventListener("pointerdown", preserveFocus);
     refreshButton.addEventListener("click", () => refresh({ force: true }));
     resetButton.addEventListener("pointerdown", preserveFocus);
@@ -3513,6 +3555,7 @@ ${result}`;
       toggle,
       bindTrigger,
       updateTrigger,
+      invalidate,
       reset
     };
   }
@@ -3528,8 +3571,7 @@ ${result}`;
     let monitorMounted = false;
     let actionLogClient = null;
     let activitySessionKey = null;
-    let activitySessionCursor = null;
-    let activitySessionStreamId = null;
+    const activitySessions = createActionLogSessionState();
     let soundAlertEnabled = Boolean(GM_getValue(SOUND_ALERT_ENABLED_KEY, false));
     function boundedInteger(value, fallback, min, max) {
       const parsed = Number.parseInt(value, 10);
@@ -3619,19 +3661,18 @@ ${result}`;
     function stopActionLog() {
       if (!actionLogClient) return;
       const cursor = actionLogClient.getCursor?.();
-      if (Number.isInteger(cursor)) activitySessionCursor = cursor;
+      if (Number.isInteger(cursor) && activitySessionKey) {
+        activitySessions.setCursor(activitySessionKey, cursor);
+      }
       actionLogClient.stop();
       actionLogClient = null;
     }
-    function resetWorkspaceStream({ preserveCursor = false } = {}) {
+    function resetWorkspaceStream({ preserveSessions = false } = {}) {
       stopActionLog();
       activityStore.clear();
       soundAlert.reset();
       activitySessionKey = null;
-      if (!preserveCursor) {
-        activitySessionCursor = null;
-        activitySessionStreamId = null;
-      }
+      if (!preserveSessions) activitySessions.clearAll();
       monitorUi.resetSession();
       monitorUi.clearLastActivityTime();
       monitorUi.clearAttention();
@@ -3673,8 +3714,7 @@ ${result}`;
         workspaceMenu.updateTrigger();
         return true;
       }
-      const fromDiscovery = !activeWorkspaceId;
-      resetWorkspaceStream({ preserveCursor: fromDiscovery });
+      resetWorkspaceStream({ preserveSessions: true });
       activeWorkspaceId = workspaceId;
       persistCurrentPageBinding();
       workspaceMenu.updateTrigger();
@@ -3683,7 +3723,7 @@ ${result}`;
     }
     function resetWorkspaceSelection() {
       if (!activeWorkspaceId) return true;
-      resetWorkspaceStream({ preserveCursor: true });
+      resetWorkspaceStream({ preserveSessions: true });
       activeWorkspaceId = null;
       persistCurrentPageBinding();
       workspaceMenu.updateTrigger();
@@ -3804,24 +3844,34 @@ ${result}`;
         activityStore.clear();
         activitySessionKey = nextSessionKey;
       }
+      const sessionKey = nextSessionKey;
       actionLogClient = createActionLogClient({
         getProfile: getEffectiveEndpoint,
         getWorkspaceId: () => activeWorkspaceId,
-        initialCursor: activitySessionCursor,
-        initialStreamId: activitySessionStreamId,
+        initialCursor: activitySessions.getCursor(sessionKey),
+        initialStreamId: activitySessions.getStreamId(),
         onCursor: (cursor) => {
-          activitySessionCursor = cursor;
+          activitySessions.setCursor(sessionKey, cursor);
         },
         onStreamId: (streamId) => {
-          activitySessionStreamId = streamId;
+          activitySessions.setStreamId(streamId);
         },
         onStreamReset() {
+          activitySessions.clearCursors();
+          activitySessions.setCursor(sessionKey, 0);
           activityStore.clearActive();
           soundAlert.reset();
           monitorUi.clearLastActivityTime();
         },
         shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
         onItems(items) {
+          if (!activeWorkspaceId) {
+            const preparedWorkspace = (items || []).some((item) => item?.event?.phase === "completed" && item?.event?.payload?.operation === "prepare_workspace" && /^ws_[0-9a-f]{16}$/.test(item?.event?.payload?.workspace_id || ""));
+            if (preparedWorkspace) {
+              workspaceClient.clear();
+              workspaceMenu.invalidate?.();
+            }
+          }
           const latestTimestamp = latestEventTimestamp(items);
           if (latestTimestamp) monitorUi.setLastActivityTimestamp(latestTimestamp);
           if (latestTimestamp && activeWorkspaceId) soundAlert.observe(latestTimestamp);

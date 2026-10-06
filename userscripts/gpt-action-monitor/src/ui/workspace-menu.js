@@ -155,6 +155,14 @@ export function createWorkspaceMenu({
     updateTrigger();
   }
 
+  function invalidate() {
+    hasRendered = false;
+    requestGeneration += 1;
+    list.replaceChildren();
+    clearState();
+    if (open) refresh({ force: true });
+  }
+
   refreshButton.addEventListener('pointerdown', preserveFocus);
   refreshButton.addEventListener('click', () => refresh({ force: true }));
   resetButton.addEventListener('pointerdown', preserveFocus);
@@ -171,6 +179,7 @@ export function createWorkspaceMenu({
     toggle,
     bindTrigger,
     updateTrigger,
+    invalidate,
     reset,
   };
 }

@@ -6,6 +6,7 @@ import {
   presentActivity,
 } from './src/activity/presentation.js';
 import { createActionLogClient } from './src/api/action-log-client.js';
+import { createActionLogSessionState } from './src/api/action-log-session.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
 import { loadSkillsCall } from './src/adapters/composer.js';
 import { createSoundAlert } from './src/alert/sound-alert.js';
@@ -40,6 +41,27 @@ assert.deepEqual(validateBackend('https://skills.example.com/'), {
 });
 assert.equal(validateBackend('ftp://skills.example.com').ok, false);
 assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintenance"])');
+
+// Discovery and selected-Workspace filters need independent cursors. A global
+// cursor shared between them can advance past a prepare_workspace event while
+// another Workspace is selected, making that Workspace undiscoverable later.
+{
+  const sessions = createActionLogSessionState();
+  sessions.setCursor('endpoint:discovery', 11);
+  sessions.setCursor('endpoint:ws_0123456789abcdef', 27);
+  sessions.setStreamId('stream-a');
+  assert.equal(sessions.getCursor('endpoint:discovery'), 11);
+  assert.equal(sessions.getCursor('endpoint:ws_0123456789abcdef'), 27);
+  assert.equal(sessions.getStreamId(), 'stream-a');
+
+  sessions.clearCursors();
+  assert.equal(sessions.getCursor('endpoint:discovery'), null);
+  assert.equal(sessions.getCursor('endpoint:ws_0123456789abcdef'), null);
+  assert.equal(sessions.getStreamId(), 'stream-a');
+
+  sessions.clearAll();
+  assert.equal(sessions.getStreamId(), null);
+}
 
 // Sound alerts only arm once the UI has a visible server-activity time, then
 // fire once per quiet period and re-arm after a newer activity arrives.

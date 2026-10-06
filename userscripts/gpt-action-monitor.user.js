@@ -3725,6 +3725,8 @@ ${result}`;
       if (!activeWorkspaceId) return true;
       resetWorkspaceStream({ preserveSessions: true });
       activeWorkspaceId = null;
+      workspaceClient.clear();
+      workspaceMenu.invalidate();
       persistCurrentPageBinding();
       workspaceMenu.updateTrigger();
       if (monitorMounted && document.visibilityState === "visible") startActionLog();
@@ -3869,7 +3871,7 @@ ${result}`;
             const preparedWorkspace = (items || []).some((item) => item?.event?.phase === "completed" && item?.event?.payload?.operation === "prepare_workspace" && /^ws_[0-9a-f]{16}$/.test(item?.event?.payload?.workspace_id || ""));
             if (preparedWorkspace) {
               workspaceClient.clear();
-              workspaceMenu.invalidate?.();
+              workspaceMenu.invalidate();
             }
           }
           const latestTimestamp = latestEventTimestamp(items);

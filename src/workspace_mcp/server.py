@@ -1142,11 +1142,11 @@ def create_app(settings: MCPSettings | None = None):
             return True
         return request.headers.get("authorization", "") == f"Bearer {expected_token}"
 
-    def action_logs(request: Request) -> JSONResponse:
+    async def action_logs(request: Request) -> JSONResponse:
         if not action_api_authorized(request):
             return JSONResponse({"detail": "invalid bearer token"}, status_code=401)
         return JSONResponse(
-            wait_for_action_events(
+            await wait_for_action_events(
                 after=int(request.query_params.get("after", "0")),
                 timeout=float(request.query_params.get("wait", "55")),
                 limit=int(request.query_params.get("limit", "50")),

@@ -3,6 +3,7 @@ import {
   normalizeBackend,
   validateBackend,
 } from '../profile/profile-store.js';
+import { MAX_PAGE_BINDINGS } from '../constants.js';
 import { debugError, debugLog, debugWarn } from '../debug.js';
 import { SETTINGS_CSS } from './styles.js';
 
@@ -93,12 +94,24 @@ function endpointName(endpoints, endpointId) {
   return endpoints.find((endpoint) => endpoint.id === endpointId)?.name || '';
 }
 
+function formatBindingTime(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  return date.toLocaleString([], {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export function createSettingsPanel({
   getState,
   onSaveEndpoints,
   onSetGlobalEndpoint,
   onUsePageEndpoint,
   onRestoreGlobalEndpoint,
+  onDeletePageBinding,
   onSetSoundAlertEnabled,
   onSetSoundAlertDelayMinutes,
   onSetSoundAlertDurationSeconds,
@@ -188,6 +201,16 @@ export function createSettingsPanel({
               <div class="gam-usage-note"></div>
             </section>
 
+            <section class="gam-settings-section gam-bindings-section">
+              <div class="gam-bindings-heading-row">
+                <div class="gam-section-heading">绑定配置</div>
+                <span class="gam-bindings-count"></span>
+              </div>
+              <div class="gam-bindings-note">按保存的网址逐条管理。删除只移除本地网址绑定，不会删除接口配置或服务器 Workspace；删除当前网址这一条会立即恢复全局默认并取消当前 Workspace。</div>
+              <div class="gam-bindings-list"></div>
+              <div class="gam-bindings-status" aria-live="polite"></div>
+            </section>
+
             <section class="gam-settings-section gam-sound-section">
               <div class="gam-sound-heading-row">
                 <div class="gam-section-heading">声音提醒</div>
@@ -237,6 +260,9 @@ export function createSettingsPanel({
     const globalValue = overlay.querySelector('.gam-global-value');
     const currentValue = overlay.querySelector('.gam-current-value');
     const editingValue = overlay.querySelector('.gam-editing-value');
+    const bindingsCount = overlay.querySelector('.gam-bindings-count');
+    const bindingsList = overlay.querySelector('.gam-bindings-list');
+    const bindingsStatus = overlay.querySelector('.gam-bindings-status');
     const soundEnabledInput = overlay.querySelector('.gam-sound-enabled');
     const soundDelayInput = overlay.querySelector('.gam-sound-delay');
     const soundDurationInput = overlay.querySelector('.gam-sound-duration');
@@ -330,6 +356,85 @@ export function createSettingsPanel({
       renderEndpointSelect();
     }
 
+    function renderBindings() {
+      const state = getState();
+      const bindings = state.pageBindings || [];
+      bindingsCount.textContent = `${bindings.length} / ${MAX_PAGE_BINDINGS}`;
+      bindingsList.replaceChildren();
+
+      if (!bindings.length) {
+        const empty = document.createElement('div');
+        empty.className = 'gam-bindings-empty';
+        empty.textContent = '暂无网址绑定。';
+        bindingsList.appendChild(empty);
+        return;
+      }
+
+      for (const binding of bindings) {
+        const row = document.createElement('div');
+        row.className = 'gam-binding-row';
+        if (binding.url === state.pageUrl) row.dataset.current = 'true';
+
+        const content = document.createElement('div');
+        content.className = 'gam-binding-content';
+
+        const urlRow = document.createElement('div');
+        urlRow.className = 'gam-binding-url-row';
+        const url = document.createElement('div');
+        url.className = 'gam-binding-url';
+        url.textContent = binding.url;
+        url.title = binding.url;
+        urlRow.appendChild(url);
+        if (binding.url === state.pageUrl) {
+          const badge = document.createElement('span');
+          badge.className = 'gam-binding-current';
+          badge.textContent = '当前网址';
+          urlRow.appendChild(badge);
+        }
+
+        const endpoint = binding.endpointId
+          ? endpointName(state.endpoints, binding.endpointId) || binding.endpointId
+          : '跟随全局';
+        const workspaceEndpoint = binding.workspaceEndpointId
+          ? endpointName(state.endpoints, binding.workspaceEndpointId) || binding.workspaceEndpointId
+          : '';
+        const workspace = binding.workspaceId
+          ? `${binding.workspaceId}${workspaceEndpoint ? ` @ ${workspaceEndpoint}` : ''}`
+          : '未绑定 Workspace';
+        const modified = formatBindingTime(binding.modifiedAt);
+        const meta = document.createElement('div');
+        meta.className = 'gam-binding-meta';
+        meta.textContent = [endpoint, workspace, modified ? `修改 ${modified}` : '']
+          .filter(Boolean)
+          .join(' · ');
+
+        content.append(urlRow, meta);
+
+        const removeButton = document.createElement('button');
+        removeButton.className = 'gam-button gam-binding-delete';
+        removeButton.type = 'button';
+        removeButton.textContent = '删除';
+        removeButton.setAttribute('aria-label', `删除网址绑定 ${binding.url}`);
+        removeButton.addEventListener('click', () => {
+          bindingsStatus.textContent = '';
+          delete bindingsStatus.dataset.state;
+          try {
+            onDeletePageBinding(binding.url);
+            renderBindings();
+            renderUsageState();
+            bindingsStatus.textContent = '✓ 已删除网址绑定。';
+            bindingsStatus.dataset.state = 'success';
+          } catch (error) {
+            bindingsStatus.textContent = error instanceof Error ? error.message : String(error);
+            bindingsStatus.dataset.state = 'error';
+          }
+        });
+
+        row.append(content, removeButton);
+        bindingsList.appendChild(row);
+      }
+    }
+
     function loadEditingEndpoint() {
       const endpoint = currentDraftEndpoint();
       if (!endpoint) return;
@@ -338,6 +443,7 @@ export function createSettingsPanel({
       tokenInput.value = endpoint.token || '';
       clearMessage();
       renderUsageState();
+      renderBindings();
     }
 
     function validateDraft() {

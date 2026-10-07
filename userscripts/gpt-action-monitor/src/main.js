@@ -19,10 +19,12 @@ import {
   SOUND_ALERT_ENABLED_KEY,
 } from './constants.js';
 import {
+  deletePageBinding,
   getEndpoint,
   loadEndpoints,
   loadGlobalActiveEndpointId,
   loadPageBinding,
+  loadPageBindings,
   prunePageBindings,
   saveEndpoints,
   saveGlobalActiveEndpointId,
@@ -320,6 +322,33 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     persistCurrentPageBinding();
   }
 
+  function deleteStoredPageBinding(url) {
+    const key = String(url || '').trim();
+    if (!key) return loadPageBindings();
+    const deletingCurrentPage = key === currentPageUrl;
+    debugLog('main', 'delete page binding', {
+      url: key,
+      deletingCurrentPage,
+    });
+    const bindings = deletePageBinding(key);
+    if (!deletingCurrentPage) return bindings;
+
+    resetWorkspaceStream();
+    pageActiveEndpointId = null;
+    activeWorkspaceId = null;
+    workspaceClient.clear();
+    workspaceMenu.reset();
+    skillsMenu.close();
+    workspaceMenu.updateTrigger();
+
+    if (!getEffectiveEndpoint()?.backend) {
+      deactivateMonitor();
+    } else if (document.visibilityState === 'visible') {
+      activateMonitor();
+    }
+    return bindings;
+  }
+
   function setSoundAlertEnabled(enabled) {
     soundAlertEnabled = Boolean(enabled);
     GM_setValue(SOUND_ALERT_ENABLED_KEY, soundAlertEnabled);
@@ -357,6 +386,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       pageActiveEndpointId,
       effectiveEndpointId: getEffectiveEndpointId(),
       pageUrl: currentPageUrl,
+      pageBindings: loadPageBindings(),
       soundAlertEnabled,
       soundAlertDelayMinutes,
       soundAlertDurationSeconds,
@@ -365,6 +395,7 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     onSetGlobalEndpoint: setGlobalActiveEndpoint,
     onUsePageEndpoint: usePageEndpoint,
     onRestoreGlobalEndpoint: restoreGlobalEndpoint,
+    onDeletePageBinding: deleteStoredPageBinding,
     onSetSoundAlertEnabled: setSoundAlertEnabled,
     onSetSoundAlertDelayMinutes: setSoundAlertDelayMinutes,
     onSetSoundAlertDurationSeconds: setSoundAlertDurationSeconds,

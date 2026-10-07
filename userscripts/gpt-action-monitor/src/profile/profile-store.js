@@ -90,6 +90,15 @@ export function loadPageBinding(url) {
   return loadPageBindings().find((binding) => binding.url === key) || null;
 }
 
+export function deletePageBinding(url) {
+  const key = String(url || '').trim();
+  if (!key) return loadPageBindings();
+  const bindings = loadPageBindings();
+  const next = bindings.filter((binding) => binding.url !== key);
+  if (next.length !== bindings.length) GM_setValue(PAGE_BINDINGS_KEY, next);
+  return next;
+}
+
 export function savePageBinding(url, binding, modifiedAt = Date.now()) {
   const key = String(url || '').trim();
   if (!key) return null;

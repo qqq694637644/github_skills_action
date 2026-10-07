@@ -1623,6 +1623,14 @@ ${result}`;
     const key = String(url || "").trim();
     return loadPageBindings().find((binding) => binding.url === key) || null;
   }
+  function deletePageBinding(url) {
+    const key = String(url || "").trim();
+    if (!key) return loadPageBindings();
+    const bindings = loadPageBindings();
+    const next = bindings.filter((binding) => binding.url !== key);
+    if (next.length !== bindings.length) GM_setValue(PAGE_BINDINGS_KEY, next);
+    return next;
+  }
   function savePageBinding(url, binding, modifiedAt = Date.now()) {
     const key = String(url || "").trim();
     if (!key) return null;
@@ -2341,6 +2349,86 @@ ${result}`;
         justify-content: space-between;
         gap: 12px;
       }
+      #gam-settings-overlay .gam-bindings-heading-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #gam-settings-overlay .gam-bindings-count {
+        flex: 0 0 auto;
+        color: color-mix(in srgb, CanvasText 52%, transparent);
+        font-size: 11px;
+      }
+      #gam-settings-overlay .gam-bindings-note,
+      #gam-settings-overlay .gam-bindings-status,
+      #gam-settings-overlay .gam-bindings-empty {
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 12px;
+      }
+      #gam-settings-overlay .gam-bindings-list {
+        display: grid;
+        border-top: 1px solid color-mix(in srgb, CanvasText 9%, transparent);
+      }
+      #gam-settings-overlay .gam-binding-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        min-width: 0;
+        padding: 10px 0;
+        border-bottom: 1px solid color-mix(in srgb, CanvasText 9%, transparent);
+      }
+      #gam-settings-overlay .gam-binding-row[data-current="true"] {
+        margin: 0 -6px;
+        padding-left: 6px;
+        padding-right: 6px;
+        border-radius: 8px;
+        background: color-mix(in srgb, #237a42 5%, transparent);
+      }
+      #gam-settings-overlay .gam-binding-content { min-width: 0; }
+      #gam-settings-overlay .gam-binding-url-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 7px;
+        min-width: 0;
+      }
+      #gam-settings-overlay .gam-binding-url {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        color: CanvasText;
+        font: 11px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      #gam-settings-overlay .gam-binding-current {
+        flex: 0 0 auto;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: color-mix(in srgb, #237a42 12%, transparent);
+        color: #237a42;
+        font-size: 10px;
+        font-weight: 650;
+        white-space: nowrap;
+      }
+      #gam-settings-overlay .gam-binding-meta {
+        margin-top: 4px;
+        overflow-wrap: anywhere;
+        color: color-mix(in srgb, CanvasText 55%, transparent);
+        font-size: 11px;
+      }
+      #gam-settings-overlay .gam-binding-delete {
+        min-height: 30px;
+        padding-inline: 9px;
+        color: color-mix(in srgb, #c53e3e 88%, CanvasText 12%);
+      }
+      #gam-settings-overlay .gam-binding-delete:hover {
+        background: color-mix(in srgb, #c53e3e 8%, Canvas);
+      }
+      #gam-settings-overlay .gam-bindings-status { min-height: 18px; }
+      #gam-settings-overlay .gam-bindings-status[data-state="success"] { color: #238349; }
+      #gam-settings-overlay .gam-bindings-status[data-state="error"] { color: #c53e3e; }
+      #gam-settings-overlay .gam-bindings-empty {
+        padding: 10px 0 2px;
+      }
       #gam-settings-overlay .gam-sound-switch {
         position: relative;
         display: inline-block;
@@ -2422,6 +2510,7 @@ ${result}`;
         #gam-settings-overlay .gam-endpoint-select { grid-column: 1 / -1; }
         #gam-settings-overlay .gam-usage-grid { grid-template-columns: 1fr; gap: 2px; }
         #gam-settings-overlay .gam-usage-grid > strong { margin-bottom: 6px; }
+        #gam-settings-overlay .gam-binding-row { align-items: start; }
       }
     `;
 
@@ -3088,12 +3177,23 @@ ${result}`;
   function endpointName(endpoints, endpointId) {
     return endpoints.find((endpoint) => endpoint.id === endpointId)?.name || "";
   }
+  function formatBindingTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return "";
+    return date.toLocaleString([], {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  }
   function createSettingsPanel({
     getState,
     onSaveEndpoints,
     onSetGlobalEndpoint,
     onUsePageEndpoint,
     onRestoreGlobalEndpoint,
+    onDeletePageBinding,
     onSetSoundAlertEnabled,
     onSetSoundAlertDelayMinutes,
     onSetSoundAlertDurationSeconds,
@@ -3175,6 +3275,16 @@ ${result}`;
               <div class="gam-usage-note"></div>
             </section>
 
+            <section class="gam-settings-section gam-bindings-section">
+              <div class="gam-bindings-heading-row">
+                <div class="gam-section-heading">\u7ED1\u5B9A\u914D\u7F6E</div>
+                <span class="gam-bindings-count"></span>
+              </div>
+              <div class="gam-bindings-note">\u6309\u4FDD\u5B58\u7684\u7F51\u5740\u9010\u6761\u7BA1\u7406\u3002\u5220\u9664\u53EA\u79FB\u9664\u672C\u5730\u7F51\u5740\u7ED1\u5B9A\uFF0C\u4E0D\u4F1A\u5220\u9664\u63A5\u53E3\u914D\u7F6E\u6216\u670D\u52A1\u5668 Workspace\uFF1B\u5220\u9664\u5F53\u524D\u7F51\u5740\u8FD9\u4E00\u6761\u4F1A\u7ACB\u5373\u6062\u590D\u5168\u5C40\u9ED8\u8BA4\u5E76\u53D6\u6D88\u5F53\u524D Workspace\u3002</div>
+              <div class="gam-bindings-list"></div>
+              <div class="gam-bindings-status" aria-live="polite"></div>
+            </section>
+
             <section class="gam-settings-section gam-sound-section">
               <div class="gam-sound-heading-row">
                 <div class="gam-section-heading">\u58F0\u97F3\u63D0\u9192</div>
@@ -3222,6 +3332,9 @@ ${result}`;
       const globalValue = overlay.querySelector(".gam-global-value");
       const currentValue = overlay.querySelector(".gam-current-value");
       const editingValue = overlay.querySelector(".gam-editing-value");
+      const bindingsCount = overlay.querySelector(".gam-bindings-count");
+      const bindingsList = overlay.querySelector(".gam-bindings-list");
+      const bindingsStatus = overlay.querySelector(".gam-bindings-status");
       const soundEnabledInput = overlay.querySelector(".gam-sound-enabled");
       const soundDelayInput = overlay.querySelector(".gam-sound-delay");
       const soundDurationInput = overlay.querySelector(".gam-sound-duration");
@@ -3298,6 +3411,68 @@ ${result}`;
         }
         renderEndpointSelect();
       }
+      function renderBindings() {
+        const state = getState();
+        const bindings = state.pageBindings || [];
+        bindingsCount.textContent = `${bindings.length} / ${MAX_PAGE_BINDINGS}`;
+        bindingsList.replaceChildren();
+        if (!bindings.length) {
+          const empty = document.createElement("div");
+          empty.className = "gam-bindings-empty";
+          empty.textContent = "\u6682\u65E0\u7F51\u5740\u7ED1\u5B9A\u3002";
+          bindingsList.appendChild(empty);
+          return;
+        }
+        for (const binding of bindings) {
+          const row = document.createElement("div");
+          row.className = "gam-binding-row";
+          if (binding.url === state.pageUrl) row.dataset.current = "true";
+          const content = document.createElement("div");
+          content.className = "gam-binding-content";
+          const urlRow = document.createElement("div");
+          urlRow.className = "gam-binding-url-row";
+          const url = document.createElement("div");
+          url.className = "gam-binding-url";
+          url.textContent = binding.url;
+          url.title = binding.url;
+          urlRow.appendChild(url);
+          if (binding.url === state.pageUrl) {
+            const badge = document.createElement("span");
+            badge.className = "gam-binding-current";
+            badge.textContent = "\u5F53\u524D\u7F51\u5740";
+            urlRow.appendChild(badge);
+          }
+          const endpoint = binding.endpointId ? endpointName(state.endpoints, binding.endpointId) || binding.endpointId : "\u8DDF\u968F\u5168\u5C40";
+          const workspaceEndpoint = binding.workspaceEndpointId ? endpointName(state.endpoints, binding.workspaceEndpointId) || binding.workspaceEndpointId : "";
+          const workspace = binding.workspaceId ? `${binding.workspaceId}${workspaceEndpoint ? ` @ ${workspaceEndpoint}` : ""}` : "\u672A\u7ED1\u5B9A Workspace";
+          const modified = formatBindingTime(binding.modifiedAt);
+          const meta = document.createElement("div");
+          meta.className = "gam-binding-meta";
+          meta.textContent = [endpoint, workspace, modified ? `\u4FEE\u6539 ${modified}` : ""].filter(Boolean).join(" \xB7 ");
+          content.append(urlRow, meta);
+          const removeButton = document.createElement("button");
+          removeButton.className = "gam-button gam-binding-delete";
+          removeButton.type = "button";
+          removeButton.textContent = "\u5220\u9664";
+          removeButton.setAttribute("aria-label", `\u5220\u9664\u7F51\u5740\u7ED1\u5B9A ${binding.url}`);
+          removeButton.addEventListener("click", () => {
+            bindingsStatus.textContent = "";
+            delete bindingsStatus.dataset.state;
+            try {
+              onDeletePageBinding(binding.url);
+              renderBindings();
+              renderUsageState();
+              bindingsStatus.textContent = "\u2713 \u5DF2\u5220\u9664\u7F51\u5740\u7ED1\u5B9A\u3002";
+              bindingsStatus.dataset.state = "success";
+            } catch (error) {
+              bindingsStatus.textContent = error instanceof Error ? error.message : String(error);
+              bindingsStatus.dataset.state = "error";
+            }
+          });
+          row.append(content, removeButton);
+          bindingsList.appendChild(row);
+        }
+      }
       function loadEditingEndpoint() {
         const endpoint = currentDraftEndpoint();
         if (!endpoint) return;
@@ -3306,6 +3481,7 @@ ${result}`;
         tokenInput.value = endpoint.token || "";
         clearMessage();
         renderUsageState();
+        renderBindings();
       }
       function validateDraft() {
         const seenIds = /* @__PURE__ */ new Set();
@@ -3980,6 +4156,30 @@ ${result}`;
       reconcileEffectiveEndpoint(previousSignature);
       persistCurrentPageBinding();
     }
+    function deleteStoredPageBinding(url) {
+      const key = String(url || "").trim();
+      if (!key) return loadPageBindings();
+      const deletingCurrentPage = key === currentPageUrl;
+      debugLog("main", "delete page binding", {
+        url: key,
+        deletingCurrentPage
+      });
+      const bindings = deletePageBinding(key);
+      if (!deletingCurrentPage) return bindings;
+      resetWorkspaceStream();
+      pageActiveEndpointId = null;
+      activeWorkspaceId = null;
+      workspaceClient.clear();
+      workspaceMenu.reset();
+      skillsMenu.close();
+      workspaceMenu.updateTrigger();
+      if (!getEffectiveEndpoint()?.backend) {
+        deactivateMonitor();
+      } else if (document.visibilityState === "visible") {
+        activateMonitor();
+      }
+      return bindings;
+    }
     function setSoundAlertEnabled(enabled) {
       soundAlertEnabled = Boolean(enabled);
       GM_setValue(SOUND_ALERT_ENABLED_KEY, soundAlertEnabled);
@@ -4014,6 +4214,7 @@ ${result}`;
         pageActiveEndpointId,
         effectiveEndpointId: getEffectiveEndpointId(),
         pageUrl: currentPageUrl,
+        pageBindings: loadPageBindings(),
         soundAlertEnabled,
         soundAlertDelayMinutes,
         soundAlertDurationSeconds
@@ -4022,6 +4223,7 @@ ${result}`;
       onSetGlobalEndpoint: setGlobalActiveEndpoint,
       onUsePageEndpoint: usePageEndpoint,
       onRestoreGlobalEndpoint: restoreGlobalEndpoint,
+      onDeletePageBinding: deleteStoredPageBinding,
       onSetSoundAlertEnabled: setSoundAlertEnabled,
       onSetSoundAlertDelayMinutes: setSoundAlertDelayMinutes,
       onSetSoundAlertDurationSeconds: setSoundAlertDurationSeconds,

@@ -642,6 +642,86 @@ export const SETTINGS_CSS = `
         justify-content: space-between;
         gap: 12px;
       }
+      #gam-settings-overlay .gam-bindings-heading-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      #gam-settings-overlay .gam-bindings-count {
+        flex: 0 0 auto;
+        color: color-mix(in srgb, CanvasText 52%, transparent);
+        font-size: 11px;
+      }
+      #gam-settings-overlay .gam-bindings-note,
+      #gam-settings-overlay .gam-bindings-status,
+      #gam-settings-overlay .gam-bindings-empty {
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 12px;
+      }
+      #gam-settings-overlay .gam-bindings-list {
+        display: grid;
+        border-top: 1px solid color-mix(in srgb, CanvasText 9%, transparent);
+      }
+      #gam-settings-overlay .gam-binding-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        min-width: 0;
+        padding: 10px 0;
+        border-bottom: 1px solid color-mix(in srgb, CanvasText 9%, transparent);
+      }
+      #gam-settings-overlay .gam-binding-row[data-current="true"] {
+        margin: 0 -6px;
+        padding-left: 6px;
+        padding-right: 6px;
+        border-radius: 8px;
+        background: color-mix(in srgb, #237a42 5%, transparent);
+      }
+      #gam-settings-overlay .gam-binding-content { min-width: 0; }
+      #gam-settings-overlay .gam-binding-url-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 7px;
+        min-width: 0;
+      }
+      #gam-settings-overlay .gam-binding-url {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        color: CanvasText;
+        font: 11px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      #gam-settings-overlay .gam-binding-current {
+        flex: 0 0 auto;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: color-mix(in srgb, #237a42 12%, transparent);
+        color: #237a42;
+        font-size: 10px;
+        font-weight: 650;
+        white-space: nowrap;
+      }
+      #gam-settings-overlay .gam-binding-meta {
+        margin-top: 4px;
+        overflow-wrap: anywhere;
+        color: color-mix(in srgb, CanvasText 55%, transparent);
+        font-size: 11px;
+      }
+      #gam-settings-overlay .gam-binding-delete {
+        min-height: 30px;
+        padding-inline: 9px;
+        color: color-mix(in srgb, #c53e3e 88%, CanvasText 12%);
+      }
+      #gam-settings-overlay .gam-binding-delete:hover {
+        background: color-mix(in srgb, #c53e3e 8%, Canvas);
+      }
+      #gam-settings-overlay .gam-bindings-status { min-height: 18px; }
+      #gam-settings-overlay .gam-bindings-status[data-state="success"] { color: #238349; }
+      #gam-settings-overlay .gam-bindings-status[data-state="error"] { color: #c53e3e; }
+      #gam-settings-overlay .gam-bindings-empty {
+        padding: 10px 0 2px;
+      }
       #gam-settings-overlay .gam-sound-switch {
         position: relative;
         display: inline-block;
@@ -723,5 +803,6 @@ export const SETTINGS_CSS = `
         #gam-settings-overlay .gam-endpoint-select { grid-column: 1 / -1; }
         #gam-settings-overlay .gam-usage-grid { grid-template-columns: 1fr; gap: 2px; }
         #gam-settings-overlay .gam-usage-grid > strong { margin-bottom: 6px; }
+        #gam-settings-overlay .gam-binding-row { align-items: start; }
       }
     `;

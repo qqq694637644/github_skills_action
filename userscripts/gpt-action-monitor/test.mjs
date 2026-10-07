@@ -12,6 +12,7 @@ import { loadSkillsCall } from './src/adapters/composer.js';
 import { createSoundAlert } from './src/alert/sound-alert.js';
 import { selectNowCells } from './src/ui/activity-panel.js';
 import {
+  deletePageBinding,
   loadEndpoints,
   loadGlobalActiveEndpointId,
   loadPageBinding,
@@ -187,6 +188,11 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
     workspaceEndpointId: '',
   }, 999);
   assert.equal(loadPageBinding('https://chatgpt.com/c/19'), null);
+
+  const beforeDelete = loadPageBindings().length;
+  const afterDelete = deletePageBinding('https://chatgpt.com/c/18');
+  assert.equal(afterDelete.length, beforeDelete - 1);
+  assert.equal(loadPageBinding('https://chatgpt.com/c/18'), null);
 }
 
 // Skill catalog reads are cached in-page, while explicit refresh performs a

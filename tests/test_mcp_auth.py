@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -172,6 +175,43 @@ def test_oauth_subpath_publishes_matching_metadata_and_challenge_url() -> None:
                 'resource_metadata="https://githubaction.giize.com/'
                 '.well-known/oauth-protected-resource/mcp-app/mcp"' in challenge
             )
+
+    asyncio.run(scenario())
+
+
+def test_many_action_log_waiters_do_not_starve_workspace_listing() -> None:
+    async def scenario() -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.dict(
+                os.environ,
+                {
+                    "WORKSPACE_ROOT": temp,
+                    "WORKSPACE_OPERATION_ROOT": str(Path(temp) / ".operations"),
+                },
+                clear=False,
+            ):
+                app = create_app(_settings())
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="https://workspace.example.com",
+                ) as client:
+                    polls = [
+                        asyncio.create_task(
+                            client.get(
+                                "/v1/action-logs",
+                                params={"after": 0, "wait": 0.5, "limit": 1},
+                            )
+                        )
+                        for _ in range(50)
+                    ]
+                    await asyncio.sleep(0.05)
+                    started = time.perf_counter()
+                    response = await client.get("/v1/action-workspaces")
+                    elapsed = time.perf_counter() - started
+                    assert response.status_code == 200, response.text
+                    assert elapsed < 0.2
+                    await asyncio.gather(*polls)
 
     asyncio.run(scenario())
 

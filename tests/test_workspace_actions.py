@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -619,11 +620,13 @@ class WorkspaceActionsTests(unittest.TestCase):
                         },
                     )
 
-            result = wait_for_action_events(
-                after=0,
-                timeout=0,
-                limit=10,
-                workspace_id=workspace_id,
+            result = asyncio.run(
+                wait_for_action_events(
+                    after=0,
+                    timeout=0,
+                    limit=10,
+                    workspace_id=workspace_id,
+                )
             )
             structured = [item["event"] for item in result["items"] if "event" in item]
             self.assertEqual([event["phase"] for event in structured], ["started", "failed"])

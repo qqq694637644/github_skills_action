@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -37,7 +38,8 @@ class ActionEventItem(TypedDict, total=False):
 
 
 _ACTION_EVENTS: deque[ActionEventItem] = deque(maxlen=ACTION_EVENT_LIMIT)
-_ACTION_EVENTS_CONDITION = threading.Condition()
+_ACTION_EVENTS_LOCK = threading.Lock()
+_ACTION_EVENT_WAITERS: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
 _ACTION_EVENT_ID = 0
 _ACTION_STREAM_ID = secrets.token_hex(16)
 
@@ -122,7 +124,7 @@ def _action_line(action: str, fields: dict[str, Any]) -> str:
 
 def _append_action_event(line: str, event: ActivityEvent | None) -> None:
     global _ACTION_EVENT_ID
-    with _ACTION_EVENTS_CONDITION:
+    with _ACTION_EVENTS_LOCK:
         _ACTION_EVENT_ID += 1
         item: ActionEventItem = {"id": _ACTION_EVENT_ID, "text": line}
         if event is not None:
@@ -131,7 +133,12 @@ def _append_action_event(line: str, event: ActivityEvent | None) -> None:
                 safe_event["activity_id"] = f"event:{_ACTION_EVENT_ID}"
             item["event"] = safe_event
         _ACTION_EVENTS.append(item)
-        _ACTION_EVENTS_CONDITION.notify_all()
+        waiters = tuple(_ACTION_EVENT_WAITERS)
+    for loop, waiter in waiters:
+        try:
+            loop.call_soon_threadsafe(waiter.set)
+        except RuntimeError:
+            pass
 
 
 def _workspace_id_from_activity(
@@ -209,7 +216,7 @@ def log_activity(
     )
 
 
-def wait_for_action_events(
+async def wait_for_action_events(
     *,
     after: int = 0,
     timeout: float = 25.0,
@@ -218,7 +225,7 @@ def wait_for_action_events(
     operation: str | None = None,
     phase: ActivityPhase | None = None,
 ) -> dict[str, Any]:
-    """Return newer events matching optional structured filters, with a global cursor."""
+    """Asynchronously wait for newer matching events without occupying a worker thread."""
 
     def matches_filters(item: ActionEventItem) -> bool:
         if workspace_id is None and operation is None and phase is None:
@@ -236,7 +243,7 @@ def wait_for_action_events(
                 return False
         return True
 
-    def collect(start_after: int) -> tuple[list[dict[str, Any]], int]:
+    def collect_locked(start_after: int) -> tuple[list[dict[str, Any]], int]:
         items: list[dict[str, Any]] = []
         scanned_id = min(start_after, _ACTION_EVENT_ID)
         for item in _ACTION_EVENTS:
@@ -249,27 +256,41 @@ def wait_for_action_events(
                     break
         return items, scanned_id
 
-    with _ACTION_EVENTS_CONDITION:
-        items, last_id = collect(after)
-        if not items and timeout > 0:
-            wait_after = last_id
-            _ACTION_EVENTS_CONDITION.wait_for(
-                lambda: any(
-                    item["id"] > wait_after and matches_filters(item)
-                    for item in _ACTION_EVENTS
-                ),
-                timeout=timeout,
-            )
-            items, last_id = collect(wait_after)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    cursor = after
 
-    return {"stream_id": _ACTION_STREAM_ID, "items": items, "last_id": last_id}
+    while True:
+        waiter = asyncio.Event()
+        registration = (loop, waiter)
+        with _ACTION_EVENTS_LOCK:
+            items, cursor = collect_locked(cursor)
+            if items or timeout <= 0:
+                return {"stream_id": _ACTION_STREAM_ID, "items": items, "last_id": cursor}
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return {"stream_id": _ACTION_STREAM_ID, "items": [], "last_id": cursor}
+            _ACTION_EVENT_WAITERS.add(registration)
+
+        try:
+            await asyncio.wait_for(waiter.wait(), timeout=remaining)
+        except TimeoutError:
+            pass
+        finally:
+            with _ACTION_EVENTS_LOCK:
+                _ACTION_EVENT_WAITERS.discard(registration)
+
+        if loop.time() >= deadline:
+            with _ACTION_EVENTS_LOCK:
+                items, cursor = collect_locked(cursor)
+            return {"stream_id": _ACTION_STREAM_ID, "items": items, "last_id": cursor}
 
 
 def clear_action_events() -> None:
     """Clear the in-memory monitor buffer. Intended for isolated tests."""
 
     global _ACTION_EVENT_ID
-    with _ACTION_EVENTS_CONDITION:
+    with _ACTION_EVENTS_LOCK:
         _ACTION_EVENTS.clear()
         _ACTION_EVENT_ID = 0
 

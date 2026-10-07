@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+import httpx
 
 from skill_temple.action_logging import (
     ACTION_EVENT_LIMIT,
@@ -437,10 +440,12 @@ class RuntimeTests(unittest.TestCase):
             for index in range(ACTION_EVENT_LIMIT + 5):
                 log_action("bufferTest", index=index)
 
-        result = wait_for_action_events(
-            after=0,
-            timeout=0,
-            limit=ACTION_EVENT_LIMIT + 10,
+        result = asyncio.run(
+            wait_for_action_events(
+                after=0,
+                timeout=0,
+                limit=ACTION_EVENT_LIMIT + 10,
+            )
         )
 
         self.assertEqual(len(result["items"]), ACTION_EVENT_LIMIT)
@@ -471,12 +476,14 @@ class RuntimeTests(unittest.TestCase):
                 legacy_action="workspaceReadFiles",
             )
 
-        result = wait_for_action_events(
-            after=0,
-            timeout=0,
-            limit=50,
-            operation="prepare_workspace",
-            phase="completed",
+        result = asyncio.run(
+            wait_for_action_events(
+                after=0,
+                timeout=0,
+                limit=50,
+                operation="prepare_workspace",
+                phase="completed",
+            )
         )
 
         self.assertEqual(len(result["items"]), 1)
@@ -484,6 +491,44 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(event["phase"], "completed")
         self.assertEqual(event["payload"]["operation"], "prepare_workspace")
         self.assertEqual(result["last_id"], 2)
+
+    def test_many_action_log_waiters_do_not_starve_workspace_listing(self) -> None:
+        async def exercise() -> float:
+            clear_action_events()
+            with tempfile.TemporaryDirectory() as temp:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "WORKSPACE_ROOT": temp,
+                        "WORKSPACE_OPERATION_ROOT": str(Path(temp) / ".operations"),
+                    },
+                    clear=False,
+                ):
+                    app = create_app()
+                    transport = httpx.ASGITransport(app=app)
+                    async with httpx.AsyncClient(
+                        transport=transport,
+                        base_url="http://test",
+                    ) as client:
+                        polls = [
+                            asyncio.create_task(
+                                client.get(
+                                    "/v1/action-logs",
+                                    params={"after": 0, "wait": 0.5, "limit": 1},
+                                )
+                            )
+                            for _ in range(50)
+                        ]
+                        await asyncio.sleep(0.05)
+                        started = time.perf_counter()
+                        response = await client.get("/v1/action-workspaces")
+                        elapsed = time.perf_counter() - started
+                        self.assertEqual(response.status_code, 200, response.text)
+                        await asyncio.gather(*polls)
+                        return elapsed
+
+        elapsed = asyncio.run(exercise())
+        self.assertLess(elapsed, 0.2)
 
     def test_cli_disables_uvicorn_access_log_by_default(self) -> None:
         with (

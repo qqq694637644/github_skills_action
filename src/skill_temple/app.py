@@ -232,7 +232,7 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
         return runtime.list_skills()
 
     @app.get("/v1/action-logs", include_in_schema=False)
-    def action_logs(
+    async def action_logs(
         workspace_id: str | None = Query(default=None, pattern=r"^ws_[0-9a-f]{16}$"),
         operation: str | None = Query(default=None, min_length=1, max_length=80),
         phase: Literal["started", "updated", "completed", "failed"] | None = Query(default=None),
@@ -240,7 +240,7 @@ def create_app(skills_dir: str | Path | None = None, server_url: str | None = No
         wait: float = Query(default=55.0, ge=0.0, le=60.0),
         limit: int = Query(default=50, ge=1, le=100),
     ) -> dict[str, Any]:
-        return wait_for_action_events(
+        return await wait_for_action_events(
             after=after,
             timeout=wait,
             limit=limit,

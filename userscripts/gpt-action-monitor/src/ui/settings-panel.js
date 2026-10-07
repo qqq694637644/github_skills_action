@@ -3,6 +3,7 @@ import {
   normalizeBackend,
   validateBackend,
 } from '../profile/profile-store.js';
+import { debugError, debugLog, debugWarn } from '../debug.js';
 import { SETTINGS_CSS } from './styles.js';
 
 function testProfileConnection(profile, statusElement, button) {
@@ -18,36 +19,61 @@ function testProfileConnection(profile, statusElement, button) {
   statusElement.dataset.state = 'pending';
   const headers = {};
   if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
-
-  GM_xmlhttpRequest({
-    method: 'GET',
-    url: `${validation.backend}/v1/action-workspaces`,
-    headers,
-    timeout: 7000,
-    onload(response) {
-      button.disabled = false;
-      if (response.status >= 200 && response.status < 300) {
-        statusElement.textContent = '✓ 连接成功';
-        statusElement.dataset.state = 'success';
-      } else if (response.status === 401) {
-        statusElement.textContent = '认证失败，请检查 Bearer Token。';
-        statusElement.dataset.state = 'error';
-      } else {
-        statusElement.textContent = `后端返回 HTTP ${response.status}。`;
-        statusElement.dataset.state = 'error';
-      }
-    },
-    onerror() {
-      button.disabled = false;
-      statusElement.textContent = '无法连接后端。';
-      statusElement.dataset.state = 'error';
-    },
-    ontimeout() {
-      button.disabled = false;
-      statusElement.textContent = '连接超时。';
-      statusElement.dataset.state = 'error';
-    },
+  const url = `${validation.backend}/v1/action-workspaces`;
+  const startedAt = Date.now();
+  debugLog('settings', 'test connection request', {
+    backend: validation.backend,
+    url,
+    hasToken: Boolean(profile.token),
   });
+
+  try {
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url,
+      headers,
+      timeout: 7000,
+      onload(response) {
+        button.disabled = false;
+        debugLog('settings', 'test connection response', {
+          status: response.status,
+          elapsedMs: Date.now() - startedAt,
+        });
+        if (response.status >= 200 && response.status < 300) {
+          statusElement.textContent = '✓ 连接成功';
+          statusElement.dataset.state = 'success';
+        } else if (response.status === 401) {
+          statusElement.textContent = '认证失败，请检查 Bearer Token。';
+          statusElement.dataset.state = 'error';
+        } else {
+          statusElement.textContent = `后端返回 HTTP ${response.status}。`;
+          statusElement.dataset.state = 'error';
+        }
+      },
+      onerror(error) {
+        button.disabled = false;
+        debugError('settings', 'test connection network error', {
+          elapsedMs: Date.now() - startedAt,
+          error: String(error),
+        });
+        statusElement.textContent = '无法连接后端。';
+        statusElement.dataset.state = 'error';
+      },
+      ontimeout() {
+        button.disabled = false;
+        debugWarn('settings', 'test connection timeout', {
+          elapsedMs: Date.now() - startedAt,
+        });
+        statusElement.textContent = '连接超时。';
+        statusElement.dataset.state = 'error';
+      },
+    });
+  } catch (error) {
+    button.disabled = false;
+    debugError('settings', 'test connection request threw synchronously', String(error));
+    statusElement.textContent = `发起测试连接失败：${String(error)}`;
+    statusElement.dataset.state = 'error';
+  }
 }
 
 function cloneEndpoints(endpoints) {

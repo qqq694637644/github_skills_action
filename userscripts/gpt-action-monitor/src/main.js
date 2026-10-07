@@ -6,6 +6,7 @@ import { createSkillCatalogClient } from './api/skill-catalog-client.js';
 import { createWorkspaceClient } from './api/workspace-client.js';
 import { createComposerAdapter, loadSkillsCall } from './adapters/composer.js';
 import { createSoundAlert } from './alert/sound-alert.js';
+import { debugLog, debugWarn, summarizeActionItems } from './debug.js';
 import {
   DEFAULT_SOUND_ALERT_DELAY_MINUTES,
   DEFAULT_SOUND_ALERT_DURATION_SECONDS,
@@ -107,6 +108,16 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   }
 
   loadCurrentPageBinding();
+  debugLog('main', 'boot state', {
+    pageUrl: currentPageUrl,
+    visibility: document.visibilityState,
+    globalActiveEndpointId,
+    pageActiveEndpointId,
+    effectiveEndpointId: getEffectiveEndpointId(),
+    backend: getEffectiveEndpoint()?.backend || null,
+    activeWorkspaceId,
+    soundAlertEnabled,
+  });
 
   const composerAdapter = createComposerAdapter();
   const skillCatalogClient = createSkillCatalogClient({
@@ -150,16 +161,28 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   });
 
   function stopActionLog() {
-    if (!actionLogClient) return;
+    if (!actionLogClient) {
+      debugLog('main', 'stopActionLog skipped: no client');
+      return;
+    }
     const cursor = actionLogClient.getCursor?.();
     if (Number.isInteger(cursor) && activitySessionKey) {
       activitySessions.setCursor(activitySessionKey, cursor);
     }
     actionLogClient.stop();
     actionLogClient = null;
+    debugLog('main', 'action-log client stopped', {
+      sessionKey: activitySessionKey,
+      cursor: Number.isInteger(cursor) ? cursor : null,
+    });
   }
 
   function resetWorkspaceStream({ preserveSessions = false } = {}) {
+    debugLog('main', 'reset workspace stream', {
+      preserveSessions,
+      activeWorkspaceId,
+      sessionKey: activitySessionKey,
+    });
     stopActionLog();
     activityStore.clear();
     soundAlert.reset();
@@ -207,7 +230,14 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   }
 
   function selectWorkspace(workspaceId) {
-    if (!/^ws_[0-9a-f]{16}$/.test(workspaceId)) return false;
+    if (!/^ws_[0-9a-f]{16}$/.test(workspaceId)) {
+      debugWarn('main', 'reject invalid workspace selection', { workspaceId });
+      return false;
+    }
+    debugLog('main', 'select workspace', {
+      previousWorkspaceId: activeWorkspaceId,
+      nextWorkspaceId: workspaceId,
+    });
     if (workspaceId === activeWorkspaceId) {
       workspaceMenu.updateTrigger();
       return true;
@@ -222,7 +252,11 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   }
 
   function resetWorkspaceSelection() {
-    if (!activeWorkspaceId) return true;
+    if (!activeWorkspaceId) {
+      debugLog('main', 'reset workspace skipped: already discovery');
+      return true;
+    }
+    debugLog('main', 'reset workspace selection', { previousWorkspaceId: activeWorkspaceId });
     resetWorkspaceStream({ preserveSessions: true });
     activeWorkspaceId = null;
     workspaceClient.clear();
@@ -340,6 +374,10 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   function handlePageNavigation() {
     const nextPageUrl = pageUrl();
     if (nextPageUrl === currentPageUrl) return;
+    debugLog('main', 'page navigation', {
+      previousPageUrl: currentPageUrl,
+      nextPageUrl,
+    });
 
     resetWorkspaceStream();
     activeWorkspaceId = null;
@@ -361,7 +399,17 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
 
   function startActionLog() {
     const profile = getEffectiveEndpoint();
-    if (!monitorMounted || actionLogClient || !profile?.backend) return;
+    if (!monitorMounted || actionLogClient || !profile?.backend) {
+      debugLog('main', 'startActionLog skipped', {
+        monitorMounted,
+        hasClient: Boolean(actionLogClient),
+        hasBackend: Boolean(profile?.backend),
+        endpointId: profile?.id || null,
+        backend: profile?.backend || null,
+        activeWorkspaceId,
+      });
+      return;
+    }
 
     const nextSessionKey = `${profile.id}:${profile.backend}:${activeWorkspaceId || 'discovery'}`;
     if (activitySessionKey !== nextSessionKey) {
@@ -370,15 +418,37 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
     }
 
     const sessionKey = nextSessionKey;
+    const initialCursor = activitySessions.getCursor(sessionKey);
+    const initialStreamId = activitySessions.getStreamId();
+    debugLog('main', 'create action-log client', {
+      endpointId: profile.id,
+      backend: profile.backend,
+      activeWorkspaceId,
+      mode: activeWorkspaceId ? 'workspace' : 'discovery',
+      sessionKey,
+      initialCursor,
+      initialStreamId,
+      visibility: document.visibilityState,
+    });
 
     actionLogClient = createActionLogClient({
       getProfile: getEffectiveEndpoint,
       getWorkspaceId: () => activeWorkspaceId,
-      initialCursor: activitySessions.getCursor(sessionKey),
-      initialStreamId: activitySessions.getStreamId(),
-      onCursor: (cursor) => { activitySessions.setCursor(sessionKey, cursor); },
-      onStreamId: (streamId) => { activitySessions.setStreamId(streamId); },
+      initialCursor,
+      initialStreamId,
+      onCursor: (cursor) => {
+        activitySessions.setCursor(sessionKey, cursor);
+        debugLog('main', 'cursor updated', { sessionKey, cursor });
+      },
+      onStreamId: (streamId) => {
+        activitySessions.setStreamId(streamId);
+        debugLog('main', 'stream id updated', { streamId });
+      },
       onStreamReset() {
+        debugWarn('main', 'server stream reset: clearing active state', {
+          sessionKey,
+          activeWorkspaceId,
+        });
         activitySessions.clearCursors();
         activitySessions.setCursor(sessionKey, 0);
         activityStore.clearActive();
@@ -387,6 +457,11 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
       },
       shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
       onItems(items) {
+        debugLog('main', 'onItems', {
+          count: items?.length || 0,
+          activeWorkspaceId,
+          items: summarizeActionItems(items),
+        });
         if (!activeWorkspaceId) {
           const preparedWorkspace = (items || []).some((item) => (
             item?.event?.phase === 'completed'
@@ -403,6 +478,12 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
         if (latestTimestamp && activeWorkspaceId) soundAlert.observe(latestTimestamp);
         soundAlert.check();
         const newest = activityStore.ingest(items);
+        const snapshot = activityStore.snapshot();
+        debugLog('main', 'activity store updated', {
+          newestId: newest?.id || null,
+          activeCount: snapshot.active.length,
+          recentCount: snapshot.recent.length,
+        });
         if (newest) {
           monitorUi.clearHint();
           monitorUi.queueActivity(compactActivity(newest));
@@ -421,7 +502,16 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
 
   function activateMonitor() {
     const profile = getEffectiveEndpoint();
-    if (!profile?.backend) return;
+    if (!profile?.backend) {
+      debugWarn('main', 'activate monitor skipped: no backend');
+      return;
+    }
+    debugLog('main', 'activate monitor', {
+      endpointId: profile.id,
+      backend: profile.backend,
+      activeWorkspaceId,
+      mounted: monitorMounted,
+    });
 
     if (!monitorMounted) {
       monitorMounted = true;
@@ -433,6 +523,11 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   }
 
   function suspend() {
+    debugLog('main', 'page hidden: suspend', {
+      soundAlertEnabled,
+      activeWorkspaceId,
+      keepPolling: soundAlertEnabled && Boolean(activeWorkspaceId),
+    });
     monitorUi.suspendActivity();
     if (soundAlertEnabled && activeWorkspaceId) {
       soundAlert.check();
@@ -442,6 +537,11 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
   }
 
   function resume() {
+    debugLog('main', 'page visible: resume', {
+      monitorMounted,
+      hasClient: Boolean(actionLogClient),
+      activeWorkspaceId,
+    });
     if (!monitorMounted) {
       activateMonitor();
       return;

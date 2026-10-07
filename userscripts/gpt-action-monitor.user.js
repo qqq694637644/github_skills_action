@@ -858,6 +858,31 @@ ${result}`;
     };
   }
 
+  // src/debug.js
+  var PREFIX = "[GPT Action Monitor]";
+  function debugLog(scope, event, details = void 0) {
+    if (details === void 0) console.log(`${PREFIX}[${scope}] ${event}`);
+    else console.log(`${PREFIX}[${scope}] ${event}`, details);
+  }
+  function debugWarn(scope, event, details = void 0) {
+    if (details === void 0) console.warn(`${PREFIX}[${scope}] ${event}`);
+    else console.warn(`${PREFIX}[${scope}] ${event}`, details);
+  }
+  function debugError(scope, event, details = void 0) {
+    if (details === void 0) console.error(`${PREFIX}[${scope}] ${event}`);
+    else console.error(`${PREFIX}[${scope}] ${event}`, details);
+  }
+  function summarizeActionItems(items) {
+    return (items || []).slice(0, 20).map((item) => ({
+      id: item?.id ?? null,
+      activityId: item?.event?.activity_id ?? null,
+      kind: item?.event?.kind ?? null,
+      phase: item?.event?.phase ?? null,
+      workspaceId: item?.event?.workspace_id ?? null,
+      operation: item?.event?.payload?.operation ?? null
+    }));
+  }
+
   // src/api/action-log-client.js
   function createActionLogClient({
     getProfile,
@@ -897,39 +922,60 @@ ${result}`;
       const active = requestHandle;
       requestHandle = null;
       if (active && typeof active.abort === "function") {
+        debugLog("action-log", "abort active request");
         try {
           active.abort();
-        } catch (_) {
+        } catch (error) {
+          debugWarn("action-log", "abort threw", String(error));
         }
       }
     }
     function suspend() {
+      debugLog("action-log", "suspend", { cursor: getCursor(), streamId });
       requestGeneration += 1;
       clearPollTimer();
       abortRequest();
     }
     function resume() {
+      debugLog("action-log", "resume", { cursor: getCursor(), streamId });
       if (!stopped) schedulePoll(0);
     }
     function stop() {
+      debugLog("action-log", "stop", { cursor: getCursor(), streamId });
       stopped = true;
       suspend();
     }
     function start() {
+      debugLog("action-log", "start", { cursor: getCursor(), streamId });
       stopped = false;
       schedulePoll(0);
     }
     function scheduleRetry(message) {
+      debugWarn("action-log", "retry scheduled", { message, retryMs: RETRY_MS });
       onHint(message);
       onAttention?.("\u8FDE\u63A5\u5F02\u5E38", "3 \u79D2\u540E\u91CD\u8BD5");
       onStatus?.("error");
       schedulePoll(RETRY_MS);
     }
     function poll() {
-      if (stopped || requestHandle || document.visibilityState !== "visible" && !shouldPollWhenHidden()) return;
+      if (stopped) {
+        debugLog("action-log", "poll skipped: stopped");
+        return;
+      }
+      if (requestHandle) {
+        debugLog("action-log", "poll skipped: request already active");
+        return;
+      }
+      if (document.visibilityState !== "visible" && !shouldPollWhenHidden()) {
+        debugLog("action-log", "poll skipped: hidden page");
+        return;
+      }
       const profile = getProfile();
       const workspaceId = getWorkspaceId?.();
-      if (!profile) return;
+      if (!profile) {
+        debugWarn("action-log", "poll skipped: no effective profile");
+        return;
+      }
       const discovery = !workspaceId;
       const headers = {};
       if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
@@ -938,81 +984,147 @@ ${result}`;
       const wait = priming ? 0 : POLL_WAIT_SECONDS;
       const after = priming ? Number.MAX_SAFE_INTEGER : lastId;
       const filter = discovery ? "operation=prepare_workspace&phase=completed" : `workspace_id=${encodeURIComponent(workspaceId)}`;
-      requestHandle = GM_xmlhttpRequest({
-        method: "GET",
-        url: `${profile.backend}/v1/action-logs?${filter}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
-        headers,
-        timeout: (wait + 5) * 1e3,
-        onload(response) {
-          if (generation !== requestGeneration) return;
-          requestHandle = null;
-          if (response.status === 401) {
-            stopped = true;
-            onHint("\u8BA4\u8BC1\u5931\u8D25\uFF1A\u8BF7\u68C0\u67E5 Bearer Token\u3002");
-            onAttention?.("\u8BA4\u8BC1\u5931\u8D25", "\u68C0\u67E5 Bearer Token");
-            onStatus?.("error");
-            return;
-          }
-          if (response.status < 200 || response.status >= 300) {
-            scheduleRetry(`\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002`);
-            return;
-          }
-          try {
-            const body = JSON.parse(response.responseText);
-            const nextStreamId = typeof body.stream_id === "string" && body.stream_id ? body.stream_id : null;
-            if (nextStreamId && streamId && nextStreamId !== streamId) {
-              streamId = nextStreamId;
-              onStreamId?.(streamId);
-              needsCursorPrime = false;
-              lastId = 0;
-              onCursor?.(lastId);
-              onStreamReset?.(streamId);
-              onStatus?.("idle");
-              schedulePoll(0);
-              return;
-            }
-            if (nextStreamId && nextStreamId !== streamId) {
-              streamId = nextStreamId;
-              onStreamId?.(streamId);
-            }
-            if (Number.isInteger(body.last_id)) {
-              lastId = body.last_id;
-              onCursor?.(lastId);
-            }
-            if (priming) {
-              needsCursorPrime = false;
-              onStatus?.("idle");
-              schedulePoll(0);
-              return;
-            }
-            const items = Array.isArray(body.items) ? body.items.filter((item) => {
-              if (discovery) {
-                return item?.event?.phase === "completed" && item?.event?.payload?.operation === "prepare_workspace";
-              }
-              return item?.event?.workspace_id === workspaceId;
-            }) : [];
-            onItems(items);
-            schedulePoll();
-          } catch (error) {
-            scheduleRetry(`\u54CD\u5E94\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`);
-          }
-        },
-        onerror() {
-          if (generation === requestGeneration) {
-            requestHandle = null;
-            scheduleRetry("\u8FDE\u63A5\u540E\u7AEF\u5931\u8D25\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002");
-          }
-        },
-        ontimeout() {
-          if (generation === requestGeneration) {
-            requestHandle = null;
-            schedulePoll(100);
-          }
-        },
-        onabort() {
-          if (generation === requestGeneration) requestHandle = null;
-        }
+      const url = `${profile.backend}/v1/action-logs?${filter}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`;
+      const startedAt = Date.now();
+      debugLog("action-log", "request", {
+        backend: profile.backend,
+        endpointId: profile.id,
+        workspaceId: workspaceId || null,
+        mode: discovery ? "discovery" : "workspace",
+        priming,
+        cursor: lastId,
+        streamId,
+        generation,
+        url
       });
+      try {
+        requestHandle = GM_xmlhttpRequest({
+          method: "GET",
+          url,
+          headers,
+          timeout: (wait + 5) * 1e3,
+          onload(response) {
+            if (generation !== requestGeneration) {
+              debugLog("action-log", "stale response ignored", {
+                generation,
+                currentGeneration: requestGeneration,
+                status: response.status
+              });
+              return;
+            }
+            requestHandle = null;
+            debugLog("action-log", "response", {
+              status: response.status,
+              elapsedMs: Date.now() - startedAt,
+              generation
+            });
+            if (response.status === 401) {
+              stopped = true;
+              onHint("\u8BA4\u8BC1\u5931\u8D25\uFF1A\u8BF7\u68C0\u67E5 Bearer Token\u3002");
+              onAttention?.("\u8BA4\u8BC1\u5931\u8D25", "\u68C0\u67E5 Bearer Token");
+              onStatus?.("error");
+              return;
+            }
+            if (response.status < 200 || response.status >= 300) {
+              scheduleRetry(`\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002`);
+              return;
+            }
+            try {
+              const body = JSON.parse(response.responseText);
+              const rawItems = Array.isArray(body.items) ? body.items : [];
+              const nextStreamId = typeof body.stream_id === "string" && body.stream_id ? body.stream_id : null;
+              debugLog("action-log", "payload", {
+                streamId: nextStreamId,
+                previousStreamId: streamId,
+                lastId: body.last_id,
+                rawItemCount: rawItems.length,
+                items: summarizeActionItems(rawItems)
+              });
+              if (nextStreamId && streamId && nextStreamId !== streamId) {
+                debugWarn("action-log", "stream reset detected", {
+                  previousStreamId: streamId,
+                  nextStreamId
+                });
+                streamId = nextStreamId;
+                onStreamId?.(streamId);
+                needsCursorPrime = false;
+                lastId = 0;
+                onCursor?.(lastId);
+                onStreamReset?.(streamId);
+                onStatus?.("idle");
+                schedulePoll(0);
+                return;
+              }
+              if (nextStreamId && nextStreamId !== streamId) {
+                streamId = nextStreamId;
+                onStreamId?.(streamId);
+              }
+              if (Number.isInteger(body.last_id)) {
+                lastId = body.last_id;
+                onCursor?.(lastId);
+              }
+              if (priming) {
+                debugLog("action-log", "cursor primed", { lastId, streamId });
+                needsCursorPrime = false;
+                onStatus?.("idle");
+                schedulePoll(0);
+                return;
+              }
+              const items = rawItems.filter((item) => {
+                if (discovery) {
+                  return item?.event?.phase === "completed" && item?.event?.payload?.operation === "prepare_workspace";
+                }
+                return item?.event?.workspace_id === workspaceId;
+              });
+              debugLog("action-log", "filtered items", {
+                rawItemCount: rawItems.length,
+                acceptedItemCount: items.length,
+                workspaceId: workspaceId || null,
+                mode: discovery ? "discovery" : "workspace",
+                items: summarizeActionItems(items)
+              });
+              onItems(items);
+              schedulePoll();
+            } catch (error) {
+              debugError("action-log", "response parse/processing failed", String(error));
+              scheduleRetry(`\u54CD\u5E94\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`);
+            }
+          },
+          onerror(error) {
+            debugError("action-log", "network error", {
+              elapsedMs: Date.now() - startedAt,
+              generation,
+              error: String(error)
+            });
+            if (generation === requestGeneration) {
+              requestHandle = null;
+              scheduleRetry("\u8FDE\u63A5\u540E\u7AEF\u5931\u8D25\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002");
+            }
+          },
+          ontimeout() {
+            debugWarn("action-log", "request timeout", {
+              elapsedMs: Date.now() - startedAt,
+              generation,
+              wait
+            });
+            if (generation === requestGeneration) {
+              requestHandle = null;
+              schedulePoll(100);
+            }
+          },
+          onabort() {
+            debugLog("action-log", "request aborted", {
+              elapsedMs: Date.now() - startedAt,
+              generation
+            });
+            if (generation === requestGeneration) requestHandle = null;
+          }
+        });
+      } catch (error) {
+        requestHandle = null;
+        debugError("action-log", "GM_xmlhttpRequest threw synchronously", String(error));
+        scheduleRetry(`\u53D1\u8D77\u8BF7\u6C42\u5931\u8D25\uFF1A${String(error)}`);
+      }
     }
     function getCursor() {
       return needsCursorPrime ? null : lastId;
@@ -1144,43 +1256,79 @@ ${result}`;
       const headers = {};
       if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
-          method: "GET",
-          url: `${profile.backend}/v1/action-workspaces`,
-          headers,
-          timeout: 7e3,
-          onload(response) {
-            if (response.status === 401) {
-              reject(new Error("\u8BA4\u8BC1\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5 Bearer Token\u3002"));
-              return;
-            }
-            if (response.status < 200 || response.status >= 300) {
-              reject(new Error(`\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\u3002`));
-              return;
-            }
-            try {
-              const body = JSON.parse(response.responseText);
-              const workspaces = Array.isArray(body.workspaces) ? body.workspaces : [];
-              resolve(workspaces.map((item) => String(item?.workspace_id || "").trim()).filter((workspaceId) => /^ws_[0-9a-f]{16}$/.test(workspaceId)));
-            } catch (error) {
-              reject(new Error(`Workspace \u5217\u8868\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`));
-            }
-          },
-          onerror() {
-            reject(new Error("\u65E0\u6CD5\u8FDE\u63A5\u540E\u7AEF\u3002"));
-          },
-          ontimeout() {
-            reject(new Error("\u8BFB\u53D6 Workspace \u5217\u8868\u8D85\u65F6\u3002"));
-          }
+        const url = `${profile.backend}/v1/action-workspaces`;
+        const startedAt = Date.now();
+        debugLog("workspaces", "request", {
+          backend: profile.backend,
+          endpointId: profile.id,
+          url
         });
+        try {
+          GM_xmlhttpRequest({
+            method: "GET",
+            url,
+            headers,
+            timeout: 7e3,
+            onload(response) {
+              debugLog("workspaces", "response", {
+                status: response.status,
+                elapsedMs: Date.now() - startedAt
+              });
+              if (response.status === 401) {
+                reject(new Error("\u8BA4\u8BC1\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5 Bearer Token\u3002"));
+                return;
+              }
+              if (response.status < 200 || response.status >= 300) {
+                reject(new Error(`\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\u3002`));
+                return;
+              }
+              try {
+                const body = JSON.parse(response.responseText);
+                const workspaces = Array.isArray(body.workspaces) ? body.workspaces : [];
+                const accepted = workspaces.map((item) => String(item?.workspace_id || "").trim()).filter((workspaceId) => /^ws_[0-9a-f]{16}$/.test(workspaceId));
+                debugLog("workspaces", "parsed", {
+                  rawCount: workspaces.length,
+                  acceptedCount: accepted.length,
+                  workspaces: accepted
+                });
+                resolve(accepted);
+              } catch (error) {
+                debugError("workspaces", "response parse failed", String(error));
+                reject(new Error(`Workspace \u5217\u8868\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`));
+              }
+            },
+            onerror(error) {
+              debugError("workspaces", "network error", {
+                elapsedMs: Date.now() - startedAt,
+                error: String(error)
+              });
+              reject(new Error("\u65E0\u6CD5\u8FDE\u63A5\u540E\u7AEF\u3002"));
+            },
+            ontimeout() {
+              debugWarn("workspaces", "request timeout", {
+                elapsedMs: Date.now() - startedAt
+              });
+              reject(new Error("\u8BFB\u53D6 Workspace \u5217\u8868\u8D85\u65F6\u3002"));
+            }
+          });
+        } catch (error) {
+          debugError("workspaces", "GM_xmlhttpRequest threw synchronously", String(error));
+          reject(error);
+        }
       });
     }
     async function list({ refresh = false } = {}) {
       const profile = getProfile();
       if (!profile) throw new Error("\u6CA1\u6709\u6D3B\u52A8\u7684\u540E\u7AEF\u914D\u7F6E\u3002");
       const key = profileKey(profile);
-      if (!refresh && cachedKey === key && cached) return cached;
-      if (!refresh && pending?.key === key) return pending.promise;
+      if (!refresh && cachedKey === key && cached) {
+        debugLog("workspaces", "cache hit", { count: cached.length, endpointId: profile.id });
+        return cached;
+      }
+      if (!refresh && pending?.key === key) {
+        debugLog("workspaces", "reuse pending request", { endpointId: profile.id });
+        return pending.promise;
+      }
       const requestGeneration = generation;
       const request = requestWorkspaces(profile).then((workspaces) => {
         if (generation === requestGeneration) {
@@ -1195,6 +1343,7 @@ ${result}`;
       return request;
     }
     function clear() {
+      debugLog("workspaces", "cache cleared");
       generation += 1;
       cachedKey = "";
       cached = null;
@@ -2870,35 +3019,60 @@ ${result}`;
     statusElement.dataset.state = "pending";
     const headers = {};
     if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
-    GM_xmlhttpRequest({
-      method: "GET",
-      url: `${validation.backend}/v1/action-workspaces`,
-      headers,
-      timeout: 7e3,
-      onload(response) {
-        button.disabled = false;
-        if (response.status >= 200 && response.status < 300) {
-          statusElement.textContent = "\u2713 \u8FDE\u63A5\u6210\u529F";
-          statusElement.dataset.state = "success";
-        } else if (response.status === 401) {
-          statusElement.textContent = "\u8BA4\u8BC1\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5 Bearer Token\u3002";
+    const url = `${validation.backend}/v1/action-workspaces`;
+    const startedAt = Date.now();
+    debugLog("settings", "test connection request", {
+      backend: validation.backend,
+      url,
+      hasToken: Boolean(profile.token)
+    });
+    try {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        headers,
+        timeout: 7e3,
+        onload(response) {
+          button.disabled = false;
+          debugLog("settings", "test connection response", {
+            status: response.status,
+            elapsedMs: Date.now() - startedAt
+          });
+          if (response.status >= 200 && response.status < 300) {
+            statusElement.textContent = "\u2713 \u8FDE\u63A5\u6210\u529F";
+            statusElement.dataset.state = "success";
+          } else if (response.status === 401) {
+            statusElement.textContent = "\u8BA4\u8BC1\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5 Bearer Token\u3002";
+            statusElement.dataset.state = "error";
+          } else {
+            statusElement.textContent = `\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\u3002`;
+            statusElement.dataset.state = "error";
+          }
+        },
+        onerror(error) {
+          button.disabled = false;
+          debugError("settings", "test connection network error", {
+            elapsedMs: Date.now() - startedAt,
+            error: String(error)
+          });
+          statusElement.textContent = "\u65E0\u6CD5\u8FDE\u63A5\u540E\u7AEF\u3002";
           statusElement.dataset.state = "error";
-        } else {
-          statusElement.textContent = `\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\u3002`;
+        },
+        ontimeout() {
+          button.disabled = false;
+          debugWarn("settings", "test connection timeout", {
+            elapsedMs: Date.now() - startedAt
+          });
+          statusElement.textContent = "\u8FDE\u63A5\u8D85\u65F6\u3002";
           statusElement.dataset.state = "error";
         }
-      },
-      onerror() {
-        button.disabled = false;
-        statusElement.textContent = "\u65E0\u6CD5\u8FDE\u63A5\u540E\u7AEF\u3002";
-        statusElement.dataset.state = "error";
-      },
-      ontimeout() {
-        button.disabled = false;
-        statusElement.textContent = "\u8FDE\u63A5\u8D85\u65F6\u3002";
-        statusElement.dataset.state = "error";
-      }
-    });
+      });
+    } catch (error) {
+      button.disabled = false;
+      debugError("settings", "test connection request threw synchronously", String(error));
+      statusElement.textContent = `\u53D1\u8D77\u6D4B\u8BD5\u8FDE\u63A5\u5931\u8D25\uFF1A${String(error)}`;
+      statusElement.dataset.state = "error";
+    }
   }
   function cloneEndpoints(endpoints) {
     return (endpoints || []).map((endpoint) => ({ ...endpoint }));
@@ -3619,6 +3793,16 @@ ${result}`;
       activeWorkspaceId = binding?.workspaceId && binding.workspaceEndpointId === endpoint?.id ? binding.workspaceId : null;
     }
     loadCurrentPageBinding();
+    debugLog("main", "boot state", {
+      pageUrl: currentPageUrl,
+      visibility: document.visibilityState,
+      globalActiveEndpointId,
+      pageActiveEndpointId,
+      effectiveEndpointId: getEffectiveEndpointId(),
+      backend: getEffectiveEndpoint()?.backend || null,
+      activeWorkspaceId,
+      soundAlertEnabled
+    });
     const composerAdapter = createComposerAdapter();
     const skillCatalogClient = createSkillCatalogClient({
       getProfile: getEffectiveEndpoint
@@ -3659,15 +3843,27 @@ ${result}`;
       onSelectWorkspace: selectWorkspace
     });
     function stopActionLog() {
-      if (!actionLogClient) return;
+      if (!actionLogClient) {
+        debugLog("main", "stopActionLog skipped: no client");
+        return;
+      }
       const cursor = actionLogClient.getCursor?.();
       if (Number.isInteger(cursor) && activitySessionKey) {
         activitySessions.setCursor(activitySessionKey, cursor);
       }
       actionLogClient.stop();
       actionLogClient = null;
+      debugLog("main", "action-log client stopped", {
+        sessionKey: activitySessionKey,
+        cursor: Number.isInteger(cursor) ? cursor : null
+      });
     }
     function resetWorkspaceStream({ preserveSessions = false } = {}) {
+      debugLog("main", "reset workspace stream", {
+        preserveSessions,
+        activeWorkspaceId,
+        sessionKey: activitySessionKey
+      });
       stopActionLog();
       activityStore.clear();
       soundAlert.reset();
@@ -3709,7 +3905,14 @@ ${result}`;
       if (document.visibilityState === "visible") activateMonitor();
     }
     function selectWorkspace(workspaceId) {
-      if (!/^ws_[0-9a-f]{16}$/.test(workspaceId)) return false;
+      if (!/^ws_[0-9a-f]{16}$/.test(workspaceId)) {
+        debugWarn("main", "reject invalid workspace selection", { workspaceId });
+        return false;
+      }
+      debugLog("main", "select workspace", {
+        previousWorkspaceId: activeWorkspaceId,
+        nextWorkspaceId: workspaceId
+      });
       if (workspaceId === activeWorkspaceId) {
         workspaceMenu.updateTrigger();
         return true;
@@ -3722,7 +3925,11 @@ ${result}`;
       return true;
     }
     function resetWorkspaceSelection() {
-      if (!activeWorkspaceId) return true;
+      if (!activeWorkspaceId) {
+        debugLog("main", "reset workspace skipped: already discovery");
+        return true;
+      }
+      debugLog("main", "reset workspace selection", { previousWorkspaceId: activeWorkspaceId });
       resetWorkspaceStream({ preserveSessions: true });
       activeWorkspaceId = null;
       workspaceClient.clear();
@@ -3823,6 +4030,10 @@ ${result}`;
     function handlePageNavigation() {
       const nextPageUrl = pageUrl();
       if (nextPageUrl === currentPageUrl) return;
+      debugLog("main", "page navigation", {
+        previousPageUrl: currentPageUrl,
+        nextPageUrl
+      });
       resetWorkspaceStream();
       activeWorkspaceId = null;
       workspaceClient.clear();
@@ -3840,25 +4051,53 @@ ${result}`;
     }
     function startActionLog() {
       const profile = getEffectiveEndpoint();
-      if (!monitorMounted || actionLogClient || !profile?.backend) return;
+      if (!monitorMounted || actionLogClient || !profile?.backend) {
+        debugLog("main", "startActionLog skipped", {
+          monitorMounted,
+          hasClient: Boolean(actionLogClient),
+          hasBackend: Boolean(profile?.backend),
+          endpointId: profile?.id || null,
+          backend: profile?.backend || null,
+          activeWorkspaceId
+        });
+        return;
+      }
       const nextSessionKey = `${profile.id}:${profile.backend}:${activeWorkspaceId || "discovery"}`;
       if (activitySessionKey !== nextSessionKey) {
         activityStore.clear();
         activitySessionKey = nextSessionKey;
       }
       const sessionKey = nextSessionKey;
+      const initialCursor = activitySessions.getCursor(sessionKey);
+      const initialStreamId = activitySessions.getStreamId();
+      debugLog("main", "create action-log client", {
+        endpointId: profile.id,
+        backend: profile.backend,
+        activeWorkspaceId,
+        mode: activeWorkspaceId ? "workspace" : "discovery",
+        sessionKey,
+        initialCursor,
+        initialStreamId,
+        visibility: document.visibilityState
+      });
       actionLogClient = createActionLogClient({
         getProfile: getEffectiveEndpoint,
         getWorkspaceId: () => activeWorkspaceId,
-        initialCursor: activitySessions.getCursor(sessionKey),
-        initialStreamId: activitySessions.getStreamId(),
+        initialCursor,
+        initialStreamId,
         onCursor: (cursor) => {
           activitySessions.setCursor(sessionKey, cursor);
+          debugLog("main", "cursor updated", { sessionKey, cursor });
         },
         onStreamId: (streamId) => {
           activitySessions.setStreamId(streamId);
+          debugLog("main", "stream id updated", { streamId });
         },
         onStreamReset() {
+          debugWarn("main", "server stream reset: clearing active state", {
+            sessionKey,
+            activeWorkspaceId
+          });
           activitySessions.clearCursors();
           activitySessions.setCursor(sessionKey, 0);
           activityStore.clearActive();
@@ -3867,6 +4106,11 @@ ${result}`;
         },
         shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
         onItems(items) {
+          debugLog("main", "onItems", {
+            count: items?.length || 0,
+            activeWorkspaceId,
+            items: summarizeActionItems(items)
+          });
           if (!activeWorkspaceId) {
             const preparedWorkspace = (items || []).some((item) => item?.event?.phase === "completed" && item?.event?.payload?.operation === "prepare_workspace" && /^ws_[0-9a-f]{16}$/.test(item?.event?.payload?.workspace_id || ""));
             if (preparedWorkspace) {
@@ -3879,6 +4123,12 @@ ${result}`;
           if (latestTimestamp && activeWorkspaceId) soundAlert.observe(latestTimestamp);
           soundAlert.check();
           const newest = activityStore.ingest(items);
+          const snapshot = activityStore.snapshot();
+          debugLog("main", "activity store updated", {
+            newestId: newest?.id || null,
+            activeCount: snapshot.active.length,
+            recentCount: snapshot.recent.length
+          });
           if (newest) {
             monitorUi.clearHint();
             monitorUi.queueActivity(compactActivity(newest));
@@ -3894,7 +4144,16 @@ ${result}`;
     }
     function activateMonitor() {
       const profile = getEffectiveEndpoint();
-      if (!profile?.backend) return;
+      if (!profile?.backend) {
+        debugWarn("main", "activate monitor skipped: no backend");
+        return;
+      }
+      debugLog("main", "activate monitor", {
+        endpointId: profile.id,
+        backend: profile.backend,
+        activeWorkspaceId,
+        mounted: monitorMounted
+      });
       if (!monitorMounted) {
         monitorMounted = true;
         monitorUi.mount();
@@ -3904,6 +4163,11 @@ ${result}`;
       startActionLog();
     }
     function suspend() {
+      debugLog("main", "page hidden: suspend", {
+        soundAlertEnabled,
+        activeWorkspaceId,
+        keepPolling: soundAlertEnabled && Boolean(activeWorkspaceId)
+      });
       monitorUi.suspendActivity();
       if (soundAlertEnabled && activeWorkspaceId) {
         soundAlert.check();
@@ -3912,6 +4176,11 @@ ${result}`;
       actionLogClient?.suspend();
     }
     function resume() {
+      debugLog("main", "page visible: resume", {
+        monitorMounted,
+        hasClient: Boolean(actionLogClient),
+        activeWorkspaceId
+      });
       if (!monitorMounted) {
         activateMonitor();
         return;

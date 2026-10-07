@@ -1,4 +1,10 @@
 import { POLL_WAIT_SECONDS, RETRY_MS } from '../constants.js';
+import {
+  debugError,
+  debugLog,
+  debugWarn,
+  summarizeActionItems,
+} from '../debug.js';
 
 export function createActionLogClient({
   getProfile,
@@ -41,31 +47,39 @@ export function createActionLogClient({
     const active = requestHandle;
     requestHandle = null;
     if (active && typeof active.abort === 'function') {
-      try { active.abort(); } catch (_) {}
+      debugLog('action-log', 'abort active request');
+      try { active.abort(); } catch (error) {
+        debugWarn('action-log', 'abort threw', String(error));
+      }
     }
   }
 
   function suspend() {
+    debugLog('action-log', 'suspend', { cursor: getCursor(), streamId });
     requestGeneration += 1;
     clearPollTimer();
     abortRequest();
   }
 
   function resume() {
+    debugLog('action-log', 'resume', { cursor: getCursor(), streamId });
     if (!stopped) schedulePoll(0);
   }
 
   function stop() {
+    debugLog('action-log', 'stop', { cursor: getCursor(), streamId });
     stopped = true;
     suspend();
   }
 
   function start() {
+    debugLog('action-log', 'start', { cursor: getCursor(), streamId });
     stopped = false;
     schedulePoll(0);
   }
 
   function scheduleRetry(message) {
+    debugWarn('action-log', 'retry scheduled', { message, retryMs: RETRY_MS });
     onHint(message);
     onAttention?.('连接异常', '3 秒后重试');
     onStatus?.('error');
@@ -73,14 +87,24 @@ export function createActionLogClient({
   }
 
   function poll() {
-    if (
-      stopped
-      || requestHandle
-      || (document.visibilityState !== 'visible' && !shouldPollWhenHidden())
-    ) return;
+    if (stopped) {
+      debugLog('action-log', 'poll skipped: stopped');
+      return;
+    }
+    if (requestHandle) {
+      debugLog('action-log', 'poll skipped: request already active');
+      return;
+    }
+    if (document.visibilityState !== 'visible' && !shouldPollWhenHidden()) {
+      debugLog('action-log', 'poll skipped: hidden page');
+      return;
+    }
     const profile = getProfile();
     const workspaceId = getWorkspaceId?.();
-    if (!profile) return;
+    if (!profile) {
+      debugWarn('action-log', 'poll skipped: no effective profile');
+      return;
+    }
     const discovery = !workspaceId;
 
     const headers = {};
@@ -93,14 +117,41 @@ export function createActionLogClient({
     const filter = discovery
       ? 'operation=prepare_workspace&phase=completed'
       : `workspace_id=${encodeURIComponent(workspaceId)}`;
-    requestHandle = GM_xmlhttpRequest({
+    const url = `${profile.backend}/v1/action-logs?${filter}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`;
+    const startedAt = Date.now();
+    debugLog('action-log', 'request', {
+      backend: profile.backend,
+      endpointId: profile.id,
+      workspaceId: workspaceId || null,
+      mode: discovery ? 'discovery' : 'workspace',
+      priming,
+      cursor: lastId,
+      streamId,
+      generation,
+      url,
+    });
+
+    try {
+      requestHandle = GM_xmlhttpRequest({
       method: 'GET',
-      url: `${profile.backend}/v1/action-logs?${filter}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
+      url,
       headers,
       timeout: (wait + 5) * 1000,
       onload(response) {
-        if (generation !== requestGeneration) return;
+        if (generation !== requestGeneration) {
+          debugLog('action-log', 'stale response ignored', {
+            generation,
+            currentGeneration: requestGeneration,
+            status: response.status,
+          });
+          return;
+        }
         requestHandle = null;
+        debugLog('action-log', 'response', {
+          status: response.status,
+          elapsedMs: Date.now() - startedAt,
+          generation,
+        });
         if (response.status === 401) {
           stopped = true;
           onHint('认证失败：请检查 Bearer Token。');
@@ -114,10 +165,22 @@ export function createActionLogClient({
         }
         try {
           const body = JSON.parse(response.responseText);
+          const rawItems = Array.isArray(body.items) ? body.items : [];
           const nextStreamId = typeof body.stream_id === 'string' && body.stream_id
             ? body.stream_id
             : null;
+          debugLog('action-log', 'payload', {
+            streamId: nextStreamId,
+            previousStreamId: streamId,
+            lastId: body.last_id,
+            rawItemCount: rawItems.length,
+            items: summarizeActionItems(rawItems),
+          });
           if (nextStreamId && streamId && nextStreamId !== streamId) {
+            debugWarn('action-log', 'stream reset detected', {
+              previousStreamId: streamId,
+              nextStreamId,
+            });
             streamId = nextStreamId;
             onStreamId?.(streamId);
             needsCursorPrime = false;
@@ -137,42 +200,69 @@ export function createActionLogClient({
             onCursor?.(lastId);
           }
           if (priming) {
+            debugLog('action-log', 'cursor primed', { lastId, streamId });
             needsCursorPrime = false;
             onStatus?.('idle');
             schedulePoll(0);
             return;
           }
-          const items = Array.isArray(body.items)
-            ? body.items.filter((item) => {
+          const items = rawItems
+            .filter((item) => {
                 if (discovery) {
                   return item?.event?.phase === 'completed'
                     && item?.event?.payload?.operation === 'prepare_workspace';
                 }
                 return item?.event?.workspace_id === workspaceId;
-              })
-            : [];
+              });
+          debugLog('action-log', 'filtered items', {
+            rawItemCount: rawItems.length,
+            acceptedItemCount: items.length,
+            workspaceId: workspaceId || null,
+            mode: discovery ? 'discovery' : 'workspace',
+            items: summarizeActionItems(items),
+          });
           onItems(items);
           schedulePoll();
         } catch (error) {
+          debugError('action-log', 'response parse/processing failed', String(error));
           scheduleRetry(`响应解析失败：${String(error)}`);
         }
       },
-      onerror() {
+      onerror(error) {
+        debugError('action-log', 'network error', {
+          elapsedMs: Date.now() - startedAt,
+          generation,
+          error: String(error),
+        });
         if (generation === requestGeneration) {
           requestHandle = null;
           scheduleRetry('连接后端失败，3 秒后重试。');
         }
       },
       ontimeout() {
+        debugWarn('action-log', 'request timeout', {
+          elapsedMs: Date.now() - startedAt,
+          generation,
+          wait,
+        });
         if (generation === requestGeneration) {
           requestHandle = null;
           schedulePoll(100);
         }
       },
       onabort() {
+        debugLog('action-log', 'request aborted', {
+          elapsedMs: Date.now() - startedAt,
+          generation,
+        });
         if (generation === requestGeneration) requestHandle = null;
       },
-    });
+      });
+    } catch (error) {
+      requestHandle = null;
+      debugError('action-log', 'GM_xmlhttpRequest threw synchronously', String(error));
+      scheduleRetry(`发起请求失败：${String(error)}`);
+    }
   }
 
   function getCursor() {

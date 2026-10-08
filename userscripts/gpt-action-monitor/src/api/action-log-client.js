@@ -18,6 +18,7 @@ export function createActionLogClient({
   onCursor,
   onStreamId,
   onStreamReset,
+  onConnectionRestored,
   shouldPollWhenHidden = () => false,
 }) {
   let lastId = Number.isInteger(initialCursor) ? initialCursor : 0;
@@ -27,6 +28,7 @@ export function createActionLogClient({
   let requestHandle = null;
   let requestGeneration = 0;
   let pollTimer = null;
+  let retrying = false;
 
   function clearPollTimer() {
     if (pollTimer !== null) {
@@ -46,9 +48,9 @@ export function createActionLogClient({
   function abortRequest() {
     const active = requestHandle;
     requestHandle = null;
-    if (active && typeof active.abort === 'function') {
+    if (active?.handle && typeof active.handle.abort === 'function') {
       debugLog('action-log', 'abort active request');
-      try { active.abort(); } catch (error) {
+      try { active.handle.abort(); } catch (error) {
         debugWarn('action-log', 'abort threw', String(error));
       }
     }
@@ -79,11 +81,19 @@ export function createActionLogClient({
   }
 
   function scheduleRetry(message) {
+    retrying = true;
     debugWarn('action-log', 'retry scheduled', { message, retryMs: RETRY_MS });
     onHint(message);
     onAttention?.('连接异常', '3 秒后重试');
     onStatus?.('error');
     schedulePoll(RETRY_MS);
+  }
+
+  function markConnectionRestored() {
+    if (!retrying) return;
+    retrying = false;
+    debugLog('action-log', 'connection restored', { cursor: getCursor(), streamId });
+    onConnectionRestored?.();
   }
 
   function poll() {
@@ -111,8 +121,15 @@ export function createActionLogClient({
     if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
     const generation = ++requestGeneration;
     const priming = needsCursorPrime;
-    const wait = priming ? 0 : POLL_WAIT_SECONDS;
+    const recoveryProbe = retrying;
+    const wait = priming || recoveryProbe ? 0 : POLL_WAIT_SECONDS;
     const after = priming ? Number.MAX_SAFE_INTEGER : lastId;
+
+    if (recoveryProbe) {
+      onHint('正在重新连接后端…');
+      onAttention?.('正在重新连接', '检查后端连接');
+      onStatus?.('error');
+    }
 
     const filter = discovery
       ? 'operation=prepare_workspace&phase=completed'
@@ -125,14 +142,22 @@ export function createActionLogClient({
       workspaceId: workspaceId || null,
       mode: discovery ? 'discovery' : 'workspace',
       priming,
+      recoveryProbe,
       cursor: lastId,
       streamId,
       generation,
       url,
     });
 
+    const requestState = { generation, handle: null };
+    requestHandle = requestState;
+
+    function releaseRequest() {
+      if (requestHandle === requestState) requestHandle = null;
+    }
+
     try {
-      requestHandle = GM_xmlhttpRequest({
+      requestState.handle = GM_xmlhttpRequest({
       method: 'GET',
       url,
       headers,
@@ -146,13 +171,14 @@ export function createActionLogClient({
           });
           return;
         }
-        requestHandle = null;
+        releaseRequest();
         debugLog('action-log', 'response', {
           status: response.status,
           elapsedMs: Date.now() - startedAt,
           generation,
         });
         if (response.status === 401) {
+          retrying = false;
           stopped = true;
           onHint('认证失败：请检查 Bearer Token。');
           onAttention?.('认证失败', '检查 Bearer Token');
@@ -176,6 +202,7 @@ export function createActionLogClient({
             rawItemCount: rawItems.length,
             items: summarizeActionItems(rawItems),
           });
+          markConnectionRestored();
           if (nextStreamId && streamId && nextStreamId !== streamId) {
             debugWarn('action-log', 'stream reset detected', {
               previousStreamId: streamId,
@@ -235,7 +262,7 @@ export function createActionLogClient({
           error: String(error),
         });
         if (generation === requestGeneration) {
-          requestHandle = null;
+          releaseRequest();
           scheduleRetry('连接后端失败，3 秒后重试。');
         }
       },
@@ -246,7 +273,7 @@ export function createActionLogClient({
           wait,
         });
         if (generation === requestGeneration) {
-          requestHandle = null;
+          releaseRequest();
           schedulePoll(100);
         }
       },
@@ -255,11 +282,11 @@ export function createActionLogClient({
           elapsedMs: Date.now() - startedAt,
           generation,
         });
-        if (generation === requestGeneration) requestHandle = null;
+        if (generation === requestGeneration) releaseRequest();
       },
       });
     } catch (error) {
-      requestHandle = null;
+      releaseRequest();
       debugError('action-log', 'GM_xmlhttpRequest threw synchronously', String(error));
       scheduleRetry(`发起请求失败：${String(error)}`);
     }

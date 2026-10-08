@@ -896,6 +896,7 @@ ${result}`;
     onCursor,
     onStreamId,
     onStreamReset,
+    onConnectionRestored,
     shouldPollWhenHidden = () => false
   }) {
     let lastId = Number.isInteger(initialCursor) ? initialCursor : 0;
@@ -905,6 +906,7 @@ ${result}`;
     let requestHandle = null;
     let requestGeneration = 0;
     let pollTimer = null;
+    let retrying = false;
     function clearPollTimer() {
       if (pollTimer !== null) {
         window.clearTimeout(pollTimer);
@@ -921,10 +923,10 @@ ${result}`;
     function abortRequest() {
       const active = requestHandle;
       requestHandle = null;
-      if (active && typeof active.abort === "function") {
+      if (active?.handle && typeof active.handle.abort === "function") {
         debugLog("action-log", "abort active request");
         try {
-          active.abort();
+          active.handle.abort();
         } catch (error) {
           debugWarn("action-log", "abort threw", String(error));
         }
@@ -951,11 +953,18 @@ ${result}`;
       schedulePoll(0);
     }
     function scheduleRetry(message) {
+      retrying = true;
       debugWarn("action-log", "retry scheduled", { message, retryMs: RETRY_MS });
       onHint(message);
       onAttention?.("\u8FDE\u63A5\u5F02\u5E38", "3 \u79D2\u540E\u91CD\u8BD5");
       onStatus?.("error");
       schedulePoll(RETRY_MS);
+    }
+    function markConnectionRestored() {
+      if (!retrying) return;
+      retrying = false;
+      debugLog("action-log", "connection restored", { cursor: getCursor(), streamId });
+      onConnectionRestored?.();
     }
     function poll() {
       if (stopped) {
@@ -981,8 +990,14 @@ ${result}`;
       if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
       const generation = ++requestGeneration;
       const priming = needsCursorPrime;
-      const wait = priming ? 0 : POLL_WAIT_SECONDS;
+      const recoveryProbe = retrying;
+      const wait = priming || recoveryProbe ? 0 : POLL_WAIT_SECONDS;
       const after = priming ? Number.MAX_SAFE_INTEGER : lastId;
+      if (recoveryProbe) {
+        onHint("\u6B63\u5728\u91CD\u65B0\u8FDE\u63A5\u540E\u7AEF\u2026");
+        onAttention?.("\u6B63\u5728\u91CD\u65B0\u8FDE\u63A5", "\u68C0\u67E5\u540E\u7AEF\u8FDE\u63A5");
+        onStatus?.("error");
+      }
       const filter = discovery ? "operation=prepare_workspace&phase=completed" : `workspace_id=${encodeURIComponent(workspaceId)}`;
       const url = `${profile.backend}/v1/action-logs?${filter}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`;
       const startedAt = Date.now();
@@ -992,13 +1007,19 @@ ${result}`;
         workspaceId: workspaceId || null,
         mode: discovery ? "discovery" : "workspace",
         priming,
+        recoveryProbe,
         cursor: lastId,
         streamId,
         generation,
         url
       });
+      const requestState = { generation, handle: null };
+      requestHandle = requestState;
+      function releaseRequest() {
+        if (requestHandle === requestState) requestHandle = null;
+      }
       try {
-        requestHandle = GM_xmlhttpRequest({
+        requestState.handle = GM_xmlhttpRequest({
           method: "GET",
           url,
           headers,
@@ -1012,13 +1033,14 @@ ${result}`;
               });
               return;
             }
-            requestHandle = null;
+            releaseRequest();
             debugLog("action-log", "response", {
               status: response.status,
               elapsedMs: Date.now() - startedAt,
               generation
             });
             if (response.status === 401) {
+              retrying = false;
               stopped = true;
               onHint("\u8BA4\u8BC1\u5931\u8D25\uFF1A\u8BF7\u68C0\u67E5 Bearer Token\u3002");
               onAttention?.("\u8BA4\u8BC1\u5931\u8D25", "\u68C0\u67E5 Bearer Token");
@@ -1040,6 +1062,7 @@ ${result}`;
                 rawItemCount: rawItems.length,
                 items: summarizeActionItems(rawItems)
               });
+              markConnectionRestored();
               if (nextStreamId && streamId && nextStreamId !== streamId) {
                 debugWarn("action-log", "stream reset detected", {
                   previousStreamId: streamId,
@@ -1097,7 +1120,7 @@ ${result}`;
               error: String(error)
             });
             if (generation === requestGeneration) {
-              requestHandle = null;
+              releaseRequest();
               scheduleRetry("\u8FDE\u63A5\u540E\u7AEF\u5931\u8D25\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002");
             }
           },
@@ -1108,7 +1131,7 @@ ${result}`;
               wait
             });
             if (generation === requestGeneration) {
-              requestHandle = null;
+              releaseRequest();
               schedulePoll(100);
             }
           },
@@ -1117,11 +1140,11 @@ ${result}`;
               elapsedMs: Date.now() - startedAt,
               generation
             });
-            if (generation === requestGeneration) requestHandle = null;
+            if (generation === requestGeneration) releaseRequest();
           }
         });
       } catch (error) {
-        requestHandle = null;
+        releaseRequest();
         debugError("action-log", "GM_xmlhttpRequest threw synchronously", String(error));
         scheduleRetry(`\u53D1\u8D77\u8BF7\u6C42\u5931\u8D25\uFF1A${String(error)}`);
       }
@@ -4305,6 +4328,15 @@ ${result}`;
           activityStore.clearActive();
           soundAlert.reset();
           monitorUi.clearLastActivityTime();
+        },
+        onConnectionRestored() {
+          debugLog("main", "action-log connection restored", {
+            sessionKey,
+            activeWorkspaceId
+          });
+          monitorUi.clearHint();
+          monitorUi.clearAttention();
+          monitorUi.setStatus("idle");
         },
         shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
         onItems(items) {

@@ -486,6 +486,15 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
         soundAlert.reset();
         monitorUi.clearLastActivityTime();
       },
+      onConnectionRestored() {
+        debugLog('main', 'action-log connection restored', {
+          sessionKey,
+          activeWorkspaceId,
+        });
+        monitorUi.clearHint();
+        monitorUi.clearAttention();
+        monitorUi.setStatus('idle');
+      },
       shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
       onItems(items) {
         debugLog('main', 'onItems', {

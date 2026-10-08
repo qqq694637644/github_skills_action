@@ -809,6 +809,61 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   client.stop();
 }
 
+// A failed request must really retry. The retry uses an immediate wait=0
+// probe at the current cursor, clears stale error UI on any valid 2xx payload,
+// then returns to the normal wait=55 long-poll. Synchronous GM onerror must not
+// leave a stale request handle that consumes the one-shot retry timer.
+{
+  const { timers } = installDomFixture();
+  const requests = [];
+  const hints = [];
+  let restored = 0;
+  globalThis.GM_xmlhttpRequest = (request) => {
+    requests.push(request);
+    if (requests.length === 1) request.onerror(new Error('sync failure'));
+    return { abort() {} };
+  };
+  const client = createActionLogClient({
+    getProfile: () => ({ backend: 'https://skills.example.com', token: '' }),
+    getWorkspaceId: () => 'ws_0123456789abcdef',
+    onItems: () => {},
+    onHint: (message) => hints.push(message),
+    onConnectionRestored: () => { restored += 1; },
+    initialCursor: 40,
+  });
+  client.start();
+
+  let [timerId, runPoll] = timers.entries().next().value;
+  timers.delete(timerId);
+  runPoll();
+  assert.equal(requests.length, 1);
+  assert.equal(hints.at(-1), '连接后端失败，3 秒后重试。');
+  assert.equal(timers.size, 1);
+
+  [timerId, runPoll] = timers.entries().next().value;
+  timers.delete(timerId);
+  runPoll();
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].url.includes('after=40'), true);
+  assert.equal(requests[1].url.includes('wait=0'), true);
+  assert.equal(hints.at(-1), '正在重新连接后端…');
+
+  requests[1].onload({
+    status: 200,
+    responseText: JSON.stringify({ items: [], last_id: 40 }),
+  });
+  assert.equal(restored, 1);
+  assert.equal(timers.size, 1);
+
+  [timerId, runPoll] = timers.entries().next().value;
+  timers.delete(timerId);
+  runPoll();
+  assert.equal(requests.length, 3);
+  assert.equal(requests[2].url.includes('after=40'), true);
+  assert.equal(requests[2].url.includes('wait=55'), true);
+  client.stop();
+}
+
 // Recreating the poll client for the same page-session/profile can resume from
 // its last cursor, so temporary ChatGPT title DOM churn does not discard
 // activity events that arrive while the monitor is briefly deactivated.

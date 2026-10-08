@@ -871,6 +871,7 @@ ${result}`;
     onCursor,
     onStreamId,
     onStreamReset,
+    onConnectionRestored,
     shouldPollWhenHidden = () => false
   }) {
     let lastId = Number.isInteger(initialCursor) ? initialCursor : 0;
@@ -880,6 +881,7 @@ ${result}`;
     let requestHandle = null;
     let requestGeneration = 0;
     let pollTimer = null;
+    let retrying = false;
     function clearPollTimer() {
       if (pollTimer !== null) {
         window.clearTimeout(pollTimer);
@@ -896,9 +898,9 @@ ${result}`;
     function abortRequest() {
       const active = requestHandle;
       requestHandle = null;
-      if (active && typeof active.abort === "function") {
+      if (active?.handle && typeof active.handle.abort === "function") {
         try {
-          active.abort();
+          active.handle.abort();
         } catch (_) {
         }
       }
@@ -920,10 +922,16 @@ ${result}`;
       schedulePoll(0);
     }
     function scheduleRetry(message) {
+      retrying = true;
       onHint(message);
       onAttention?.("\u8FDE\u63A5\u5F02\u5E38", "3 \u79D2\u540E\u91CD\u8BD5");
       onStatus?.("error");
       schedulePoll(RETRY_MS);
+    }
+    function markConnectionRestored() {
+      if (!retrying) return;
+      retrying = false;
+      onConnectionRestored?.();
     }
     function poll() {
       if (stopped || requestHandle || document.visibilityState !== "visible" && !shouldPollWhenHidden()) return;
@@ -935,84 +943,103 @@ ${result}`;
       if (profile.token) headers.Authorization = `Bearer ${profile.token}`;
       const generation = ++requestGeneration;
       const priming = needsCursorPrime;
-      const wait = priming ? 0 : POLL_WAIT_SECONDS;
+      const recoveryProbe = retrying;
+      const wait = priming || recoveryProbe ? 0 : POLL_WAIT_SECONDS;
       const after = priming ? Number.MAX_SAFE_INTEGER : lastId;
+      if (recoveryProbe) {
+        onHint("\u6B63\u5728\u91CD\u65B0\u8FDE\u63A5\u540E\u7AEF\u2026");
+        onAttention?.("\u6B63\u5728\u91CD\u65B0\u8FDE\u63A5", "\u68C0\u67E5\u540E\u7AEF\u8FDE\u63A5");
+        onStatus?.("error");
+      }
       const filter = discovery ? "operation=prepare_workspace&phase=completed" : `workspace_id=${encodeURIComponent(workspaceId)}`;
-      requestHandle = GM_xmlhttpRequest({
-        method: "GET",
-        url: `${profile.backend}/v1/action-logs?${filter}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`,
-        headers,
-        timeout: (wait + 5) * 1e3,
-        onload(response) {
-          if (generation !== requestGeneration) return;
-          requestHandle = null;
-          if (response.status === 401) {
-            stopped = true;
-            onHint("\u8BA4\u8BC1\u5931\u8D25\uFF1A\u8BF7\u68C0\u67E5 Bearer Token\u3002");
-            onAttention?.("\u8BA4\u8BC1\u5931\u8D25", "\u68C0\u67E5 Bearer Token");
-            onStatus?.("error");
-            return;
-          }
-          if (response.status < 200 || response.status >= 300) {
-            scheduleRetry(`\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002`);
-            return;
-          }
-          try {
-            const body = JSON.parse(response.responseText);
-            const nextStreamId = typeof body.stream_id === "string" && body.stream_id ? body.stream_id : null;
-            if (nextStreamId && streamId && nextStreamId !== streamId) {
-              streamId = nextStreamId;
-              onStreamId?.(streamId);
-              needsCursorPrime = false;
-              lastId = 0;
-              onCursor?.(lastId);
-              onStreamReset?.(streamId);
-              onStatus?.("idle");
-              schedulePoll(0);
+      const url = `${profile.backend}/v1/action-logs?${filter}&after=${after}&wait=${wait}&limit=${priming ? 1 : 50}`;
+      const requestState = { generation, handle: null };
+      requestHandle = requestState;
+      function releaseRequest() {
+        if (requestHandle === requestState) requestHandle = null;
+      }
+      try {
+        requestState.handle = GM_xmlhttpRequest({
+          method: "GET",
+          url,
+          headers,
+          timeout: (wait + 5) * 1e3,
+          onload(response) {
+            if (generation !== requestGeneration) return;
+            releaseRequest();
+            if (response.status === 401) {
+              retrying = false;
+              stopped = true;
+              onHint("\u8BA4\u8BC1\u5931\u8D25\uFF1A\u8BF7\u68C0\u67E5 Bearer Token\u3002");
+              onAttention?.("\u8BA4\u8BC1\u5931\u8D25", "\u68C0\u67E5 Bearer Token");
+              onStatus?.("error");
               return;
             }
-            if (nextStreamId && nextStreamId !== streamId) {
-              streamId = nextStreamId;
-              onStreamId?.(streamId);
-            }
-            if (Number.isInteger(body.last_id)) {
-              lastId = body.last_id;
-              onCursor?.(lastId);
-            }
-            if (priming) {
-              needsCursorPrime = false;
-              onStatus?.("idle");
-              schedulePoll(0);
+            if (response.status < 200 || response.status >= 300) {
+              scheduleRetry(`\u540E\u7AEF\u8FD4\u56DE HTTP ${response.status}\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002`);
               return;
             }
-            const items = Array.isArray(body.items) ? body.items.filter((item) => {
-              if (discovery) {
-                return item?.event?.phase === "completed" && item?.event?.payload?.operation === "prepare_workspace";
+            try {
+              const body = JSON.parse(response.responseText);
+              const nextStreamId = typeof body.stream_id === "string" && body.stream_id ? body.stream_id : null;
+              markConnectionRestored();
+              if (nextStreamId && streamId && nextStreamId !== streamId) {
+                streamId = nextStreamId;
+                onStreamId?.(streamId);
+                needsCursorPrime = false;
+                lastId = 0;
+                onCursor?.(lastId);
+                onStreamReset?.(streamId);
+                onStatus?.("idle");
+                schedulePoll(0);
+                return;
               }
-              return item?.event?.workspace_id === workspaceId;
-            }) : [];
-            onItems(items);
-            schedulePoll();
-          } catch (error) {
-            scheduleRetry(`\u54CD\u5E94\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`);
+              if (nextStreamId && nextStreamId !== streamId) {
+                streamId = nextStreamId;
+                onStreamId?.(streamId);
+              }
+              if (Number.isInteger(body.last_id)) {
+                lastId = body.last_id;
+                onCursor?.(lastId);
+              }
+              if (priming) {
+                needsCursorPrime = false;
+                onStatus?.("idle");
+                schedulePoll(0);
+                return;
+              }
+              const items = Array.isArray(body.items) ? body.items.filter((item) => {
+                if (discovery) {
+                  return item?.event?.phase === "completed" && item?.event?.payload?.operation === "prepare_workspace";
+                }
+                return item?.event?.workspace_id === workspaceId;
+              }) : [];
+              onItems(items);
+              schedulePoll();
+            } catch (error) {
+              scheduleRetry(`\u54CD\u5E94\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`);
+            }
+          },
+          onerror() {
+            if (generation === requestGeneration) {
+              releaseRequest();
+              scheduleRetry("\u8FDE\u63A5\u540E\u7AEF\u5931\u8D25\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002");
+            }
+          },
+          ontimeout() {
+            if (generation === requestGeneration) {
+              releaseRequest();
+              schedulePoll(100);
+            }
+          },
+          onabort() {
+            if (generation === requestGeneration) releaseRequest();
           }
-        },
-        onerror() {
-          if (generation === requestGeneration) {
-            requestHandle = null;
-            scheduleRetry("\u8FDE\u63A5\u540E\u7AEF\u5931\u8D25\uFF0C3 \u79D2\u540E\u91CD\u8BD5\u3002");
-          }
-        },
-        ontimeout() {
-          if (generation === requestGeneration) {
-            requestHandle = null;
-            schedulePoll(100);
-          }
-        },
-        onabort() {
-          if (generation === requestGeneration) requestHandle = null;
-        }
-      });
+        });
+      } catch (error) {
+        releaseRequest();
+        scheduleRetry(`\u53D1\u8D77\u8BF7\u6C42\u5931\u8D25\uFF1A${String(error)}`);
+      }
     }
     function getCursor() {
       return needsCursorPrime ? null : lastId;
@@ -3864,6 +3891,11 @@ ${result}`;
           activityStore.clearActive();
           soundAlert.reset();
           monitorUi.clearLastActivityTime();
+        },
+        onConnectionRestored() {
+          monitorUi.clearHint();
+          monitorUi.clearAttention();
+          monitorUi.setStatus("idle");
         },
         shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
         onItems(items) {

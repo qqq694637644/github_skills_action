@@ -385,6 +385,11 @@ import { createWorkspaceMenu } from './ui/workspace-menu.js';
         soundAlert.reset();
         monitorUi.clearLastActivityTime();
       },
+      onConnectionRestored() {
+        monitorUi.clearHint();
+        monitorUi.clearAttention();
+        monitorUi.setStatus('idle');
+      },
       shouldPollWhenHidden: () => soundAlertEnabled && Boolean(activeWorkspaceId),
       onItems(items) {
         if (!activeWorkspaceId) {

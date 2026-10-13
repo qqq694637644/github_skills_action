@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
@@ -18,6 +19,7 @@ from starlette.responses import JSONResponse
 
 from .auth import JWTTokenVerifier
 from .config import MCPSettings
+from .image_tool import read_workspace_image
 from .logging import (
     command_for_log,
     log_action,
@@ -31,6 +33,8 @@ from .models import (
     CommandAction,
     ContextLines,
     IdempotencyKey,
+    ImageDimension,
+    ImageMaxBytes,
     LogBytes,
     LogOffset,
     MaxDepth,
@@ -64,6 +68,8 @@ from .models import (
     WorkspaceReadFilesResponse,
     WorkspaceSearchRequest,
     WorkspaceSearchResponse,
+    WorkspaceViewImageRequest,
+    WorkspaceViewImageResponse,
     WorkspaceWriteFileRequest,
     WorkspaceWriteFileResponse,
 )
@@ -73,8 +79,11 @@ from .workspace_registry import WorkspaceRegistry
 
 SERVER_INSTRUCTIONS = (
     "Use workspaceInspect/workspaceSearch before guessing paths and workspaceReadFiles before "
-    "editing exact targets. Use workspaceWriteFile for one complete known file and "
-    "workspaceApplyPatch for bounded multi-file edits. Its patch argument is a stripped-down, "
+    "editing exact targets. Use workspaceWriteFile for one complete known file, "
+    "workspaceApplyPatch for bounded multi-file edits, and view_image for known workspace-relative "
+    "PNG/JPEG/GIF/WebP paths. view_image returns a data URL through text/structured fields, "
+    "not a native MCP image block; a successful call alone does not prove visual access. "
+    "The patch argument is a stripped-down, "
     "file-oriented diff enclosed by '*** Begin Patch' and '*** End Patch'; it is not git/unified "
     "diff syntax. Operations inside one patch are sequential, so later operations see earlier "
     "adds, updates, moves, and deletes. "
@@ -733,6 +742,86 @@ def create_server(
                 legacy_fields={"workspace_id": request.workspace_id},
             )
             raise
+
+    @server.tool(
+        name="view_image",
+        title="Read workspace image data URL",
+        description=(
+            "Read a PNG, JPEG, GIF, or WebP image from an exact workspace-relative path and "
+            "return its Base64 data URL in text and structuredContent (output=data_url only). "
+            "No native MCP image content is returned. A successful call or image metadata does "
+            "not mean the model can see pixels; only describe image details when the client "
+            "actually supports interpreting the returned data URL. Images auto-resize to "
+            "max_width/max_height and max_bytes. Paths cannot escape the workspace."
+        ),
+        annotations=_READ_ONLY,
+    )
+    async def view_image(
+        workspace_id: WorkspaceId,
+        path: WorkspacePath,
+        max_bytes: ImageMaxBytes = 5_242_880,
+        max_width: ImageDimension = 2000,
+        max_height: ImageDimension = 2000,
+        auto_resize: bool = True,
+        output: Literal["data_url"] = "data_url",
+    ) -> Annotated[CallToolResult, WorkspaceViewImageResponse]:
+        request = _validate(
+            WorkspaceViewImageRequest,
+            workspace_id=workspace_id,
+            path=path,
+            max_bytes=max_bytes,
+            max_width=max_width,
+            max_height=max_height,
+            auto_resize=auto_resize,
+            output=output,
+        )
+        try:
+            image = read_workspace_image(
+                service.root(request.workspace_id),
+                request.path,
+                max_bytes=request.max_bytes,
+                max_width=request.max_width,
+                max_height=request.max_height,
+                auto_resize=request.auto_resize,
+            )
+            encoded = base64.b64encode(image.data).decode("ascii")
+            response = WorkspaceViewImageResponse(
+                path=image.path,
+                mime_type=image.mime_type,
+                bytes=len(image.data),
+                width=image.width,
+                height=image.height,
+                resized=image.resized,
+                original=image.original,
+                warnings=image.warnings,
+                base64=encoded,
+                data_url=f"data:{image.mime_type};base64,{encoded}",
+            )
+            content = [TextContent(type="text", text=response.model_dump_json())]
+            log_action(
+                "view_image",
+                workspace_id=request.workspace_id,
+                path=request.path,
+                output=request.output,
+                mime_type=response.mime_type,
+                bytes=response.bytes,
+                width=response.width,
+                height=response.height,
+                resized=response.resized,
+            )
+            return CallToolResult(
+                content=content,
+                structuredContent=response.model_dump(mode="json", exclude_none=True),
+            )
+        except WorkspaceToolError as exc:
+            log_action_error(
+                "view_image",
+                workspace_id=request.workspace_id,
+                path=request.path,
+                output=request.output,
+                error_code=exc.code,
+            )
+            raise _tool_error(exc) from exc
 
     @server.tool(
         name="workspaceWriteFile",

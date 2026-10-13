@@ -2,7 +2,7 @@
 
 面向个人使用的 ChatGPT Web Remote MCP 后端。
 
-它提供一个持久 Workspace，以及文件搜索、读取、写入、Patch 和任意 PowerShell 7 执行能力。Remote MCP 是唯一业务入口。
+它提供一个持久 Workspace，以及文件搜索、文本/图片读取、写入、Patch 和任意 PowerShell 7 执行能力。Remote MCP 是唯一业务入口。
 
 ## 架构
 
@@ -20,6 +20,7 @@ workspace_mcp.server
     +-- workspaceInspect
     +-- workspaceSearch
     +-- workspaceReadFiles
+    +-- view_image
     +-- workspaceWriteFile
     +-- workspaceApplyPatch
     `-- workspaceCommand
@@ -78,6 +79,37 @@ workspace_mcp.server
 - 整体 response byte limit；
 - SHA-256；
 - `next_start_line` continuation。
+
+### `view_image`（data_url 文本传输）
+
+参照 [coding-tools-mcp 的 `view_image`](https://github.com/mybolide/coding-tools-mcp)，
+用 Python/Pillow 从指定 Workspace 读取 PNG、JPEG、GIF 或 WebP 图片，返回
+**`data_url` 文本/结构化字段**（含 Base64 图片数据）。不再尝试原生 MCP
+`type: "image"` 内容块。
+图片必须在 Workspace 内，绝对路径、`..` 越界和向外的符号链接均拒绝。
+
+示例（先把自己的图片放到该 Workspace 的 `screenshots/test.png`）：
+
+```json
+{
+  "workspace_id": "ws_0123456789abcdef",
+  "path": "screenshots/test.png",
+  "max_bytes": 5242880,
+  "max_width": 2000,
+  "max_height": 2000,
+  "auto_resize": true,
+  "output": "data_url"
+}
+```
+
+- `output="data_url"` 是**唯一支持的模式**，也是默认值，可省略 `output`；旧的 `mcp_image` 参数不再接受。
+- `content[0]` 是包含 `data_url`、`base64` 和图片元数据的 JSON **文本**，`structuredContent` 含相同字段；不会返回 MCP 原生 `image` 内容块。
+- `max_bytes` 默认 5 MiB、最大 10 MiB；尺寸默认限制 2000 × 2000；超过时使用 Pillow 缩放/压缩。最大源文件 32 MiB、解码像素 4000 万。重新编码的 GIF 只保留首帧。
+
+**注意**：`data_url` 是图片的编码文本，工具调用成功及返回的宽高/MIME 元数据
+**不意味着模型已经看到图片像素**。只有当前客户端能够解析并提供这些图片数据时，
+才可根据图片回答；否则应明确说明无法实际识别图片，不要猜测截图里的内容。
+部署/升级时重新安装 Python 项目依赖（包含 Pillow）、重启 MCP 服务，并刷新 ChatGPT 工具定义。
 
 ### `workspaceWriteFile`
 
@@ -277,7 +309,7 @@ max_bytes
 
 这里需要明确区分两类能力：
 
-- `workspaceReadFiles` / `workspaceWriteFile` / `workspaceApplyPatch` / `workspaceSearch` / `workspaceInspect` 是 **Workspace-scoped 文件工具**，路径必须解析后仍位于对应 Workspace root 内；`..`、绝对路径以及最终指向 root 外的 symlink/junction 都会被拒绝。
+- `workspaceReadFiles` / `view_image` / `workspaceWriteFile` / `workspaceApplyPatch` / `workspaceSearch` / `workspaceInspect` 是 **Workspace-scoped 文件工具**，路径必须解析后仍位于对应 Workspace root 内；`..`、绝对路径以及最终指向 root 外的 symlink/junction 都会被拒绝。
 - `workspaceCommand` 是 **故意设计成 OS-account-scoped 的任意 PowerShell**，不受 Workspace 文件路径限制，可以访问运行服务的 OS 账户本来就能访问的一切。这是正式能力，不是安全漏洞或待收紧项。
 
 ## Authentication
@@ -289,7 +321,7 @@ max_bytes
 - **没有配置任何 `OAUTH_*` 环境变量**：服务使用 `noauth`；
 - **开始配置 OAuth 后**：`OAUTH_AUDIENCE`、`OAUTH_ISSUER`、`OAUTH_JWKS_URL`、`OAUTH_ALLOWED_SUBJECT` 必须同时存在。
 
-noauth 时，7 个 tools 会在 `tools/list` 中声明：
+noauth 时，8 个 tools 会在 `tools/list` 中声明：
 
 ```json
 {"securitySchemes":[{"type":"noauth"}]}
@@ -594,7 +626,7 @@ noauth 测试时：
 1. 在 ChatGPT Web 打开 Developer Mode / Plugin MCP 管理；
 2. 添加 Remote MCP URL，例如 `https://githubaction.giize.com/mcp-app/mcp`；
 3. 不需要 OAuth 授权；
-4. 确认 ChatGPT 能发现 7 个 Workspace tools；
+4. 确认 ChatGPT 能发现 8 个 Workspace tools（包括 `view_image`）；
 5. 用真实 Workspace 流程验证读、写、Patch 和 PowerShell。
 
 切换 Auth0 后：
@@ -605,7 +637,7 @@ noauth 测试时：
 4. ChatGPT 中删除/重新创建当前 noauth MCP connection，Authentication 选择 `OAuth`；
 5. ChatGPT 会通过 Auth0 DCR 自动注册 client，并跳转 Auth0 Universal Login；
 6. 使用你自己的 Auth0 用户登录并授权；
-7. 授权完成后确认 7 个 tools 仍然可见，并测试 `workspaceCommand`。
+7. 授权完成后确认 8 个 tools 仍然可见，并测试 `workspaceCommand` 和 `view_image`。
 
 本项目不负责网页版 Skill 注册；Skill 与后端 MCP 是两个独立层面。
 
@@ -643,7 +675,7 @@ python -m ruff format .
 
 当前测试重点覆盖：
 
-- 7 个 MCP tools discovery/schema/annotations/structured output；
+- 8 个 MCP tools discovery/schema/annotations/structured output；
 - `tools/list` wire response 的顶层 `securitySchemes` 与 `_meta.securitySchemes` 镜像；
 - structuredContent 与短文本 content 不重复大块文件/日志；
 - path/query 数组的每个元素都有明确长度约束；

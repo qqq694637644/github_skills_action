@@ -386,7 +386,7 @@ export const MONITOR_CSS = `
     }
     #gpt-action-monitor .gam-workspace-picker {
       right: 8px;
-      width: min(245px, calc(100% - 16px));
+      width: min(360px, calc(100% - 16px));
     }
     #gpt-action-monitor .gam-skills-picker { right: 8px; }
     #gpt-action-monitor .gam-workspace-picker[hidden],
@@ -449,12 +449,17 @@ export const MONITOR_CSS = `
       text-align: left;
     }
     #gpt-action-monitor .gam-workspace-item {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px 8px;
       position: relative;
       padding-left: 25px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
       font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #gpt-action-monitor .gam-workspace-item time {
+      color: color-mix(in srgb, CanvasText 65%, transparent);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
     }
     #gpt-action-monitor .gam-workspace-item::before {
       content: "";

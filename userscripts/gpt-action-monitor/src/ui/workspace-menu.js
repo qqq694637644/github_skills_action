@@ -3,6 +3,15 @@ function shortWorkspaceId(workspaceId) {
   return `…${workspaceId.slice(-10)} ▾`;
 }
 
+export function formatWorkspaceModifiedAt(value) {
+  if (typeof value !== 'string' || !value) return '';
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return '';
+  const date = new Date(timestamp);
+  const pad = (part) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 export function createWorkspaceMenu({
   loadWorkspaces,
   getSelectedId,
@@ -59,7 +68,9 @@ export function createWorkspaceMenu({
 
     const selectedId = getSelectedId?.() || '';
     resetButton.disabled = !selectedId;
-    for (const workspaceId of workspaces) {
+    for (const workspace of workspaces) {
+      const workspaceId = workspace.workspace_id;
+      const modifiedAt = formatWorkspaceModifiedAt(workspace.modified_at);
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'gam-workspace-item';
@@ -67,8 +78,16 @@ export function createWorkspaceMenu({
       item.dataset.selected = workspaceId === selectedId ? 'true' : 'false';
       item.setAttribute('role', 'menuitemradio');
       item.setAttribute('aria-checked', workspaceId === selectedId ? 'true' : 'false');
-      item.textContent = workspaceId;
-      item.title = workspaceId;
+      const name = document.createElement('span');
+      name.textContent = workspaceId;
+      item.appendChild(name);
+      if (modifiedAt) {
+        const time = document.createElement('time');
+        time.dateTime = workspace.modified_at;
+        time.textContent = modifiedAt;
+        item.appendChild(time);
+      }
+      item.title = modifiedAt ? `${workspaceId} · ${modifiedAt}` : workspaceId;
       item.addEventListener('pointerdown', preserveFocus);
       item.addEventListener('click', () => {
         if (onSelect(workspaceId) !== false) close();

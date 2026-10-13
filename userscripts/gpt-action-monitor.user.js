@@ -1188,7 +1188,10 @@ ${result}`;
             try {
               const body = JSON.parse(response.responseText);
               const workspaces = Array.isArray(body.workspaces) ? body.workspaces : [];
-              resolve(workspaces.map((item) => String(item?.workspace_id || "").trim()).filter((workspaceId) => /^ws_[0-9a-f]{16}$/.test(workspaceId)));
+              resolve(workspaces.map((item) => ({
+                workspace_id: String(item?.workspace_id || "").trim(),
+                modified_at: typeof item?.modified_at === "string" ? item.modified_at : ""
+              })).filter((item) => /^ws_[0-9a-f]{16}$/.test(item.workspace_id)));
             } catch (error) {
               reject(new Error(`Workspace \u5217\u8868\u89E3\u6790\u5931\u8D25\uFF1A${String(error)}`));
             }
@@ -1964,7 +1967,7 @@ ${result}`;
     }
     #gpt-action-monitor .gam-workspace-picker {
       right: 8px;
-      width: min(245px, calc(100% - 16px));
+      width: min(360px, calc(100% - 16px));
     }
     #gpt-action-monitor .gam-skills-picker { right: 8px; }
     #gpt-action-monitor .gam-workspace-picker[hidden],
@@ -2027,12 +2030,17 @@ ${result}`;
       text-align: left;
     }
     #gpt-action-monitor .gam-workspace-item {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px 8px;
       position: relative;
       padding-left: 25px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
       font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #gpt-action-monitor .gam-workspace-item time {
+      color: color-mix(in srgb, CanvasText 65%, transparent);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
     }
     #gpt-action-monitor .gam-workspace-item::before {
       content: "";
@@ -3427,6 +3435,14 @@ ${result}`;
     if (!workspaceId) return "Workspace \u25BE";
     return `\u2026${workspaceId.slice(-10)} \u25BE`;
   }
+  function formatWorkspaceModifiedAt(value) {
+    if (typeof value !== "string" || !value) return "";
+    const timestamp = Date.parse(value);
+    if (!Number.isFinite(timestamp)) return "";
+    const date = new Date(timestamp);
+    const pad = (part) => String(part).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
   function createWorkspaceMenu({
     loadWorkspaces,
     getSelectedId,
@@ -3476,7 +3492,9 @@ ${result}`;
       }
       const selectedId = getSelectedId?.() || "";
       resetButton.disabled = !selectedId;
-      for (const workspaceId of workspaces) {
+      for (const workspace of workspaces) {
+        const workspaceId = workspace.workspace_id;
+        const modifiedAt = formatWorkspaceModifiedAt(workspace.modified_at);
         const item = document.createElement("button");
         item.type = "button";
         item.className = "gam-workspace-item";
@@ -3484,8 +3502,16 @@ ${result}`;
         item.dataset.selected = workspaceId === selectedId ? "true" : "false";
         item.setAttribute("role", "menuitemradio");
         item.setAttribute("aria-checked", workspaceId === selectedId ? "true" : "false");
-        item.textContent = workspaceId;
-        item.title = workspaceId;
+        const name = document.createElement("span");
+        name.textContent = workspaceId;
+        item.appendChild(name);
+        if (modifiedAt) {
+          const time = document.createElement("time");
+          time.dateTime = workspace.modified_at;
+          time.textContent = modifiedAt;
+          item.appendChild(time);
+        }
+        item.title = modifiedAt ? `${workspaceId} \xB7 ${modifiedAt}` : workspaceId;
         item.addEventListener("pointerdown", preserveFocus);
         item.addEventListener("click", () => {
           if (onSelect(workspaceId) !== false) close();

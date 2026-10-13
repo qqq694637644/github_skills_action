@@ -77,6 +77,18 @@ export class FakeElement {
         this._selectors.set(selector, element);
       }
     }
+    if (value.includes('gam-workspace-picker-header')) {
+      for (const selector of [
+        '.gam-workspace-reset',
+        '.gam-workspace-refresh',
+        '.gam-workspace-state',
+        '.gam-workspace-list',
+      ]) {
+        const element = new FakeElement(selector.slice(1));
+        element.parentElement = this;
+        this._selectors.set(selector, element);
+      }
+    }
   }
 
   get innerHTML() {
@@ -101,6 +113,15 @@ export class FakeElement {
 
   setQueryResults(selector, elements) {
     this._queryResults.set(selector, elements);
+  }
+
+  setAttribute(name, value) {
+    if (!this._attributes) this._attributes = new Map();
+    this._attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this._attributes?.get(name) ?? null;
   }
 
   matches() {

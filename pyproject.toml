@@ -11,6 +11,7 @@ authors = [
 dependencies = [
     "mcp==2.2.0",
     "pydantic>=2.0.0",
+    "Pillow>=11.0,<13.0",
     "PyJWT[crypto]>=2.10.0",
     "uvicorn>=0.30.0",
 ]

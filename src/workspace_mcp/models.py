@@ -94,6 +94,8 @@ MaxMatches = Annotated[int, Field(ge=1, le=1000)]
 MaxDepth = Annotated[int, Field(ge=1, le=10)]
 MaxTreeEntries = Annotated[int, Field(ge=1, le=5000)]
 MaxReadFiles = Annotated[int, Field(ge=0, le=50)]
+ImageMaxBytes = Annotated[int, Field(ge=1024, le=10_485_760)]
+ImageDimension = Annotated[int, Field(ge=1, le=10_000)]
 
 
 class WorkspaceModel(BaseModel):
@@ -154,6 +156,35 @@ class WorkspaceReadFilesRequest(WorkspaceScopedModel):
 class WorkspaceReadFilesResponse(WorkspaceModel):
     files: list[WorkspaceFileContent]
     truncated: bool = False
+
+
+class WorkspaceViewImageRequest(WorkspaceScopedModel):
+    path: WorkspacePath
+    max_bytes: ImageMaxBytes = 5_242_880
+    max_width: ImageDimension = 2000
+    max_height: ImageDimension = 2000
+    auto_resize: bool = True
+    output: Literal["mcp_image", "data_url"] = "mcp_image"
+
+
+class WorkspaceImageOriginal(WorkspaceModel):
+    bytes: int
+    width: int
+    height: int
+    mime_type: str
+
+
+class WorkspaceViewImageResponse(WorkspaceModel):
+    path: str
+    mime_type: str
+    bytes: int
+    width: int
+    height: int
+    resized: bool
+    original: WorkspaceImageOriginal
+    warnings: list[str] = Field(default_factory=list)
+    base64: str | None = None
+    data_url: str | None = None
 
 
 class WorkspaceSearchMatch(WorkspaceModel):

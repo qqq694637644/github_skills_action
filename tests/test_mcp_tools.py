@@ -33,6 +33,7 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
             "workspaceInspect",
             "workspaceSearch",
             "workspaceReadFiles",
+            "view_image",
             "workspaceWriteFile",
             "workspaceApplyPatch",
             "workspaceCommand",
@@ -134,7 +135,7 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
         assert command.annotations.destructive_hint is True
         assert command.annotations.open_world_hint is True
 
-        for name in ("workspaceInspect", "workspaceSearch", "workspaceReadFiles"):
+        for name in ("workspaceInspect", "workspaceSearch", "workspaceReadFiles", "view_image"):
             assert by_name[name].annotations is not None
             assert by_name[name].annotations.read_only_hint is True
 

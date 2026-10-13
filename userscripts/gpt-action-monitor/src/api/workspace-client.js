@@ -31,8 +31,11 @@ export function createWorkspaceClient({ getProfile }) {
             const body = JSON.parse(response.responseText);
             const workspaces = Array.isArray(body.workspaces) ? body.workspaces : [];
             resolve(workspaces
-              .map((item) => String(item?.workspace_id || '').trim())
-              .filter((workspaceId) => /^ws_[0-9a-f]{16}$/.test(workspaceId)));
+              .map((item) => ({
+                workspace_id: String(item?.workspace_id || '').trim(),
+                modified_at: typeof item?.modified_at === 'string' ? item.modified_at : '',
+              }))
+              .filter((item) => /^ws_[0-9a-f]{16}$/.test(item.workspace_id)));
           } catch (error) {
             reject(new Error(`Workspace 列表解析失败：${String(error)}`));
           }

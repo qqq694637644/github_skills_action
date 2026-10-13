@@ -1160,12 +1160,7 @@ def create_app(settings: MCPSettings | None = None):
         if not action_api_authorized(request):
             return JSONResponse({"detail": "invalid bearer token"}, status_code=401)
         return JSONResponse(
-            {
-                "workspaces": [
-                    {"workspace_id": workspace_id}
-                    for workspace_id in WorkspaceRegistry().list_ids()
-                ]
-            }
+            {"workspaces": WorkspaceRegistry().list_workspaces()}
         )
 
     @asynccontextmanager

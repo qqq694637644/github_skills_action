@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import os
 import tempfile
 import time
@@ -12,6 +13,7 @@ import pytest
 from workspace_mcp.workspace_files import LocalWorkspaceService
 from workspace_mcp.workspace_operations import _read_log
 from workspace_mcp.workspace_patch import WorkspaceToolError
+from workspace_mcp.workspace_registry import WorkspaceRegistry
 
 
 def _run(coro):
@@ -30,6 +32,30 @@ def _environment(root: Path, *, sync_wait: int = 5):
         },
         clear=False,
     )
+
+
+def test_workspace_directory_modified_times() -> None:
+    with tempfile.TemporaryDirectory() as temp:
+        with _environment(Path(temp)):
+            registry = WorkspaceRegistry()
+            root = registry.storage_root()
+            older = root / "ws_0123456789abcdef"
+            newer = root / "ws_fedcba9876543210"
+            older.mkdir()
+            newer.mkdir()
+            (root / "not-a-workspace").mkdir()
+            os.utime(older, (1_700_000_000, 1_700_000_000))
+            os.utime(newer, (1_700_000_600, 1_700_000_600))
+
+            workspaces = registry.list_workspaces()
+            assert [entry["workspace_id"] for entry in workspaces] == [
+                newer.name, older.name,
+            ]
+            assert [
+                datetime.fromisoformat(entry["modified_at"]).timestamp()
+                for entry in workspaces
+            ] == [1_700_000_600, 1_700_000_000]
+            assert registry.list_ids() == [newer.name, older.name]
 
 
 def test_workspace_files_search_write_and_patch() -> None:

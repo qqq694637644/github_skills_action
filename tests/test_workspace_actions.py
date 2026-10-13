@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -250,6 +251,29 @@ class WorkspaceActionsTests(unittest.TestCase):
             self.assertEqual(reused.status_code, 200, reused.text)
             self.assertFalse(reused.json()["created"])
             self.assertFalse(reused.json()["empty"])
+
+    def test_action_workspaces_lists_directory_modified_times(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            older = root / "ws_0123456789abcdef"
+            newer = root / "ws_fedcba9876543210"
+            older.mkdir()
+            newer.mkdir()
+            (root / "not-a-workspace").mkdir()
+            os.utime(older, (1_700_000_000, 1_700_000_000))
+            os.utime(newer, (1_700_000_600, 1_700_000_600))
+
+            response = self._client(root).get("/v1/action-workspaces")
+            self.assertEqual(response.status_code, 200, response.text)
+            workspaces = response.json()["workspaces"]
+            self.assertEqual(
+                [entry["workspace_id"] for entry in workspaces],
+                [newer.name, older.name],
+            )
+            self.assertEqual(
+                [datetime.fromisoformat(entry["modified_at"]).timestamp() for entry in workspaces],
+                [1_700_000_600, 1_700_000_000],
+            )
 
     def test_read_files_returns_numbered_utf8_content_and_truncation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -8,9 +8,11 @@ import {
 import { createActionLogClient } from './src/api/action-log-client.js';
 import { createActionLogSessionState } from './src/api/action-log-session.js';
 import { createSkillCatalogClient } from './src/api/skill-catalog-client.js';
+import { createWorkspaceClient } from './src/api/workspace-client.js';
 import { loadSkillsCall } from './src/adapters/composer.js';
 import { createSoundAlert } from './src/alert/sound-alert.js';
 import { selectNowCells } from './src/ui/activity-panel.js';
+import { createWorkspaceMenu, formatWorkspaceModifiedAt } from './src/ui/workspace-menu.js';
 import {
   deletePageBinding,
   loadEndpoints,
@@ -42,6 +44,59 @@ assert.deepEqual(validateBackend('https://skills.example.com/'), {
 });
 assert.equal(validateBackend('ftp://skills.example.com').ok, false);
 assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintenance"])');
+
+// Workspace timestamps are provided by the backend and formatted in the
+// viewer's local timezone without changing the selected workspace ID.
+{
+  const modifiedAt = new Date(2026, 9, 13, 11, 23).toISOString();
+  assert.equal(formatWorkspaceModifiedAt(modifiedAt), '2026-10-13 11:23');
+  assert.equal(formatWorkspaceModifiedAt('invalid'), '');
+  assert.equal(formatWorkspaceModifiedAt(null), '');
+
+  installDomFixture();
+  let requests = 0;
+  globalThis.GM_xmlhttpRequest = ({ onload }) => {
+    requests += 1;
+    onload({
+      status: 200,
+      responseText: JSON.stringify({
+        workspaces: [
+          { workspace_id: 'ws_0123456789abcdef', modified_at: modifiedAt },
+          { workspace_id: 'ws_fedcba9876543210' },
+          { workspace_id: 'not-a-workspace', modified_at: modifiedAt },
+        ],
+      }),
+    });
+  };
+  const client = createWorkspaceClient({
+    getProfile: () => ({ id: 'primary', backend: 'https://example.com', token: '' }),
+  });
+  const entries = await client.list();
+  assert.deepEqual(entries, [
+    { workspace_id: 'ws_0123456789abcdef', modified_at: modifiedAt },
+    { workspace_id: 'ws_fedcba9876543210', modified_at: '' },
+  ]);
+  assert.deepEqual(await client.list(), entries);
+  assert.equal(requests, 1);
+  await client.list({ refresh: true });
+  assert.equal(requests, 2);
+
+  const menu = createWorkspaceMenu({
+    loadWorkspaces: () => client.list(),
+    getSelectedId: () => 'ws_0123456789abcdef',
+    onSelect: () => true,
+    onReset: () => true,
+  });
+  menu.open();
+  await new Promise((resolve) => setImmediate(resolve));
+  const items = menu.element.querySelector('.gam-workspace-list').children;
+  assert.equal(items.length, 2);
+  assert.equal(items[0].dataset.workspaceId, 'ws_0123456789abcdef');
+  assert.equal(items[0].getAttribute('aria-checked'), 'true');
+  assert.equal(items[0].children[0].textContent, 'ws_0123456789abcdef');
+  assert.equal(items[0].children[1].textContent, '2026-10-13 11:23');
+  assert.equal(items[1].children.length, 1);
+}
 
 // Discovery and selected-Workspace filters need independent cursors. A global
 // cursor shared between them can advance past a prepare_workspace event while

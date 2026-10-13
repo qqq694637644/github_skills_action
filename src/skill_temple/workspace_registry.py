@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .runtime import env_value_from_environment_or_dotenv
@@ -71,18 +72,29 @@ class WorkspaceRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return {"workspace_id": generated_id, "created": created, "empty": not any(path.iterdir())}
 
-    def list_ids(self) -> list[str]:
+    def list_workspaces(self) -> list[dict[str, str]]:
         root = self.storage_root()
         entries = [
-            path
+            (path.name, path.stat().st_mtime_ns)
             for path in root.iterdir()
             if path.is_dir() and _WORKSPACE_ID_RE.fullmatch(path.name)
         ]
         entries.sort(
-            key=lambda path: (path.stat().st_mtime_ns, path.name),
+            key=lambda entry: (entry[1], entry[0]),
             reverse=True,
         )
-        return [path.name for path in entries]
+        return [
+            {
+                "workspace_id": workspace_id,
+                "modified_at": datetime.fromtimestamp(
+                    modified_ns / 1_000_000_000, tz=timezone.utc
+                ).isoformat(timespec="seconds"),
+            }
+            for workspace_id, modified_ns in entries
+        ]
+
+    def list_ids(self) -> list[str]:
+        return [entry["workspace_id"] for entry in self.list_workspaces()]
 
     def resolve(self, workspace_id: str) -> Path:
         if not _WORKSPACE_ID_RE.fullmatch(workspace_id):

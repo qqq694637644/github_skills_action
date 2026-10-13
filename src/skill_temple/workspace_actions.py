@@ -423,12 +423,7 @@ def register_workspace_actions(app: FastAPI) -> None:
 
     @app.get("/v1/action-workspaces", include_in_schema=False)
     def action_workspaces() -> dict[str, list[dict[str, str]]]:
-        return {
-            "workspaces": [
-                {"workspace_id": workspace_id}
-                for workspace_id in service.list_workspace_ids()
-            ]
-        }
+        return {"workspaces": service.list_workspaces()}
 
     @app.post(
         "/v1/workspace/prepare",

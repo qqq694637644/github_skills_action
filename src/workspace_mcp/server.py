@@ -11,7 +11,7 @@ from mcp.server import MCPServer
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import CallToolResult, ImageContent, TextContent, Tool, ToolAnnotations
+from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from pydantic import AnyHttpUrl, BaseModel, ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -81,8 +81,9 @@ SERVER_INSTRUCTIONS = (
     "Use workspaceInspect/workspaceSearch before guessing paths and workspaceReadFiles before "
     "editing exact targets. Use workspaceWriteFile for one complete known file, "
     "workspaceApplyPatch for bounded multi-file edits, and view_image for known workspace-relative "
-    "PNG/JPEG/GIF/WebP paths (native MCP image content by default). The patch argument is a "
-    "stripped-down, "
+    "PNG/JPEG/GIF/WebP paths. view_image returns a data URL through text/structured fields, "
+    "not a native MCP image block; a successful call alone does not prove visual access. "
+    "The patch argument is a stripped-down, "
     "file-oriented diff enclosed by '*** Begin Patch' and '*** End Patch'; it is not git/unified "
     "diff syntax. Operations inside one patch are sequential, so later operations see earlier "
     "adds, updates, moves, and deletes. "
@@ -744,12 +745,14 @@ def create_server(
 
     @server.tool(
         name="view_image",
-        title="View workspace image",
+        title="Read workspace image data URL",
         description=(
             "Read a PNG, JPEG, GIF, or WebP image from an exact workspace-relative path and "
-            "return native MCP image content (default). Auto-resize to max_width/max_height "
-            "and max_bytes; output=data_url instead returns a textual data URL for comparison. "
-            "The image path cannot escape its workspace, including through symlinks."
+            "return its Base64 data URL in text and structuredContent (output=data_url only). "
+            "No native MCP image content is returned. A successful call or image metadata does "
+            "not mean the model can see pixels; only describe image details when the client "
+            "actually supports interpreting the returned data URL. Images auto-resize to "
+            "max_width/max_height and max_bytes. Paths cannot escape the workspace."
         ),
         annotations=_READ_ONLY,
     )
@@ -760,7 +763,7 @@ def create_server(
         max_width: ImageDimension = 2000,
         max_height: ImageDimension = 2000,
         auto_resize: bool = True,
-        output: Literal["mcp_image", "data_url"] = "mcp_image",
+        output: Literal["data_url"] = "data_url",
     ) -> Annotated[CallToolResult, WorkspaceViewImageResponse]:
         request = _validate(
             WorkspaceViewImageRequest,
@@ -791,19 +794,10 @@ def create_server(
                 resized=image.resized,
                 original=image.original,
                 warnings=image.warnings,
+                base64=encoded,
+                data_url=f"data:{image.mime_type};base64,{encoded}",
             )
-            if request.output == "data_url":
-                response.base64 = encoded
-                response.data_url = f"data:{image.mime_type};base64,{encoded}"
-                content = [
-                    TextContent(type="text", text=response.model_dump_json(exclude_none=True))
-                ]
-            else:
-                # Keep Base64 out of structuredContent in this mode so the client
-                # must actually consume the MCP image block for visual understanding.
-                content = [
-                    ImageContent(type="image", data=encoded, mimeType=image.mime_type)
-                ]
+            content = [TextContent(type="text", text=response.model_dump_json())]
             log_action(
                 "view_image",
                 workspace_id=request.workspace_id,

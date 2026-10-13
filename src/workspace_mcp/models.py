@@ -164,7 +164,7 @@ class WorkspaceViewImageRequest(WorkspaceScopedModel):
     max_width: ImageDimension = 2000
     max_height: ImageDimension = 2000
     auto_resize: bool = True
-    output: Literal["mcp_image", "data_url"] = "mcp_image"
+    output: Literal["data_url"] = "data_url"
 
 
 class WorkspaceImageOriginal(WorkspaceModel):
@@ -183,8 +183,8 @@ class WorkspaceViewImageResponse(WorkspaceModel):
     resized: bool
     original: WorkspaceImageOriginal
     warnings: list[str] = Field(default_factory=list)
-    base64: str | None = None
-    data_url: str | None = None
+    base64: str
+    data_url: str
 
 
 class WorkspaceSearchMatch(WorkspaceModel):

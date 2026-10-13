@@ -40,7 +40,7 @@ def read_workspace_image(
     max_height: int = 2000,
     auto_resize: bool = True,
 ) -> WorkspaceImage:
-    """Read a workspace-relative image for a native MCP image content block."""
+    """Read a workspace-relative image for Base64 data URL transport."""
     resolved = target_path(root, path)
     if not resolved.is_file():
         raise WorkspaceToolError("WORKSPACE_FILE_NOT_FOUND", f"Image file not found: {path}")

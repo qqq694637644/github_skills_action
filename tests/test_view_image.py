@@ -49,7 +49,7 @@ async def _workspace(server, root: Path) -> tuple[str, Path]:
     return workspace_id, workspace_root
 
 
-def test_view_image_schema_and_mcp_image_content() -> None:
+def test_view_image_schema_and_data_url_content_only() -> None:
     async def scenario(root: Path) -> None:
         server = create_server(_settings())
         tools = {tool.name: tool for tool in await server.list_tools()}
@@ -62,8 +62,10 @@ def test_view_image_schema_and_mcp_image_content() -> None:
         assert schema["required"] == ["workspace_id", "path"]
         assert schema["properties"]["max_bytes"]["maximum"] == 10_485_760
         assert schema["properties"]["max_width"]["maximum"] == 10_000
-        assert schema["properties"]["output"]["enum"] == ["mcp_image", "data_url"]
+        assert schema["properties"]["output"]["const"] == "data_url"
+        assert "native MCP image content" in tool.description
         assert "original" in tool.output_schema["properties"]
+        assert "data_url" in tool.output_schema["properties"]
 
         workspace_id, workspace_root = await _workspace(server, root)
         image_path = workspace_root / "sample.png"
@@ -75,32 +77,34 @@ def test_view_image_schema_and_mcp_image_content() -> None:
         )
         assert result.is_error is False
         assert len(result.content) == 1
-        assert result.content[0].type == "image"
-        assert result.content[0].mime_type == "image/png"
-        assert base64.b64decode(result.content[0].data, validate=True) == original_bytes
+        assert result.content[0].type == "text"
+        assert result.structured_content["data_url"].startswith("data:image/png;base64,")
+        assert base64.b64decode(
+            result.structured_content["data_url"].split(",", 1)[1], validate=True
+        ) == original_bytes
+        assert base64.b64decode(result.structured_content["base64"]) == original_bytes
         assert result.structured_content["width"] == 24
         assert result.structured_content["height"] == 18
         assert result.structured_content["resized"] is False
         assert result.structured_content["original"]["bytes"] == len(original_bytes)
-        assert "base64" not in result.structured_content
-        assert "data_url" not in result.structured_content
+        assert json.loads(result.content[0].text) == result.structured_content
 
-        # Explicitly check the MCP wire field alias (mimeType, not mime_type).
+        # A real MCP image block must never appear, including in wire serialization.
         wire = result.model_dump(mode="json", by_alias=True, exclude_none=True)
-        assert wire["content"][0] == {
-            "type": "image",
-            "data": result.content[0].data,
-            "mimeType": "image/png",
-        }
+        assert len(wire["content"]) == 1
+        assert wire["content"][0]["type"] == "text"
+        assert json.loads(wire["content"][0]["text"]) == result.structured_content
 
-        fallback = await server.call_tool(
+        explicit = await server.call_tool(
             "view_image",
             {"workspace_id": workspace_id, "path": "sample.png", "output": "data_url"},
         )
-        assert fallback.content[0].type == "text"
-        assert fallback.structured_content["data_url"].startswith("data:image/png;base64,")
-        assert base64.b64decode(fallback.structured_content["base64"]) == original_bytes
-        assert json.loads(fallback.content[0].text)["path"] == "sample.png"
+        assert explicit.structured_content == result.structured_content
+        with pytest.raises(ToolError, match="data_url"):
+            await server.call_tool(
+                "view_image",
+                {"workspace_id": workspace_id, "path": "sample.png", "output": "mcp_image"},
+            )
 
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -128,8 +132,9 @@ def test_view_image_other_supported_formats(
         result = await server.call_tool(
             "view_image", {"workspace_id": workspace_id, "path": file_name}
         )
-        assert result.content[0].type == "image"
-        assert result.content[0].mime_type == expected_mime
+        assert result.content[0].type == "text"
+        assert result.structured_content["mime_type"] == expected_mime
+        assert result.structured_content["data_url"].startswith(f"data:{expected_mime};base64,")
         assert result.structured_content["width"] == 45
         assert result.structured_content["height"] == 31
 
@@ -156,11 +161,11 @@ def test_view_image_resizes_and_reports_final_dimensions() -> None:
                 "max_height": 350,
             },
         )
-        assert resized.content[0].type == "image"
+        assert resized.content[0].type == "text"
         assert resized.structured_content["resized"] is True
         assert resized.structured_content["original"]["width"] == 2400
         assert resized.structured_content["original"]["height"] == 1200
-        decoded = base64.b64decode(resized.content[0].data)
+        decoded = base64.b64decode(resized.structured_content["data_url"].split(",", 1)[1])
         with Image.open(BytesIO(decoded)) as thumb:
             assert thumb.width <= 600
             assert thumb.height <= 350
@@ -181,7 +186,9 @@ def test_view_image_resizes_and_reports_final_dimensions() -> None:
         )
         assert small.structured_content["bytes"] <= 4_096
         assert small.structured_content["resized"] is True
-        with Image.open(BytesIO(base64.b64decode(small.content[0].data))) as thumb:
+        with Image.open(
+            BytesIO(base64.b64decode(small.structured_content["data_url"].split(",", 1)[1]))
+        ) as thumb:
             assert small.structured_content["width"] == thumb.width
             assert small.structured_content["height"] == thumb.height
 
@@ -244,7 +251,7 @@ def test_view_image_rejects_oversize_nonimages_and_workspace_escapes() -> None:
             asyncio.run(scenario(root))
 
 
-def test_view_image_http_mcp_transport_contains_real_image_block() -> None:
+def test_view_image_http_mcp_transport_contains_only_text_data_url() -> None:
     async def scenario(root: Path) -> None:
         workspace_id = "ws_0123456789abcdef"
         workspace_root = root / "workspaces" / workspace_id
@@ -308,11 +315,17 @@ def test_view_image_http_mcp_transport_contains_real_image_block() -> None:
                 )
                 result = event["result"]
                 assert result["isError"] is False
-                assert result["content"][0]["type"] == "image"
-                assert result["content"][0]["mimeType"] == "image/png"
-                assert "base64" not in result["structuredContent"]
+                assert len(result["content"]) == 1
+                assert result["content"][0]["type"] == "text"
+                assert json.loads(result["content"][0]["text"]) == result["structuredContent"]
+                assert result["structuredContent"]["data_url"].startswith("data:image/png;base64,")
                 with Image.open(
-                    BytesIO(base64.b64decode(result["content"][0]["data"]))
+                    BytesIO(
+                        base64.b64decode(
+                            result["structuredContent"]["data_url"].split(",", 1)[1],
+                            validate=True,
+                        )
+                    )
                 ) as picture:
                     assert picture.size == (13, 17)
 

@@ -80,11 +80,12 @@ workspace_mcp.server
 - SHA-256；
 - `next_start_line` continuation。
 
-### `view_image`（MCP 图片传输测试）
+### `view_image`（data_url 文本传输）
 
 参照 [coding-tools-mcp 的 `view_image`](https://github.com/mybolide/coding-tools-mcp)，
-用 Python/Pillow 从指定 Workspace 读取 PNG、JPEG、GIF 或 WebP 图片，并返回标准
-MCP **`type: "image"`** 内容块（`data` 为 Base64，`mimeType` 为真实格式）。
+用 Python/Pillow 从指定 Workspace 读取 PNG、JPEG、GIF 或 WebP 图片，返回
+**`data_url` 文本/结构化字段**（含 Base64 图片数据）。不再尝试原生 MCP
+`type: "image"` 内容块。
 图片必须在 Workspace 内，绝对路径、`..` 越界和向外的符号链接均拒绝。
 
 示例（先把自己的图片放到该 Workspace 的 `screenshots/test.png`）：
@@ -97,17 +98,18 @@ MCP **`type: "image"`** 内容块（`data` 为 Base64，`mimeType` 为真实格�
   "max_width": 2000,
   "max_height": 2000,
   "auto_resize": true,
-  "output": "mcp_image"
+  "output": "data_url"
 }
 ```
 
-- `output="mcp_image"`（默认）：`content[0]` 是 MCP `image`，`structuredContent` 只含图片元数据，不重复 Base64，适合验证客户端是否真的支持 MCP 图片。
-- `output="data_url"`：`content[0]` 是包含 `data_url`、`base64` 等字段的 JSON 文本，`structuredContent` 也包含这些字段；用于文字通道对照。
+- `output="data_url"` 是**唯一支持的模式**，也是默认值，可省略 `output`；旧的 `mcp_image` 参数不再接受。
+- `content[0]` 是包含 `data_url`、`base64` 和图片元数据的 JSON **文本**，`structuredContent` 含相同字段；不会返回 MCP 原生 `image` 内容块。
 - `max_bytes` 默认 5 MiB、最大 10 MiB；尺寸默认限制 2000 × 2000；超过时使用 Pillow 缩放/压缩。最大源文件 32 MiB、解码像素 4000 万。重新编码的 GIF 只保留首帧。
 
-**注意**：此工具在 MCP 协议层返回真实图片，不代表 ChatGPT 网页版一定会向视觉模型转交该内容。
-验证网页版时，建议使用模型此前不知道具体内容的图片，让模型描述其中独有的文字或数字；
-仅看到工具调用成功或 Base64 字符串，不算验证成功。部署/升级时重新安装 Python 项目依赖（包含 Pillow）并重启 MCP 服务。
+**注意**：`data_url` 是图片的编码文本，工具调用成功及返回的宽高/MIME 元数据
+**不意味着模型已经看到图片像素**。只有当前客户端能够解析并提供这些图片数据时，
+才可根据图片回答；否则应明确说明无法实际识别图片，不要猜测截图里的内容。
+部署/升级时重新安装 Python 项目依赖（包含 Pillow）、重启 MCP 服务，并刷新 ChatGPT 工具定义。
 
 ### `workspaceWriteFile`
 

@@ -73,6 +73,7 @@ from .models import (
     WorkspaceWriteFileRequest,
     WorkspaceWriteFileResponse,
 )
+from .tasks_probe import MCPTasksProbeMiddleware
 from .workspace_files import LocalWorkspaceService
 from .workspace_patch import WorkspaceToolError
 from .workspace_registry import WorkspaceRegistry
@@ -327,7 +328,7 @@ def create_server(
         command_max_timeout_seconds=command_limits["max_timeout_seconds"],
         command_max_output_bytes=command_limits["max_output_bytes"],
         instructions=SERVER_INSTRUCTIONS,
-        middleware=[ToolSecurityMetadataMiddleware(security_schemes)],
+        middleware=[MCPTasksProbeMiddleware(), ToolSecurityMetadataMiddleware(security_schemes)],
         lifespan=lifespan,
         **server_kwargs,
     )

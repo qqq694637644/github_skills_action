@@ -498,6 +498,61 @@ assert.equal(loadSkillsCall('github-maintenance'), 'loadSkills(["github-maintena
   assert.equal(preparingWorkspace.title, 'Preparing workspace');
 }
 
+// Image actions must appear in workspace-filtered monitor activity with useful
+// metadata, without the image's Base64 data being embedded in the log.
+{
+  const store = createActivityStore();
+  store.ingest([{
+    id: 810,
+    text: '[2026-10-27 08:12] ACTION view_image path="capture.png"',
+    event: {
+      activity_id: 'image:one',
+      kind: 'generic',
+      phase: 'completed',
+      timestamp: '2026-10-27T00:12:00Z',
+      workspace_id: 'ws_0123456789abcdef',
+      payload: {
+        operation: 'view_image',
+        workspace_id: 'ws_0123456789abcdef',
+        path: 'screens/capture.png',
+        mime_type: 'image/png',
+        width: 1280,
+        height: 720,
+        resized: true,
+      },
+    },
+  }]);
+  const cell = store.snapshot().recent[0];
+  const readImage = presentActivity(cell);
+  assert.equal(readImage.title, 'Read image capture.png');
+  assert.deepEqual(readImage.lines, ['1280 × 720 · PNG · resized']);
+  assert.equal(readImage.detail, 'screens/capture.png');
+
+  store.ingest([{
+    id: 811,
+    event: {
+      activity_id: 'image:two',
+      kind: 'generic',
+      phase: 'failed',
+      payload: {
+        operation: 'view_image',
+        path: 'missing.png',
+        error_code: 'WORKSPACE_FILE_NOT_FOUND',
+      },
+    },
+  }]);
+  const failedImage = presentActivity(store.snapshot().recent[0]);
+  assert.equal(failedImage.title, 'Failed to read image missing.png');
+  assert.deepEqual(failedImage.lines, ['WORKSPACE_FILE_NOT_FOUND']);
+
+  const legacy = createActivityStore();
+  legacy.ingest([{
+    id: 812,
+    text: '[2026-10-27 08:12] ACTION view_image path="capture.png"',
+  }]);
+  assert.equal(presentActivity(legacy.snapshot().recent[0]).title, 'Viewed image');
+}
+
 // A server stream restart invalidates only in-flight activity. Completed
 // history stays visible while orphaned NOW cells are removed.
 {

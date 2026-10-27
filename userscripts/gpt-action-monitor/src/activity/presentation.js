@@ -351,6 +351,7 @@ function legacyPresentation(cell) {
     workspaceInspect: 'Explored',
     workspaceSearch: 'Explored',
     workspaceReadFiles: 'Explored',
+    view_image: 'Viewed image',
     workspaceApplyPatch: 'Edited files',
     workspaceWriteFile: 'Wrote file',
     loadSkills: 'Loaded skill',
@@ -430,6 +431,23 @@ function genericPresentation(cell) {
   const active = cell.phase === 'started' || cell.phase === 'updated';
   const locator = locatorPresentation(cell);
   if (locator) return locator;
+  if (payload.operation === 'view_image') {
+    const name = String(payload.path || 'image').replace(/\\/g, '/').split('/').at(-1);
+    const failed = cell.phase === 'failed';
+    const dimensions = Number.isInteger(payload.width) && Number.isInteger(payload.height)
+      ? `${payload.width} × ${payload.height}` : '';
+    const format = String(payload.mime_type || '').replace(/^image\//, '').toUpperCase();
+    const summary = [dimensions, format, payload.resized ? 'resized' : '']
+      .filter(Boolean).join(' · ');
+    return {
+      status: failed ? 'failed' : active ? 'active' : 'completed',
+      title: failed ? `Failed to read image ${name}` : active ? `Reading image ${name}` : `Read image ${name}`,
+      lines: compactLines(failed
+        ? [payload.diagnostic || payload.error_code || 'Image read failed']
+        : [summary]),
+      detail: payload.path || name,
+    };
+  }
   if (payload.operation === 'prepare_workspace') {
     const title = cell.phase === 'failed'
       ? 'Failed to prepare workspace'

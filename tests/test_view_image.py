@@ -16,6 +16,7 @@ from mcp.types import LATEST_PROTOCOL_VERSION
 from PIL import Image
 
 from workspace_mcp.config import MCPSettings
+from workspace_mcp.logging import clear_action_events, wait_for_action_events
 from workspace_mcp.server import create_app, create_server
 
 
@@ -105,6 +106,56 @@ def test_view_image_schema_and_data_url_content_only() -> None:
                 "view_image",
                 {"workspace_id": workspace_id, "path": "sample.png", "output": "mcp_image"},
             )
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        with _environment(root):
+            asyncio.run(scenario(root))
+
+
+def test_view_image_emits_workspace_filtered_metadata_events_without_image_bytes() -> None:
+    async def scenario(root: Path) -> None:
+        server = create_server(_settings())
+        workspace_id, workspace_root = await _workspace(server, root)
+        Image.new("RGB", (27, 19), "purple").save(workspace_root / "capture.png")
+        clear_action_events()
+
+        result = await server.call_tool(
+            "view_image", {"workspace_id": workspace_id, "path": "capture.png"}
+        )
+        assert result.is_error is False
+        events = await wait_for_action_events(workspace_id=workspace_id, timeout=0)
+        assert len(events["items"]) == 1
+        item = events["items"][0]
+        assert "ACTION view_image" in item["text"]
+        assert item["event"]["kind"] == "generic"
+        assert item["event"]["phase"] == "completed"
+        assert item["event"]["workspace_id"] == workspace_id
+        assert item["event"]["payload"] == {
+            "operation": "view_image",
+            "workspace_id": workspace_id,
+            "path": "capture.png",
+            "mime_type": "image/png",
+            "bytes": len((workspace_root / "capture.png").read_bytes()),
+            "width": 27,
+            "height": 19,
+            "resized": False,
+        }
+        assert result.structured_content["base64"] not in str(events)
+
+        with pytest.raises(ToolError):
+            await server.call_tool(
+                "view_image", {"workspace_id": workspace_id, "path": "missing.png"}
+            )
+        errors = await wait_for_action_events(
+            workspace_id=workspace_id, after=events["last_id"], timeout=0
+        )
+        assert len(errors["items"]) == 1
+        failure = errors["items"][0]["event"]
+        assert failure["phase"] == "failed"
+        assert failure["payload"]["operation"] == "view_image"
+        assert failure["payload"]["path"] == "missing.png"
+        assert failure["payload"]["error_code"]
 
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)

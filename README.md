@@ -48,6 +48,12 @@ workspace_mcp.server
 
 ## MCP Tools
 
+**新增 MCP Apps 图片/操作查看器与延迟诊断：** 参见
+[`MCP_APPS_OBSERVABILITY.md`](MCP_APPS_OBSERVABILITY.md)。该文档说明
+`openImageViewer`、`openOperationViewer`、`getMcpLatency`、OTLP 配置、
+private 缓存提示，以及服务端计时与客户端网络往返的区别。
+
+
 ### `prepareWorkspace`
 
 创建一个持久 Workspace，或者复用已存在的 `workspace_id`。
@@ -321,7 +327,8 @@ max_bytes
 - **没有配置任何 `OAUTH_*` 环境变量**：服务使用 `noauth`；
 - **开始配置 OAuth 后**：`OAUTH_AUDIENCE`、`OAUTH_ISSUER`、`OAUTH_JWKS_URL`、`OAUTH_ALLOWED_SUBJECT` 必须同时存在。
 
-noauth 时，8 个 tools 会在 `tools/list` 中声明：
+noauth 时，`tools/list` 声明 14 个工具（原始 8 个 + 2 个 Apps 查看器
++ 3 个 UI helper + 1 个延迟诊断工具；UI helper 标注仅供 App 使用）：
 
 ```json
 {"securitySchemes":[{"type":"noauth"}]}
@@ -626,7 +633,7 @@ noauth 测试时：
 1. 在 ChatGPT Web 打开 Developer Mode / Plugin MCP 管理；
 2. 添加 Remote MCP URL，例如 `https://githubaction.giize.com/mcp-app/mcp`；
 3. 不需要 OAuth 授权；
-4. 确认 ChatGPT 能发现 8 个 Workspace tools（包括 `view_image`）；
+4. 确认基础 8 个工具以及新增的 Apps 查看器/延迟诊断工具可发现（UI-only 工具不一定显示给模型）；
 5. 用真实 Workspace 流程验证读、写、Patch 和 PowerShell。
 
 切换 Auth0 后：
@@ -637,7 +644,8 @@ noauth 测试时：
 4. ChatGPT 中删除/重新创建当前 noauth MCP connection，Authentication 选择 `OAuth`；
 5. ChatGPT 会通过 Auth0 DCR 自动注册 client，并跳转 Auth0 Universal Login；
 6. 使用你自己的 Auth0 用户登录并授权；
-7. 授权完成后确认 8 个 tools 仍然可见，并测试 `workspaceCommand` 和 `view_image`。
+7. 授权完成后确认基础工具仍然可见，并测试 `workspaceCommand`、
+   `view_image` 和新增的 `openImageViewer`。
 
 本项目不负责网页版 Skill 注册；Skill 与后端 MCP 是两个独立层面。
 
@@ -675,7 +683,7 @@ python -m ruff format .
 
 当前测试重点覆盖：
 
-- 8 个 MCP tools discovery/schema/annotations/structured output；
+- 原始 8 个工具及新增 Apps/延迟工具的 discovery/schema/annotations/structured output；
 - `tools/list` wire response 的顶层 `securitySchemes` 与 `_meta.securitySchemes` 镜像；
 - structuredContent 与短文本 content 不重复大块文件/日志；
 - path/query 数组的每个元素都有明确长度约束；

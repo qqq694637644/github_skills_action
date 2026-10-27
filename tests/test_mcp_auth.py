@@ -400,7 +400,7 @@ def test_noauth_http_initialize_and_tools_list_work_without_bearer_token() -> No
                 )
                 assert listed.status_code == 200
                 tools = _sse_json(listed.text)["result"]["tools"]
-                assert len(tools) == 8
+                assert len(tools) == 14  # original 8 + 2 MCP Apps views + 4 UI/latency tools
                 for tool in tools:
                     expected = [{"type": "noauth"}]
                     assert tool["securitySchemes"] == expected
@@ -477,7 +477,7 @@ def test_authenticated_http_initialize_accepts_public_mcp_host() -> None:
                 assert listed.status_code == 200
                 payload = _sse_json(listed.text)
                 tools = payload["result"]["tools"]
-                assert len(tools) == 8
+                assert len(tools) == 14  # original 8 + 2 MCP Apps views + 4 UI/latency tools
                 for tool in tools:
                     expected = [{"type": "oauth2", "scopes": ["workspace:execute"]}]
                     assert tool["securitySchemes"] == expected

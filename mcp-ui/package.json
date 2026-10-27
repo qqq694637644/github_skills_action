@@ -1,0 +1,17 @@
+{
+  "name": "workspace-mcp-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node --check src/main.js && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.3",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

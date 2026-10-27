@@ -22,6 +22,10 @@ dev = [
     "httpx>=0.27.0",
     "ruff>=0.1.0",
 ]
+observability = [
+    "opentelemetry-sdk>=1.28.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.28.0",
+]
 
 [project.scripts]
 workspace-mcp = "workspace_mcp.server:main"
@@ -33,6 +37,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
+
+[tool.setuptools.package-data]
+workspace_mcp = ["ui/*.html"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

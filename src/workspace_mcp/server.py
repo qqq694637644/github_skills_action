@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import uvicorn
-from mcp.server import MCPServer
+from mcp.server import CacheHint, MCPServer
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
@@ -17,6 +17,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from .apps_ui import configure_apps, register_ui_data_tools
 from .auth import JWTTokenVerifier
 from .config import MCPSettings
 from .image_tool import read_workspace_image
@@ -73,6 +74,11 @@ from .models import (
     WorkspaceWriteFileRequest,
     WorkspaceWriteFileResponse,
 )
+from .observability import (
+    MCPHttpTimingMiddleware,
+    MCPRequestTimingMiddleware,
+    configure_otel_from_env,
+)
 from .workspace_files import LocalWorkspaceService
 from .workspace_patch import WorkspaceToolError
 from .workspace_registry import WorkspaceRegistry
@@ -83,6 +89,10 @@ SERVER_INSTRUCTIONS = (
     "workspaceApplyPatch for bounded multi-file edits, and view_image for known workspace-relative "
     "PNG/JPEG/GIF/WebP paths. view_image returns a data URL through text/structured fields, "
     "not a native MCP image block; a successful call alone does not prove visual access. "
+    "Use openImageViewer(workspace_id, path) to open an interactive MCP Apps preview on "
+    "compatible clients; use openOperationViewer(operation_id) for an existing PowerShell "
+    "operation and getMcpLatency() for recent server-side per-call timings. "
+    "Server-side timing is not ChatGPT client network RTT. "
     "The patch argument is a stripped-down, "
     "file-oriented diff enclosed by '*** Begin Patch' and '*** End Patch'; it is not git/unified "
     "diff syntax. Operations inside one patch are sequential, so later operations see earlier "
@@ -292,6 +302,7 @@ def create_server(
 ) -> MCPServer:
     settings = settings or MCPSettings.from_env()
     service = service or LocalWorkspaceService()
+    apps = configure_apps(service)
     command_limits = service.command_limits()
     security_schemes = (
         [{"type": "oauth2", "scopes": [settings.required_scope]}]
@@ -327,7 +338,17 @@ def create_server(
         command_max_timeout_seconds=command_limits["max_timeout_seconds"],
         command_max_output_bytes=command_limits["max_output_bytes"],
         instructions=SERVER_INSTRUCTIONS,
-        middleware=[ToolSecurityMetadataMiddleware(security_schemes)],
+        middleware=[
+            MCPRequestTimingMiddleware(),
+            ToolSecurityMetadataMiddleware(security_schemes),
+        ],
+        extensions=[apps],
+        cache_hints={
+            "tools/list": CacheHint(ttl_ms=60_000, scope="private"),
+            "resources/list": CacheHint(ttl_ms=60_000, scope="private"),
+            "resources/read": CacheHint(ttl_ms=300_000, scope="private"),
+            "server/discover": CacheHint(ttl_ms=30_000, scope="private"),
+        },
         lifespan=lifespan,
         **server_kwargs,
     )
@@ -1239,11 +1260,13 @@ def create_server(
             )
             raise _tool_error(exc) from exc
 
+    register_ui_data_tools(server, service)
     return server
 
 
 def create_app(settings: MCPSettings | None = None):
     resolved = settings or MCPSettings.from_env()
+    configure_otel_from_env()
     mcp_app = create_server(resolved).streamable_http_app(
         streamable_http_path="/mcp",
         json_response=False,
@@ -1288,6 +1311,7 @@ def create_app(settings: MCPSettings | None = None):
     app.add_route("/v1/action-workspaces", action_workspaces, methods=["GET"])
     app.add_route("/v1/action-logs", action_logs, methods=["GET"])
     app.mount("/", mcp_app)
+    app.add_middleware(MCPHttpTimingMiddleware)
     return app
 
 

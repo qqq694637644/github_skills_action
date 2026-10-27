@@ -37,12 +37,20 @@ def test_mcp_exposes_exact_workspace_tool_set_and_precise_input_schema() -> None
             "workspaceWriteFile",
             "workspaceApplyPatch",
             "workspaceCommand",
+            "openImageViewer",
+            "openOperationViewer",
+            "getImagePreview",
+            "getOperationView",
+            "cancelOperationFromViewer",
+            "getMcpLatency",
         }
         for tool in tools:
-            assert tool.output_schema is not None
-            assert tool.meta == {
-                "securitySchemes": [{"type": "oauth2", "scopes": ["workspace:execute"]}]
-            }
+            if tool.name != "getImagePreview":
+                assert tool.output_schema is not None
+            assert tool.meta is not None
+            assert tool.meta["securitySchemes"] == [
+                {"type": "oauth2", "scopes": ["workspace:execute"]}
+            ]
 
         command = by_name["workspaceCommand"]
         assert command.input_schema["properties"]["action"]["enum"] == [

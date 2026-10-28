@@ -800,6 +800,21 @@ def create_server(
             content = [TextContent(type="text", text=response.model_dump_json())]
             log_action(
                 "view_image",
+                activity={
+                    "activity_id": new_activity_id("image"),
+                    "kind": "generic",
+                    "phase": "completed",
+                    "payload": {
+                        "operation": "view_image",
+                        "workspace_id": request.workspace_id,
+                        "path": response.path,
+                        "mime_type": response.mime_type,
+                        "bytes": response.bytes,
+                        "width": response.width,
+                        "height": response.height,
+                        "resized": response.resized,
+                    },
+                },
                 workspace_id=request.workspace_id,
                 path=request.path,
                 output=request.output,
@@ -816,6 +831,18 @@ def create_server(
         except WorkspaceToolError as exc:
             log_action_error(
                 "view_image",
+                activity={
+                    "activity_id": new_activity_id("image"),
+                    "kind": "generic",
+                    "phase": "failed",
+                    "payload": {
+                        "operation": "view_image",
+                        "workspace_id": request.workspace_id,
+                        "path": request.path,
+                        "error_code": exc.code,
+                        "diagnostic": exc.message,
+                    },
+                },
                 workspace_id=request.workspace_id,
                 path=request.path,
                 output=request.output,

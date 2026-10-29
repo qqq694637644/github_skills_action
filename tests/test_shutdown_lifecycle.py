@@ -12,15 +12,19 @@ import os
 import queue
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import uvicorn
 from starlette.applications import Starlette
 
+from workspace_mcp import server as server_module
 from workspace_mcp.server import _serve_with_shutdown_event
 from workspace_mcp.shutdown_control import WindowsControlEvent, signal_control_event
 from workspace_mcp.workspace_operations import OperationSettings, WorkspaceOperationManager
@@ -105,6 +109,46 @@ def test_real_uvicorn_lifespan_runs_on_private_event() -> None:
         assert lifecycle == ["started", "stopped"]
 
     asyncio.run(exercise())
+
+
+def test_main_starts_real_uvicorn_and_shuts_down_on_private_event() -> None:
+    """Exercise main(), including Uvicorn configuration, not just the watcher."""
+    startup = threading.Event()
+    transitions: list[str] = []
+    failures: list[BaseException] = []
+    name = rf"Local\GitSkill-MCP-{uuid.uuid4().hex}"
+
+    @asynccontextmanager
+    async def lifespan(_: Starlette):
+        transitions.append("started")
+        startup.set()
+        try:
+            yield
+        finally:
+            transitions.append("stopped")
+
+    def run_main() -> None:
+        try:
+            server_module.main()
+        except BaseException as exc:
+            failures.append(exc)
+
+    settings = SimpleNamespace(host="127.0.0.1", port=0)
+    with (
+        patch.dict(os.environ, {"WORKSPACE_MCP_SHUTDOWN_EVENT": name}),
+        patch.object(server_module.MCPSettings, "from_env", return_value=settings),
+        patch.object(server_module, "create_app", return_value=Starlette(lifespan=lifespan)),
+    ):
+        thread = threading.Thread(target=run_main, daemon=True)
+        thread.start()
+        try:
+            assert startup.wait(timeout=5), f"MCP startup failed: {failures}"
+        finally:
+            signal_control_event(name)
+            thread.join(timeout=5)
+    assert not thread.is_alive(), "Uvicorn did not stop after the event"
+    assert not failures, f"MCP startup raised: {failures}"
+    assert transitions == ["started", "stopped"]
 
 
 def test_shutdown_closes_admission_gate_before_any_command_starts(tmp_path: Path) -> None:

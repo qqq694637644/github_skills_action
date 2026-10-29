@@ -1325,7 +1325,6 @@ def main() -> None:
     # unauthenticated/public shutdown route is added to the MCP HTTP server.
     with WindowsControlEvent(stop_event_name) as stop_event:
         config = uvicorn.Config(app, host=settings.host, port=settings.port)
-        config.setup_event_loop()
         server = uvicorn.Server(config)
         asyncio.run(_serve_with_shutdown_event(server, stop_event))
 

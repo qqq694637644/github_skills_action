@@ -130,12 +130,8 @@ class OperationRuntime:
     stored_bytes: int = 0
     activity_command: str = ""
     activity_secrets: tuple[str, ...] = ()
-    activity_output: dict[str, str] = field(
-        default_factory=lambda: {"stdout": "", "stderr": ""}
-    )
-    activity_preview: dict[str, str] = field(
-        default_factory=lambda: {"stdout": "", "stderr": ""}
-    )
+    activity_output: dict[str, str] = field(default_factory=lambda: {"stdout": "", "stderr": ""})
+    activity_preview: dict[str, str] = field(default_factory=lambda: {"stdout": "", "stderr": ""})
     activity_flush_task: asyncio.Task[None] | None = None
 
 
@@ -257,6 +253,7 @@ class WorkspaceOperationManager:
         self._runtimes: dict[str, OperationRuntime] = {}
         self._idempotency: dict[tuple[str, str], str] = {}
         self._background_cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._shutting_down = False
         self._load_records()
         self.recover_running_operations()
         self.prune_terminal_operations()
@@ -330,6 +327,11 @@ class WorkspaceOperationManager:
         ).hexdigest()
         idempotency_index = (idempotency_key, request_hash)
         async with self._registry_lock:
+            if self._shutting_down:
+                raise WorkspaceToolError(
+                    "WORKSPACE_SHUTTING_DOWN",
+                    "The MCP server is shutting down and cannot accept new commands.",
+                )
             existing_id = self._idempotency.get(idempotency_index)
             if existing_id:
                 return self._public_record(self._records[existing_id])
@@ -504,15 +506,28 @@ class WorkspaceOperationManager:
         return self._public_record(record)
 
     async def shutdown(self) -> None:
-        runtimes = list(self._runtimes.values())
-        for runtime in runtimes:
-            if runtime.record.get("state") == "running":
-                runtime.shutdown_event.set()
+        # Close the admission gate before collecting work: there must not be a
+        # race where a new PowerShell task starts after shutdown begins.
+        async with self._registry_lock:
+            self._shutting_down = True
+            runtimes = list(self._runtimes.values())
         tasks = [r.task for r in runtimes if r.task is not None and not r.task.done()]
         if tasks:
-            _, pending = await asyncio.wait(tasks, timeout=self.settings.shutdown_seconds)
+            # Give in-flight commands a short chance to finish naturally.
+            _, pending = await asyncio.wait(tasks, timeout=min(3, self.settings.shutdown_seconds))
+            # Then tell each remaining operation to clean up its own process
+            # tree. That path tries Ctrl+Break, then terminates its Job Object.
+            for runtime in runtimes:
+                if runtime.task in pending:
+                    runtime.shutdown_event.set()
+            if pending:
+                _, pending = await asyncio.wait(
+                    pending, timeout=self.settings.kill_grace_seconds + 3
+                )
             for task in pending:
                 task.cancel()
+            if pending:
+                await asyncio.wait(pending, timeout=self.settings.kill_grace_seconds)
         cleanup_tasks = [task for task in self._background_cleanup_tasks if not task.done()]
         if cleanup_tasks:
             await asyncio.wait(cleanup_tasks, timeout=self.settings.kill_grace_seconds)
@@ -776,6 +791,7 @@ class WorkspaceOperationManager:
                 terminal_state = "interrupted"
                 error_code = "mcp_server_shutdown"
                 error_message = "MCP server shutdown interrupted the command."
+                await _request_graceful_process_exit(proc, self.settings.kill_grace_seconds)
                 await _terminate_process_tree(proc, job, self.settings.kill_grace_seconds)
             else:
                 terminal_state = "timed_out"
@@ -1070,6 +1086,27 @@ def _build_pwsh_script(script: str, *, plain_output: bool, utf8_output: bool) ->
             ]
         )
     return "\n".join([*prelude, script]) if prelude else script
+
+
+async def _request_graceful_process_exit(
+    proc: asyncio.subprocess.Process, grace_seconds: int
+) -> None:
+    """Best-effort cooperative console signal, never a replacement for Job cleanup."""
+    if proc.returncode is not None:
+        return
+    try:
+        if os.name == "nt":
+            # Operations use CREATE_NEW_PROCESS_GROUP. When a console is
+            # attached, CTRL_BREAK lets PowerShell run its cleanup handlers.
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            proc.terminate()
+    except (OSError, ProcessLookupError, ValueError):
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=min(max(1, grace_seconds), 2))
+    except TimeoutError:
+        pass
 
 
 async def _terminate_process_tree(
